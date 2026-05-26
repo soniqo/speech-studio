@@ -1,0 +1,117 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel in-flight runs on the same ref when a new push lands. Saves Apple
+# Silicon minutes which are 10x cheaper than they used to be but still cost.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: macOS (Apple Silicon)
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out speech-studio
+        uses: actions/checkout@v4
+        with:
+          path: speech-studio
+
+      # The Swift sidecar's Package.swift uses a path dependency on
+      # ../../speech-swift to match local-dev layout. Mirror that on CI by
+      # checking the sibling repo out next to this one.
+      - name: Check out speech-swift (sibling repo)
+        uses: actions/checkout@v4
+        with:
+          repository: soniqo/speech-swift
+          path: speech-swift
+          ref: main
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            speech-studio/src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('speech-studio/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Set up Node + pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: speech-studio/pnpm-lock.yaml
+
+      - name: Install JS deps
+        working-directory: speech-studio
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Swift sidecar
+        working-directory: speech-studio/swift-sidecar
+        # Release build so the produced binary is what we'd ship. Debug builds
+        # also work but they're huge and the link step is slower on CI.
+        run: swift build -c release
+
+      - name: Run Rust unit tests
+        working-directory: speech-studio/src-tauri
+        run: cargo test --lib
+
+      - name: Run frontend tests
+        working-directory: speech-studio
+        run: pnpm test
+
+      - name: Type-check
+        working-directory: speech-studio
+        run: pnpm tsc --noEmit
+
+      - name: Build Tauri app
+        working-directory: speech-studio
+        run: pnpm tauri build --no-bundle
+        # --no-bundle: we don't have signing identities on CI, so skip the .dmg
+        # codesigning step. The .app and the underlying binary are still built.
+
+      - name: Stage build artifacts
+        working-directory: speech-studio
+        run: |
+          mkdir -p artifacts
+          # Copy the dev-built sidecar binary (release variant) so we can ship
+          # both pieces from one workflow run. Sidecar is what holds the speech
+          # engine; the .app shell launches it.
+          if [ -f swift-sidecar/.build/release/soniqo-tts-sidecar ]; then
+            cp swift-sidecar/.build/release/soniqo-tts-sidecar artifacts/
+          fi
+          # The unbundled Tauri binary.
+          if [ -f src-tauri/target/release/speech-studio ]; then
+            cp src-tauri/target/release/speech-studio artifacts/
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: speech-studio-macos-arm64
+          path: speech-studio/artifacts/
+          if-no-files-found: warn
+          retention-days: 14
