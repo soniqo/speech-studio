@@ -94,10 +94,18 @@ jobs:
           # `binaries/soniqo-tts-sidecar-aarch64-apple-darwin`).
           cp swift-sidecar/.build/arm64-apple-macosx/release/soniqo-tts-sidecar \
              src-tauri/binaries/soniqo-tts-sidecar-aarch64-apple-darwin
-          # MLX metallib is identical between debug + release builds; the
-          # release pass doesn't emit it so we copy the debug-build artifact.
-          cp swift-sidecar/.build/arm64-apple-macosx/debug/mlx.metallib \
-             src-tauri/binaries/mlx.metallib
+          # MLX-Swift emits mlx.metallib as a side-effect of building targets
+          # that link MLX, but the exact path varies (debug vs release dir).
+          # Grab whichever copy SwiftPM produced.
+          metallib=$(find swift-sidecar/.build -name mlx.metallib -type f | head -1)
+          if [ -z "$metallib" ]; then
+            echo "::error::mlx.metallib not produced by swift build; cannot bundle."
+            find swift-sidecar/.build -maxdepth 4 -type d | head -20
+            exit 1
+          fi
+          echo "Using metallib at: $metallib"
+          cp "$metallib" src-tauri/binaries/mlx.metallib
+          ls -la src-tauri/binaries/
 
       - name: Run Rust unit tests
         working-directory: speech-studio/src-tauri
