@@ -73,13 +73,16 @@ jobs:
 
       - name: Build Swift sidecar
         working-directory: speech-studio/swift-sidecar
-        # Two builds: a debug pass so MLX-Swift emits `mlx.metallib` (release
-        # builds skip metallib generation), then the release pass for the
-        # binary we ship. The debug pass populates SwiftPM's checkout cache
-        # too, so the release pass is mostly link-only.
-        run: |
-          swift build
-          swift build -c release
+        run: swift build -c release
+
+      - name: Build speech-swift (for metallib)
+        # MLX-Swift drops `mlx.metallib` into `.build/<triple>/<config>/` as a
+        # side-effect, but only for some targets. Building speech-swift's
+        # main `speech` CLI is the most reliable trigger — that's the same
+        # binary the Homebrew formula ships, and its build emits the metallib
+        # next to the executable.
+        working-directory: speech-swift
+        run: swift build -c release --product speech
 
       - name: Stage sidecar + metallib for Tauri bundler
         # Has to run before any `cargo` invocation: tauri-build verifies
@@ -92,15 +95,14 @@ jobs:
           # externalBin convention: Tauri appends the target triple to the
           # configured name (`binaries/soniqo-tts-sidecar` → look for
           # `binaries/soniqo-tts-sidecar-aarch64-apple-darwin`).
-          cp swift-sidecar/.build/arm64-apple-macosx/release/soniqo-tts-sidecar \
+          cp swift-sidecar/.build/release/soniqo-tts-sidecar \
              src-tauri/binaries/soniqo-tts-sidecar-aarch64-apple-darwin
-          # MLX-Swift emits mlx.metallib as a side-effect of building targets
-          # that link MLX, but the exact path varies (debug vs release dir).
-          # Grab whichever copy SwiftPM produced.
-          metallib=$(find swift-sidecar/.build -name mlx.metallib -type f | head -1)
+          # Grab whichever metallib SwiftPM produced — sidecar tree first,
+          # then sibling speech-swift checkout.
+          metallib=$(find swift-sidecar/.build ../speech-swift/.build -name mlx.metallib -type f 2>/dev/null | head -1)
           if [ -z "$metallib" ]; then
-            echo "::error::mlx.metallib not produced by swift build; cannot bundle."
-            find swift-sidecar/.build -maxdepth 4 -type d | head -20
+            echo "::error::mlx.metallib not found in any build tree"
+            find swift-sidecar/.build ../speech-swift/.build -type d 2>/dev/null | head -60
             exit 1
           fi
           echo "Using metallib at: $metallib"
