@@ -23,7 +23,15 @@ let package = Package(
                 .product(name: "Qwen3TTS", package: "speech-swift"),
                 .product(name: "AudioCommon", package: "speech-swift")
             ],
-            path: "Sources/soniqo-tts-sidecar"
+            path: "Sources/soniqo-tts-sidecar",
+            // Swift 5 language mode keeps the sidecar's holder classes (which
+            // wrap inherently single-threaded MLX model objects) compiling
+            // without rewriting the cross-await `await holder.load()` calls
+            // to thread Sendable returns. Speech-swift's model classes aren't
+            // marked Sendable; under Swift 6 mode that's a hard error.
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
         )
     ]
 )
