@@ -32,6 +32,40 @@ fn sidecar_path() -> PathBuf {
         .join("soniqo-tts-sidecar")
 }
 
+// MLX-Swift looks for `mlx.metallib` via `dladdr` on its own code — which in
+// our bundle resolves to the sidecar binary's directory (`Contents/MacOS/`).
+// Tauri's `resources` config places the file at `Contents/Resources/`, one
+// level up, so MLX never finds it and `init_model` aborts with
+// "Failed to load the default metallib". Until the metallib moves to
+// `externalBin` (next to the sidecar at bundle time), colocate it on demand:
+// symlink the bundled copy into the sidecar's directory the first time the
+// process starts. Idempotent — does nothing if the file is already present
+// or unreachable.
+fn colocate_metallib(sidecar_dir: &std::path::Path) {
+    let dest = sidecar_dir.join("mlx.metallib");
+    if dest.exists() {
+        return;
+    }
+    let Some(macos_parent) = sidecar_dir.parent() else {
+        return;
+    };
+    let src = macos_parent.join("Resources").join("mlx.metallib");
+    if !src.exists() {
+        return;
+    }
+    if let Err(e) = std::os::unix::fs::symlink(&src, &dest) {
+        // Symlink failed (e.g. read-only Contents/MacOS on a quarantined
+        // bundle). Fall back to a copy so a fresh install still works after
+        // the first Gatekeeper bypass. If both fail, swallow — the sidecar
+        // will spawn and surface a clear MLX error to the frontend.
+        if let Err(e2) = std::fs::copy(&src, &dest) {
+            eprintln!(
+                "[speech-studio] failed to colocate mlx.metallib: symlink={e}, copy={e2}"
+            );
+        }
+    }
+}
+
 struct SidecarProcess {
     child: Child,
     stdin: ChildStdin,
@@ -60,6 +94,9 @@ impl Drop for SidecarManager {
 impl SidecarManager {
     fn spawn() -> Result<SidecarProcess, String> {
         let path = sidecar_path();
+        if let Some(dir) = path.parent() {
+            colocate_metallib(dir);
+        }
         let mut child = Command::new(&path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1164,6 +1201,52 @@ mod tests {
         assert!(g.coverage >= 0.75, "expected >=0.75, got {}", g.coverage);
         assert_eq!(g.prefix_words, 0);
         assert!(g.is_clean(), "should accept minor substitution");
+    }
+
+    #[test]
+    fn colocate_metallib_simulates_bundle_layout() {
+        // Simulate `<App>.app/Contents/{MacOS,Resources}/` and verify the
+        // helper links the bundled metallib next to the sidecar binary.
+        let root = std::env::temp_dir().join(format!(
+            "soniqo-colocate-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let macos = root.join("MacOS");
+        let resources = root.join("Resources");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::create_dir_all(&resources).unwrap();
+        let src = resources.join("mlx.metallib");
+        std::fs::write(&src, b"fake metallib bytes").unwrap();
+
+        // Sidecar dir doesn't have it yet.
+        let dest = macos.join("mlx.metallib");
+        assert!(!dest.exists());
+
+        colocate_metallib(&macos);
+        assert!(dest.exists(), "expected colocated metallib");
+        // Reads back identical contents (whether via symlink or copy).
+        assert_eq!(std::fs::read(&dest).unwrap(), b"fake metallib bytes");
+
+        // Idempotent: second call is a no-op and doesn't error.
+        colocate_metallib(&macos);
+        assert!(dest.exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn colocate_metallib_noop_when_source_absent() {
+        // Dev/unbundled layout: no Resources/ sibling. Helper should do nothing
+        // (sidecar is expected to find the metallib via the dev-path workflow).
+        let root = std::env::temp_dir().join(format!(
+            "soniqo-colocate-noop-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let macos = root.join("MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        colocate_metallib(&macos);
+        assert!(!macos.join("mlx.metallib").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
