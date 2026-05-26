@@ -61,7 +61,9 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # pnpm 11 requires Node >= 22.13 since its 11.3+ release pulled in
+          # the built-in `node:sqlite` module.
+          node-version: 22
           cache: pnpm
           cache-dependency-path: speech-studio/pnpm-lock.yaml
 

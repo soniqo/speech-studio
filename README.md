@@ -76,4 +76,4 @@ See `AGENTS.md` for project conventions. Short version: branch → PR → merge,
 
 ## Licence
 
-TBD — placeholder while v0 stabilises.
+[Apache License 2.0](LICENSE) — same as [speech-swift](https://github.com/soniqo/speech-swift) and [speech-core](https://github.com/soniqo/speech-core).
