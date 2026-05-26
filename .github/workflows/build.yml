@@ -81,19 +81,11 @@ jobs:
           swift build
           swift build -c release
 
-      - name: Run Rust unit tests
-        working-directory: speech-studio/src-tauri
-        run: cargo test --lib
-
-      - name: Run frontend tests
-        working-directory: speech-studio
-        run: pnpm test
-
-      - name: Type-check
-        working-directory: speech-studio
-        run: pnpm tsc --noEmit
-
       - name: Stage sidecar + metallib for Tauri bundler
+        # Has to run before any `cargo` invocation: tauri-build verifies
+        # externalBin paths in the build script, so even `cargo test --lib`
+        # fails if `binaries/soniqo-tts-sidecar-aarch64-apple-darwin` is
+        # missing.
         working-directory: speech-studio
         run: |
           mkdir -p src-tauri/binaries
@@ -106,6 +98,18 @@ jobs:
           # release pass doesn't emit it so we copy the debug-build artifact.
           cp swift-sidecar/.build/arm64-apple-macosx/debug/mlx.metallib \
              src-tauri/binaries/mlx.metallib
+
+      - name: Run Rust unit tests
+        working-directory: speech-studio/src-tauri
+        run: cargo test --lib
+
+      - name: Run frontend tests
+        working-directory: speech-studio
+        run: pnpm test
+
+      - name: Type-check
+        working-directory: speech-studio
+        run: pnpm tsc --noEmit
 
       - name: Build Tauri bundle (.app + .dmg, unsigned)
         working-directory: speech-studio
