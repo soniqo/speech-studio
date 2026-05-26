@@ -73,9 +73,13 @@ jobs:
 
       - name: Build Swift sidecar
         working-directory: speech-studio/swift-sidecar
-        # Release build so the produced binary is what we'd ship. Debug builds
-        # also work but they're huge and the link step is slower on CI.
-        run: swift build -c release
+        # Two builds: a debug pass so MLX-Swift emits `mlx.metallib` (release
+        # builds skip metallib generation), then the release pass for the
+        # binary we ship. The debug pass populates SwiftPM's checkout cache
+        # too, so the release pass is mostly link-only.
+        run: |
+          swift build
+          swift build -c release
 
       - name: Run Rust unit tests
         working-directory: speech-studio/src-tauri
@@ -89,31 +93,48 @@ jobs:
         working-directory: speech-studio
         run: pnpm tsc --noEmit
 
-      - name: Build Tauri app
-        working-directory: speech-studio
-        run: pnpm tauri build --no-bundle
-        # --no-bundle: we don't have signing identities on CI, so skip the .dmg
-        # codesigning step. The .app and the underlying binary are still built.
-
-      - name: Stage build artifacts
+      - name: Stage sidecar + metallib for Tauri bundler
         working-directory: speech-studio
         run: |
-          mkdir -p artifacts
-          # Copy the dev-built sidecar binary (release variant) so we can ship
-          # both pieces from one workflow run. Sidecar is what holds the speech
-          # engine; the .app shell launches it.
-          if [ -f swift-sidecar/.build/release/soniqo-tts-sidecar ]; then
-            cp swift-sidecar/.build/release/soniqo-tts-sidecar artifacts/
-          fi
-          # The unbundled Tauri binary.
-          if [ -f src-tauri/target/release/speech-studio ]; then
-            cp src-tauri/target/release/speech-studio artifacts/
-          fi
+          mkdir -p src-tauri/binaries
+          # externalBin convention: Tauri appends the target triple to the
+          # configured name (`binaries/soniqo-tts-sidecar` → look for
+          # `binaries/soniqo-tts-sidecar-aarch64-apple-darwin`).
+          cp swift-sidecar/.build/arm64-apple-macosx/release/soniqo-tts-sidecar \
+             src-tauri/binaries/soniqo-tts-sidecar-aarch64-apple-darwin
+          # MLX metallib is identical between debug + release builds; the
+          # release pass doesn't emit it so we copy the debug-build artifact.
+          cp swift-sidecar/.build/arm64-apple-macosx/debug/mlx.metallib \
+             src-tauri/binaries/mlx.metallib
 
-      - name: Upload artifacts
+      - name: Build Tauri bundle (.app + .dmg, unsigned)
+        working-directory: speech-studio
+        # No --no-bundle: we want the .app + .dmg. The macOS bundler
+        # ad-hoc signs without a Developer ID; users will need to right-
+        # click → Open the first time to bypass Gatekeeper.
+        run: pnpm tauri build
+
+      - name: Upload .dmg
         uses: actions/upload-artifact@v4
         with:
-          name: speech-studio-macos-arm64
-          path: speech-studio/artifacts/
+          name: speech-studio-macos-arm64-dmg
+          path: speech-studio/src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Upload .app (zipped)
+        uses: actions/upload-artifact@v4
+        with:
+          name: speech-studio-macos-arm64-app
+          path: speech-studio/src-tauri/target/release/bundle/macos/*.app
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Attach the .dmg to a GitHub Release when a tag like `v0.1.0` is
+      # pushed. Manual `git push origin v0.1.0` triggers this.
+      - name: Attach .dmg to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: speech-studio/src-tauri/target/release/bundle/dmg/*.dmg
+          generate_release_notes: true

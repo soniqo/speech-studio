@@ -9,8 +9,21 @@ use tauri_plugin_dialog::DialogExt;
 // ---------- sidecar process management ----------
 
 fn sidecar_path() -> PathBuf {
-    // Dev path. Production builds will resolve via Tauri's externalBin + path
-    // resolver; that wiring lands when we bundle Qwen3-TTS for distribution.
+    // In a Tauri release bundle the sidecar lives next to the main binary at
+    // `<App>.app/Contents/MacOS/soniqo-tts-sidecar` (Tauri's externalBin
+    // bundler strips the target-triple suffix). In dev we read from the Swift
+    // package's debug build dir so `pnpm tauri dev` and `cargo run` both
+    // find the freshly-built sidecar.
+    if !cfg!(debug_assertions) {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                let bundled = parent.join("soniqo-tts-sidecar");
+                if bundled.exists() {
+                    return bundled;
+                }
+            }
+        }
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("swift-sidecar")
