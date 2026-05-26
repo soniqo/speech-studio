@@ -1,0 +1,53 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+.idea
+**/.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Swift sidecar
+swift-sidecar/.build/
+swift-sidecar/.swiftpm/
+swift-sidecar/Package.resolved
+.swiftpm/
+
+# Tooling caches
+.cache/
+.turbo/
+.parcel-cache/
+*.tmp
+
+# Test coverage
+coverage/
+*.lcov
+
+# Local env / secrets
+.env
+.env.local
+.env.*.local
+
+# Project artifacts (models, generated audio, exports)
+models/
+cache/
+out/
+exports/
+*.wav.tmp

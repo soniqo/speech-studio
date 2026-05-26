@@ -1,0 +1,89 @@
+import { Plus, Video, Mic, AudioWaveform } from "lucide-react";
+import { useProjectStore } from "../state/projectStore";
+import type { SpeakerTrack, Track } from "../types/project";
+import { Button } from "./ui/button";
+import { cn } from "@/lib/utils";
+
+function TrackIcon({ track }: { track: Track }) {
+  if (track.kind === "video") return <Video className="h-3.5 w-3.5 text-amber-300/80" />;
+  if (track.kind === "speaker") return <Mic className="h-3.5 w-3.5 text-primary" />;
+  return <AudioWaveform className="h-3.5 w-3.5 text-orange-300/70" />;
+}
+
+function metaForTrack(track: Track, voiceName?: string): string {
+  if (track.kind === "video") return "Video";
+  if (track.kind === "speaker")
+    return voiceName ? `Voice: ${voiceName}` : "No voice assigned";
+  return "Audio";
+}
+
+export function TrackList() {
+  const project = useProjectStore((s) => s.project);
+  const selection = useProjectStore((s) => s.selection);
+  const select = useProjectStore((s) => s.select);
+  const renameTrack = useProjectStore((s) => s.renameTrack);
+  const addTrack = useProjectStore((s) => s.addTrack);
+
+  function addSpeaker() {
+    const idx = project.tracks.filter((t) => t.kind === "speaker").length + 1;
+    const t: SpeakerTrack = {
+      kind: "speaker",
+      id: crypto.randomUUID(),
+      name: `Speaker ${idx}`,
+      clips: [],
+    };
+    addTrack(t);
+    select({ kind: "track", id: t.id });
+  }
+
+  return (
+    <div className="p-2">
+      <div className="mb-2 flex items-center justify-between px-1.5">
+        <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          Tracks
+        </span>
+        <Button variant="ghost" size="sm" onClick={addSpeaker} title="Add speaker track" className="h-6 px-1.5 text-xs">
+          <Plus className="mr-1 h-3 w-3" />
+          Speaker
+        </Button>
+      </div>
+      {project.tracks.length === 0 && (
+        <div className="rounded-md border border-dashed border-border/60 bg-background/40 px-3 py-3 text-xs text-muted-foreground">
+          No tracks yet. Add a speaker.
+        </div>
+      )}
+      <div className="space-y-1">
+        {project.tracks.map((t) => {
+          const voiceId = t.kind === "speaker" ? t.voiceId : undefined;
+          const voiceName = project.voices.find((v) => v.id === voiceId)?.name;
+          const selected = selection.kind === "track" && selection.id === t.id;
+          return (
+            <button
+              key={t.id}
+              className={cn(
+                "group flex w-full items-center gap-2 rounded-md border border-transparent px-2 py-1.5 text-left transition-colors",
+                selected
+                  ? "border-primary/40 bg-primary/10"
+                  : "hover:border-border hover:bg-accent/30",
+              )}
+              onClick={() => select({ kind: "track", id: t.id })}
+            >
+              <TrackIcon track={t} />
+              <div className="min-w-0 flex-1">
+                <input
+                  className="block w-full bg-transparent text-sm focus:outline-none"
+                  value={t.name}
+                  onChange={(e) => renameTrack(t.id, e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                />
+                <div className="truncate text-[11px] text-muted-foreground">
+                  {metaForTrack(t, voiceName)}
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,107 @@
+import { invoke } from "@tauri-apps/api/core";
+import type { GenerationMode, Voice } from "../types/project";
+
+export interface PingResult {
+  id: string;
+  ok: boolean;
+  result?: { pong: boolean; version: string };
+  error?: string;
+}
+
+export function pingSidecar(): Promise<PingResult> {
+  return invoke<PingResult>("ping_sidecar");
+}
+
+export function initModel(): Promise<void> {
+  return invoke<void>("init_model");
+}
+
+export interface PickedVideo {
+  path: string;
+  durationSec: number;
+}
+
+export function pickVideo(): Promise<PickedVideo | null> {
+  return invoke<PickedVideo | null>("pick_video");
+}
+
+export interface PickedAudio {
+  path: string;
+}
+
+export function pickAudio(): Promise<PickedAudio | null> {
+  return invoke<PickedAudio | null>("pick_audio");
+}
+
+export interface CloneVoiceArgs {
+  referencePath: string;
+  name: string;
+  referenceText: string;
+}
+
+export function cloneVoice(args: CloneVoiceArgs): Promise<Voice> {
+  return invoke<Voice>("clone_voice", { args });
+}
+
+export interface SynthesizeClipArgs {
+  clipId: string;
+  text: string;
+  voiceId: string;
+  referenceAudioPath: string;
+  referenceText: string;
+  mode: GenerationMode;
+  targetDurationSec?: number;
+}
+
+export interface SynthesizeClipResult {
+  audioPath: string;
+}
+
+export function synthesizeClip(args: SynthesizeClipArgs): Promise<SynthesizeClipResult> {
+  return invoke<SynthesizeClipResult>("synthesize_clip", { args });
+}
+
+export interface ExportClip {
+  startSec: number;
+  audioPath: string;
+}
+
+export interface ExportProjectArgs {
+  outPath: string;
+  durationSec: number;
+  clips: ExportClip[];
+}
+
+export interface ExportProjectResult {
+  outPath: string;
+  sampleRate: number;
+  durationSec: number;
+  clipCount: number;
+}
+
+export function exportProject(args: ExportProjectArgs): Promise<ExportProjectResult> {
+  return invoke<ExportProjectResult>("export_project", { args });
+}
+
+export interface DemoVoiceSeed {
+  referenceAudioPath: string;
+  referenceText: string;
+}
+
+export interface DemoClipSeed {
+  speakerIndex: number;
+  /** Path to a pre-rendered WAV if the line was already cached. */
+  audioPath?: string;
+  /** Duration of the cached WAV in seconds, if cached. */
+  durationSec?: number;
+  text: string;
+}
+
+export interface DemoSeed {
+  voices: DemoVoiceSeed[];
+  clips: DemoClipSeed[];
+}
+
+export function seedDemo(): Promise<DemoSeed> {
+  return invoke<DemoSeed>("seed_demo");
+}
