@@ -27,7 +27,7 @@ The clone is local. The synth is local. No audio leaves your machine.
 Wrap a line in a parenthetical tag to steer the prosody:
 
 ```
-(soft) I never thought we'd make it this far.
+(dramatic) I never thought we'd make it this far.
 (warm) I knew you would make it, no matter what.
 (whispering) Just stay quiet for a moment, please.
 (intense) Then we end this together. Tonight.

@@ -335,10 +335,19 @@ async fn synthesize_clip(
     let mut best: Option<(String, Grade, u64)> = None;
     let mut last_error: Option<String> = None;
 
+    // Per-invocation salt so each regenerate writes to a fresh audio file —
+    // the sidecar names its output WAV after the request id. Without this,
+    // re-running synth on the same clip overwrites the previous file at the
+    // same path, and the frontend's `<audio key={path}>` doesn't remount
+    // because the string is identical (WKWebView then serves the cached
+    // response). The salt only changes the on-disk filename; identity of
+    // the clip in the project state is still args.clip_id.
+    let invocation_salt = uuid::Uuid::new_v4().simple().to_string();
+
     for (attempt_idx, &seed) in SEED_LADDER.iter().enumerate() {
         let cfg = CFG_LADDER[attempt_idx.min(CFG_LADDER.len() - 1)];
         let payload = serde_json::json!({
-            "id": format!("synth-{}-s{}", args.clip_id, seed),
+            "id": format!("synth-{}-s{}-{}", args.clip_id, seed, invocation_salt),
             "command": "synthesize_voxcpm2",
             "text": processed_text,
             "voiceId": args.voice_id,
@@ -870,7 +879,7 @@ async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
     //   Anna   — urgent whisper
     //   Marek  — intense, decisive close
     let lines: [(usize, &str); 4] = [
-        (0, "(soft) I never thought we'd make it this far."),
+        (0, "(dramatic) I never thought we'd make it this far."),
         (1, "(warm) I knew you would make it, no matter what."),
         (0, "(whispering) Just stay quiet for a moment, please."),
         (1, "(intense) Then we end this together. Tonight."),
