@@ -239,11 +239,14 @@ final class VoxCPM2Holder: @unchecked Sendable {
 
     func load() async throws -> VoxCPM2TTSModel {
         if let m = model { return m }
-        // Default variant: bf16 (full quality). The CLI uses the same
-        // default; int8/int4 are smaller but slightly less faithful.
-        // Override with SONIQO_VOXCPM2_MODEL_ID=aufklarer/VoxCPM2-MLX-<int8|int4>.
+        // Default variant: int8 (~2.75 GB on disk, ~3.1 GB MLX active). The
+        // bf16 variant is ~4.6 GB on disk / ~9 GB active and pushes total
+        // peak RSS above 11 GB on this 1.7B-param model. int8 stays under
+        // 6 GB peak with no audible loss for ICL voice cloning at the demo
+        // clip lengths. Override with
+        // SONIQO_VOXCPM2_MODEL_ID=aufklarer/VoxCPM2-MLX-<bf16|int4>.
         let modelId = ProcessInfo.processInfo.environment["SONIQO_VOXCPM2_MODEL_ID"]
-            ?? "aufklarer/VoxCPM2-MLX-bf16"
+            ?? "aufklarer/VoxCPM2-MLX-int8"
         logErr("[sidecar] loading VoxCPM2 model \(modelId)…")
         let m = try await VoxCPM2TTSModel.fromPretrained(
             modelId: modelId,
@@ -392,6 +395,29 @@ func extractFirstEmotionTag(_ s: String) -> (text: String, instruct: String?) {
     return (trimmedBody, instruct)
 }
 
+// MARK: - MLX memory
+
+// MLX defaults the buffer-pool cache limit to ~1.5× Metal's recommended
+// working-set size. On unified-memory Macs that lets RSS grow to tens of GB
+// after a handful of synth calls — KV / flow / vocoder buffers of varying
+// shapes never recycle and accumulate. Cap the cache to keep steady-state
+// memory predictable. Override with SONIQO_MLX_CACHE_MB=<int> when tuning.
+let mlxCacheMB: Int = {
+    if let raw = ProcessInfo.processInfo.environment["SONIQO_MLX_CACHE_MB"],
+       let n = Int(raw), n > 0 {
+        return n
+    }
+    return 1024
+}()
+MLX.Memory.cacheLimit = mlxCacheMB * 1024 * 1024
+logErr("[sidecar] mlx cacheLimit=\(mlxCacheMB) MB")
+
+func logMemorySnapshot(_ label: String) {
+    let snap = MLX.Memory.snapshot()
+    let mb = { (b: Int) in b / (1024 * 1024) }
+    logErr("[sidecar] mem \(label) active=\(mb(snap.activeMemory))M cache=\(mb(snap.cacheMemory))M peak=\(mb(snap.peakMemory))M")
+}
+
 // MARK: - main loop
 
 while let line = readLine(strippingNewline: true) {
@@ -494,6 +520,7 @@ while let line = readLine(strippingNewline: true) {
             let sampleRate = model.sampleRate
             try WAVWriter.write(samples: audio, sampleRate: sampleRate, to: outURL)
             let durationSec = Double(audio.count) / Double(sampleRate)
+            logMemorySnapshot("post-vox-synth")
             emit(SuccessResponse(
                 id: request.id,
                 ok: true,
