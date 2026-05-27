@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Lock, Unlock, Trash2, RefreshCw, History } from "lucide-react";
+import { Lock, Unlock, Trash2, RefreshCw, History, Loader2 } from "lucide-react";
 import { useProjectStore } from "../state/projectStore";
 import { ScriptEditor } from "./ScriptEditor";
 import { synthesizeClip } from "../ipc/commands";
@@ -44,6 +45,12 @@ export function Inspector() {
   const updateClip = useProjectStore((s) => s.updateClip);
   const assignVoiceToTrack = useProjectStore((s) => s.assignVoiceToTrack);
   const removeClip = useProjectStore((s) => s.removeClip);
+  // Regenerate-state hooks must live at the top, BEFORE any early return.
+  // Putting them inside the `selection.kind === 'clip'` branch violates the
+  // Rules of Hooks — when the user clicks a clip after the pane was on a
+  // different selection, the hook count changes and React unmounts the tree.
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [regenError, setRegenError] = useState<string | null>(null);
 
   if (selection.kind === "none") {
     const clipExtent = project.tracks.reduce((max, t) => {
@@ -221,10 +228,15 @@ export function Inspector() {
   const effectiveVoice = project.voices.find((v) => v.id === effectiveVoiceId);
   const current = clip;
   const canRegenerate =
-    !!effectiveVoice && !!effectiveVoice.referenceAudioPath && current.text.trim().length > 0;
+    !isRegenerating &&
+    !!effectiveVoice &&
+    !!effectiveVoice.referenceAudioPath &&
+    current.text.trim().length > 0;
 
   async function regenerate() {
     if (!effectiveVoice || !effectiveVoice.referenceAudioPath) return;
+    setIsRegenerating(true);
+    setRegenError(null);
     try {
       const out = await synthesizeClip({
         clipId: current.id,
@@ -248,10 +260,14 @@ export function Inspector() {
       });
     } catch (e) {
       console.error("synthesize_clip failed", e);
+      setRegenError(String(e));
+    } finally {
+      setIsRegenerating(false);
     }
   }
 
   function regenerateTitle(): string {
+    if (isRegenerating) return "Generating…";
     if (!effectiveVoice) return "Assign a voice first";
     if (!effectiveVoice.referenceAudioPath) return "Voice is missing a reference clip";
     if (current.text.trim().length === 0) return "Write something first";
@@ -329,8 +345,12 @@ export function Inspector() {
 
         <div className="flex flex-wrap gap-2">
           <Button onClick={regenerate} disabled={!canRegenerate} title={regenerateTitle()}>
-            <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-            Regenerate
+            {isRegenerating ? (
+              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+            )}
+            {isRegenerating ? "Generating…" : "Regenerate"}
           </Button>
           <Button
             variant="secondary"
@@ -339,11 +359,16 @@ export function Inspector() {
             {clip.locked ? <Unlock className="mr-1.5 h-3.5 w-3.5" /> : <Lock className="mr-1.5 h-3.5 w-3.5" />}
             {clip.locked ? "Unlock" : "Lock"}
           </Button>
-          <Button variant="ghost" onClick={() => removeClip(clip.id)}>
+          <Button variant="ghost" onClick={() => removeClip(clip.id)} disabled={isRegenerating}>
             <Trash2 className="mr-1.5 h-3.5 w-3.5" />
             Delete
           </Button>
         </div>
+        {regenError && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
+            {regenError}
+          </div>
+        )}
 
         {clip.renderedAudioPath && (
           <Section>
