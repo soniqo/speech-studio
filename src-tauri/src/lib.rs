@@ -1,13 +1,24 @@
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-// ---------- sidecar process management ----------
+// The macOS backend talks to the Swift/MLX sidecar; these imports are only
+// needed there. The non-macOS backend lives in `mod voxcpm2` and links
+// speech-core's LiteRT engine over FFI instead.
+#[cfg(target_os = "macos")]
+use std::io::{BufRead, BufReader, Write};
+#[cfg(target_os = "macos")]
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
 
+#[cfg(not(target_os = "macos"))]
+mod voxcpm2;
+
+// ---------- sidecar process management (macOS) ----------
+
+#[cfg(target_os = "macos")]
 fn sidecar_path() -> PathBuf {
     // In a Tauri release bundle the sidecar lives next to the main binary at
     // `<App>.app/Contents/MacOS/soniqo-tts-sidecar` (Tauri's externalBin
@@ -41,6 +52,7 @@ fn sidecar_path() -> PathBuf {
 // symlink the bundled copy into the sidecar's directory the first time the
 // process starts. Idempotent — does nothing if the file is already present
 // or unreachable.
+#[cfg(target_os = "macos")]
 fn colocate_metallib(sidecar_dir: &std::path::Path) {
     let dest = sidecar_dir.join("mlx.metallib");
     if dest.exists() {
@@ -66,17 +78,20 @@ fn colocate_metallib(sidecar_dir: &std::path::Path) {
     }
 }
 
+#[cfg(target_os = "macos")]
 struct SidecarProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 pub struct SidecarManager {
     inner: Mutex<Option<SidecarProcess>>,
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for SidecarManager {
     fn drop(&mut self) {
         // When the Tauri app exits, kill the sidecar child so it doesn't
@@ -91,6 +106,7 @@ impl Drop for SidecarManager {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl SidecarManager {
     fn spawn() -> Result<SidecarProcess, String> {
         let path = sidecar_path();
@@ -155,6 +171,7 @@ struct SidecarResponse {
 
 // ---------- commands ----------
 
+#[cfg(target_os = "macos")]
 #[tauri::command]
 async fn ping_sidecar(manager: State<'_, SidecarManager>) -> Result<SidecarResponse, String> {
     let payload = serde_json::json!({
@@ -165,6 +182,7 @@ async fn ping_sidecar(manager: State<'_, SidecarManager>) -> Result<SidecarRespo
     serde_json::from_value(raw).map_err(|e| e.to_string())
 }
 
+#[cfg(target_os = "macos")]
 #[tauri::command]
 async fn init_model(manager: State<'_, SidecarManager>) -> Result<(), String> {
     let payload = serde_json::json!({
@@ -177,6 +195,27 @@ async fn init_model(manager: State<'_, SidecarManager>) -> Result<(), String> {
         return Err(env.error.unwrap_or_else(|| "init_model failed".into()));
     }
     Ok(())
+}
+
+// Non-macOS: the LiteRT engine is linked in-process (no sidecar). ping is a
+// liveness check; init_model warms (and on first run downloads) the bundle.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn ping_sidecar(
+    _engine: State<'_, voxcpm2::Voxcpm2Manager>,
+) -> Result<SidecarResponse, String> {
+    Ok(SidecarResponse {
+        id: format!("ping-{}", uuid::Uuid::new_v4()),
+        ok: true,
+        result: Some(serde_json::json!({ "pong": true, "backend": "litert" })),
+        error: None,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn init_model(engine: State<'_, voxcpm2::Voxcpm2Manager>) -> Result<(), String> {
+    engine.init()
 }
 
 #[derive(Serialize)]
@@ -286,6 +325,7 @@ struct SynthesizeResult {
     audio_path: String,
 }
 
+#[cfg(target_os = "macos")]
 #[tauri::command]
 async fn synthesize_clip(
     manager: State<'_, SidecarManager>,
@@ -438,6 +478,69 @@ async fn synthesize_clip(
     Err(last_error.unwrap_or_else(|| "all synth attempts failed".into()))
 }
 
+// Non-macOS: clone via speech-core's LiteRT engine over FFI. There's no
+// seed-ladder/ASR-grade retry loop here — that path shells out to the macOS
+// `speech` CLI — so a single conditioned synthesis is returned.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn synthesize_clip(
+    engine: State<'_, voxcpm2::Voxcpm2Manager>,
+    args: SynthesizeArgs,
+) -> Result<SynthesizeResult, String> {
+    if args.text.trim().is_empty() {
+        return Err("clip text is empty".into());
+    }
+    if args.reference_audio_path.trim().is_empty() {
+        return Err("reference audio path is required".into());
+    }
+
+    let (ref_rate, _ch, ref_pcm) =
+        read_wav_pcm_mono(std::path::Path::new(&args.reference_audio_path))?;
+
+    let (instruction, body) = split_instruction(&args.text);
+    let processed = preprocess_target(&body);
+    let target_word_count = canon_tokens(&processed).len();
+    let max_tokens = (target_word_count.saturating_mul(12) + 40).clamp(60, 240) as i32;
+
+    let (audio, rate) =
+        engine.synthesize_cloned(&ref_pcm, ref_rate, &processed, &instruction, max_tokens)?;
+
+    // Fresh filename per call so the frontend's `<audio key={path}>` remounts
+    // (see the macOS path's invocation_salt note for why identity must change).
+    let salt = uuid::Uuid::new_v4().simple().to_string();
+    let out = clip_cache_dir().join(format!("synth-{}-{}.wav", args.clip_id, salt));
+    write_wav_pcm16_mono(&out, rate, &audio)?;
+    Ok(SynthesizeResult {
+        audio_path: out.to_string_lossy().into_owned(),
+    })
+}
+
+/// Split a leading emotion/style marker off the clip text into the VoxCPM2
+/// instruction. Handles `(style) body` (VoxCPM2's native prompt form) and
+/// `<tag>body</tag>` / `<tag>body`. With no marker the instruction is empty and
+/// the whole text is the body.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn split_instruction(text: &str) -> (String, String) {
+    let t = text.trim();
+    if let Some(rest) = t.strip_prefix('(') {
+        if let Some(end) = rest.find(')') {
+            return (rest[..end].trim().to_string(), rest[end + 1..].trim().to_string());
+        }
+    }
+    if let Some(rest) = t.strip_prefix('<') {
+        if let Some(end) = rest.find('>') {
+            let tag = rest[..end].trim().trim_start_matches('/').trim().to_string();
+            let mut body = rest[end + 1..].to_string();
+            let close = format!("</{}>", tag);
+            if let Some(pos) = body.find(&close) {
+                body.truncate(pos);
+            }
+            return (tag, body.trim().to_string());
+        }
+    }
+    (String::new(), t.to_string())
+}
+
 /// Replace inline periods ('. ' inside the body) with ', '. CosyVoice3's LLM
 /// treats the period-followed-by-space pattern as a sentence boundary and
 /// emits EOS too early on the second sentence — empirically observed at 7/12
@@ -521,6 +624,7 @@ impl Grade {
 /// Run `speech transcribe --engine parakeet` and grade the transcript against
 /// the target. Returns None only if the ASR command itself fails — an empty
 /// transcript is graded as 0% coverage, not None.
+#[cfg(target_os = "macos")]
 fn asr_grade(audio_path: &str, target: &str) -> Option<Grade> {
     let out = Command::new("speech")
         .args(["transcribe", "--engine", "parakeet", audio_path])
@@ -689,14 +793,43 @@ fn short_hash(s: &str) -> u32 {
     h
 }
 
+#[cfg(target_os = "macos")]
 fn clip_cache_dir() -> std::path::PathBuf {
     let home = dirs_home();
-    let dir = home
-        .join("Library/Caches/audio.soniqo.studio/clips");
+    let dir = home.join("Library/Caches/audio.soniqo.studio/clips");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
 
+// Non-macOS clip cache: $XDG_CACHE_HOME / %LOCALAPPDATA% / ~/.cache.
+#[cfg(not(target_os = "macos"))]
+fn clip_cache_dir() -> std::path::PathBuf {
+    let base = std::env::var("XDG_CACHE_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            #[cfg(windows)]
+            {
+                std::env::var("LOCALAPPDATA").ok().filter(|s| !s.is_empty()).map(std::path::PathBuf::from)
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| ".".into());
+            std::path::PathBuf::from(home).join(".cache")
+        });
+    let dir = base.join("audio.soniqo.studio").join("clips");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+#[cfg(target_os = "macos")]
 fn dirs_home() -> std::path::PathBuf {
     std::env::var("HOME")
         .map(std::path::PathBuf::from)
@@ -1122,7 +1255,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
             app.manage(SidecarManager::default());
+            #[cfg(not(target_os = "macos"))]
+            app.manage(voxcpm2::Voxcpm2Manager::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1213,6 +1349,23 @@ mod tests {
     }
 
     #[test]
+    fn split_instruction_extracts_markers() {
+        assert_eq!(
+            split_instruction("(dramatic) I never thought we'd make it."),
+            ("dramatic".to_string(), "I never thought we'd make it.".to_string())
+        );
+        assert_eq!(
+            split_instruction("<whisper>stay quiet</whisper>"),
+            ("whisper".to_string(), "stay quiet".to_string())
+        );
+        assert_eq!(
+            split_instruction("plain line, no marker"),
+            (String::new(), "plain line, no marker".to_string())
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn colocate_metallib_simulates_bundle_layout() {
         // Simulate `<App>.app/Contents/{MacOS,Resources}/` and verify the
         // helper links the bundled metallib next to the sidecar binary.
@@ -1243,6 +1396,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn colocate_metallib_noop_when_source_absent() {
         // Dev/unbundled layout: no Resources/ sibling. Helper should do nothing

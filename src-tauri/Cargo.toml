@@ -16,6 +16,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Builds speech-core's LiteRT engine for the non-macOS FFI backend. Compiled on
+# all hosts but only invoked when the target OS isn't macOS (see build.rs).
+cmake = "0.1"
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
