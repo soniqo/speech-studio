@@ -58,11 +58,15 @@ extern "C" fn collect_chunk(samples: *const f32, length: usize, _is_final: bool,
     out.extend_from_slice(slice);
 }
 
-/// Owns a `sc_voxcpm2_t`. Not `Sync`/`Send` by default (raw pointer); we guard
-/// it behind a `Mutex` in the manager so synthesis is serialized.
+/// Owns a `sc_voxcpm2_t`. The raw pointer is `!Send` by default; we assert
+/// `Send` because every access goes through the manager's `Mutex`, so the C
+/// engine is never touched concurrently even if the owning thread changes
+/// (Tauri runs commands on a worker pool). The `Mutex` then provides `Sync`.
 struct Synth {
     handle: ScVoxcpm2T,
 }
+
+unsafe impl Send for Synth {}
 
 impl Synth {
     fn create(bundle_dir: &Path) -> Result<Self, String> {
