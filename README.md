@@ -4,6 +4,14 @@
 
 Open-source desktop app for content creators. Clone a voice from a short reference clip, write a script line by line, and synthesize the whole thing in that voice — with inline emotion markers for tone.
 
+## 30-second demo
+
+A blind A/B/C — a real voice, the same voice cloned locally by Speech Studio on a MacBook, and the same voice cloned by ElevenLabs in the cloud. Can you tell which is which?
+
+[![Speech Studio — open-source voice cloning on a MacBook](https://i.ytimg.com/vi/EuIU8tOWyzg/maxresdefault.jpg)](https://www.youtube.com/watch?v=EuIU8tOWyzg)
+
+[Watch on YouTube →](https://youtu.be/EuIU8tOWyzg) (30 sec)
+
 > **Status:** v0 — audio-only MVP. Works on macOS 15+ on Apple Silicon. Video playback against the timeline and an audio-over-video export step are on the roadmap. Linux and Windows are also planned once an on-device controllable TTS lands in `speech-core`.
 
 ## What it does
