@@ -43,7 +43,13 @@ Wrap a line in a parenthetical tag to steer the prosody:
 
 Supported tags include `soft`, `warm`, `whispering`, `intense`, `excited`, `happy`, `calm`, `serious`, `surprised`, `sad`, `angry`, `dramatic`, `laughs`. Each maps to a short natural-language style instruction that's passed to the model; custom tags (e.g. `(slow and dreamy)`) pass through verbatim.
 
-## Quick start
+## Download
+
+Grab the latest macOS build from the [releases page](https://github.com/soniqo/speech-studio/releases/latest) — Apple Silicon `.dmg`, ~46 MB. Drag into `/Applications` and launch; first run downloads ~2.75 GB of model weights from Hugging Face into `~/.cache/huggingface/hub/`, then subsequent runs reuse the cache.
+
+Linux and Windows builds aren't published yet — for now see [Build from source](#build-from-source) below.
+
+## Build from source
 
 ### Prerequisites
 
@@ -52,7 +58,7 @@ Supported tags include `soft`, `warm`, `whispering`, `intense`, `excited`, `happ
 - Rust 1.95+ via `rustup` (`. "$HOME/.cargo/env"` if `cargo` isn't on `PATH`)
 - Node 20+ and `pnpm` 11+
 
-### Install + run (dev)
+### Dev loop
 
 ```bash
 pnpm install                          # installs the frontend + Tauri CLI
@@ -60,7 +66,7 @@ cd swift-sidecar && swift build       # builds the sidecar
 cd .. && pnpm tauri dev               # launches the app, hot-reloads the UI
 ```
 
-First run downloads ~2.75 GB of model weights from Hugging Face into `~/.cache/huggingface/hub/`. Subsequent runs reuse the cache.
+Same ~2.75 GB model download on first synth.
 
 ### Memory footprint
 
@@ -78,7 +84,7 @@ The MLX buffer cache is capped at 1 GB (`SONIQO_MLX_CACHE_MB` to override) — w
 
 Hit **Load demo** in the top bar. It bootstraps a Scene 04 storyboard with two cloned voices (Anna and Marek) and four lines of dialogue — one with each emotion marker — then synthesizes everything via VoxCPM2.
 
-### Release build
+### Packaging your own .app / .dmg
 
 ```bash
 cd swift-sidecar && swift build -c release
