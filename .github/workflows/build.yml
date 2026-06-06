@@ -210,6 +210,12 @@ jobs:
         working-directory: speech-studio
         run: pnpm install --frozen-lockfile
 
+      # Puts dumpbin/lib on PATH so fetch_litert.sh can synthesize the
+      # libLiteRt.lib import library from the wheel's DLL (the wheel ships only
+      # the .dll). Without this the sidecar link fails with LNK1181.
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Fetch libLiteRt (ai-edge-litert wheel)
         working-directory: speech-core
         shell: bash
