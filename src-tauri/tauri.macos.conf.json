@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["app", "dmg"],
+    "externalBin": [
+      "binaries/soniqo-tts-sidecar"
+    ],
+    "resources": {
+      "binaries/mlx.metallib": "mlx.metallib"
+    }
+  }
+}

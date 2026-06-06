@@ -1,0 +1,2 @@
+# CMake build tree (artifacts only; configure + build are reproducible).
+build/

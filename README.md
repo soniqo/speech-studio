@@ -12,7 +12,7 @@ A blind A/B/C — a real voice, the same voice cloned locally by Speech Studio o
 
 [Watch on YouTube →](https://youtu.be/EuIU8tOWyzg) (30 sec)
 
-> **Status:** v0 — audio-only MVP. Works on macOS 15+ on Apple Silicon. Video playback against the timeline and an audio-over-video export step are on the roadmap. Linux and Windows are also planned once an on-device controllable TTS lands in `speech-core`.
+> **Status:** v0 — audio-only MVP. Runs on macOS 15+ (Apple Silicon) and Windows / Linux (x86_64): macOS clones via MLX, Windows/Linux via `speech-core`'s on-device LiteRT backend. Video playback against the timeline and an audio-over-video export step are on the roadmap.
 
 ## What it does
 
@@ -25,10 +25,10 @@ The clone is local. The synth is local. No audio leaves your machine.
 
 ## Stack
 
-- **Tauri 2** shell (Rust + WKWebView) so the shipped app is a small native binary, not a Chromium fork.
+- **Tauri 2** shell (Rust + the OS-native WebView) so the shipped app is a small native binary, not a Chromium fork.
 - **React + Vite** frontend for the timeline, voice library, and script editor.
-- **Swift sidecar** (`swift-sidecar/`) holds the speech engines warm in a single process. Tauri spawns it once and talks NDJSON over stdin/stdout, so per-line synthesis is sub-second after the first warm-up.
-- **VoxCPM2** is the default speech engine (via [`speech-swift`](https://github.com/soniqo/speech-swift)). CosyVoice3 and Qwen3-TTS are kept as fallbacks behind `SONIQO_TTS_ENGINE=cosyvoice` / `qwen3`.
+- **A warm sidecar process** holds the speech engine resident so per-line synthesis is fast after the first warm-up. Tauri spawns it once and talks NDJSON over stdin/stdout. On macOS this is the **Swift sidecar** (`swift-sidecar/`, MLX); on Windows/Linux the **C++ sidecar** (`core-sidecar/`, LiteRT).
+- **VoxCPM2** is the speech engine on every platform — via [`speech-swift`](https://github.com/soniqo/speech-swift) (MLX) on macOS and [`speech-core`](https://github.com/soniqo/speech-core) (LiteRT) on Windows/Linux. On macOS, CosyVoice3 and Qwen3-TTS are kept as fallbacks behind `SONIQO_TTS_ENGINE=cosyvoice` / `qwen3`.
 
 ## Emotion markers
 
@@ -45,28 +45,46 @@ Supported tags include `soft`, `warm`, `whispering`, `intense`, `excited`, `happ
 
 ## Download
 
-Grab the latest macOS build from the [releases page](https://github.com/soniqo/speech-studio/releases/latest) — Apple Silicon `.dmg`, ~46 MB. Drag into `/Applications` and launch; first run downloads ~2.75 GB of model weights from Hugging Face into `~/.cache/huggingface/hub/`, then subsequent runs reuse the cache.
+| Platform | Artifact | Status |
+|---|---|---|
+| **macOS** (Apple Silicon) | `.dmg` — [releases page](https://github.com/soniqo/speech-studio/releases/latest) | ✅ Published |
+| **Windows** (x86_64) | `.msi` / `.exe` | 🚧 [Build from source](#build-from-source) |
+| **Linux** (x86_64) | `.deb` / `.AppImage` | 🚧 [Build from source](#build-from-source) |
 
-Linux and Windows builds aren't published yet — for now see [Build from source](#build-from-source) below.
+**macOS:** grab the latest `.dmg` (~46 MB), drag into `/Applications`, and launch. First run downloads ~2.75 GB of model weights from Hugging Face into `~/.cache/huggingface/hub/`; subsequent runs reuse the cache.
+
+**Windows / Linux:** the backend is implemented and runs from source today (the engine is [`speech-core`](https://github.com/soniqo/speech-core)'s on-device LiteRT VoxCPM2), and — like macOS — it **downloads the model on first run** (resumable). Publishing installers is gated only on a CI lane that builds and attaches the artifacts on tag, the same flow that produces the macOS `.dmg`. Until then, see [Build from source](#build-from-source).
 
 ## Build from source
 
 ### Prerequisites
 
-- macOS 15+ on Apple Silicon (M1/M2/M3/M4)
-- Xcode 26+ (Swift 6.0 toolchain)
-- Rust 1.95+ via `rustup` (`. "$HOME/.cargo/env"` if `cargo` isn't on `PATH`)
-- Node 20+ and `pnpm` 11+
+Common: Rust 1.95+ via `rustup` (`. "$HOME/.cargo/env"` if `cargo` isn't on `PATH`), Node 20+ and `pnpm` 11+.
 
-### Dev loop
+- **macOS:** 15+ on Apple Silicon (M1/M2/M3/M4), Xcode 26+ (Swift 6.0 toolchain).
+- **Windows / Linux (x86_64):** a C++17 toolchain + CMake 3.16+, and a built [`speech-core`](https://github.com/soniqo/speech-core) checkout with the LiteRT backend (`-DSPEECH_CORE_WITH_LITERT=ON -DLITERT_DIR=...`) plus the `VoxCPM2-LiteRT` model bundle.
+
+### Dev loop — macOS
 
 ```bash
 pnpm install                          # installs the frontend + Tauri CLI
-cd swift-sidecar && swift build       # builds the sidecar
+cd swift-sidecar && swift build       # builds the Swift sidecar
 cd .. && pnpm tauri dev               # launches the app, hot-reloads the UI
 ```
 
 Same ~2.75 GB model download on first synth.
+
+### Dev loop — Windows / Linux
+
+```bash
+pnpm install
+# Build the C++ sidecar against your speech-core checkout (defaults to ../speech-core):
+cmake -B core-sidecar/build core-sidecar -DSPEECH_CORE_DIR=../speech-core
+cmake --build core-sidecar/build --config Release
+# Point it at the VoxCPM2-LiteRT bundle, then launch:
+export SONIQO_VOXCPM2_BUNDLE_DIR=/path/to/speech-core/scripts/models-voxcpm2
+pnpm tauri dev
+```
 
 ### Memory footprint
 
@@ -94,7 +112,7 @@ cd .. && pnpm tauri build             # produces .app + .dmg under src-tauri/tar
 ## Sibling repos
 
 - [`speech-swift`](https://github.com/soniqo/speech-swift) — Apple Silicon speech engines (VoxCPM2, CosyVoice3, Qwen3-TTS, Parakeet, Silero VAD).
-- [`speech-core`](https://github.com/soniqo/speech-core) — C++ engines (STT, VAD, denoise) targeted for Linux/Windows.
+- [`speech-core`](https://github.com/soniqo/speech-core) — C++ engines (VoxCPM2 cloning on Windows/Linux, plus STT, VAD, denoise).
 
 ## Contributing
 
