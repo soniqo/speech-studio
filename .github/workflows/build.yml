@@ -154,3 +154,230 @@ jobs:
         with:
           files: speech-studio/src-tauri/target/release/bundle/dmg/*.dmg
           fail_on_unmatched_files: true
+
+  # ---------------------------------------------------------------------------
+  # Windows / Linux build the cross-platform C++ sidecar (core-sidecar), which
+  # links speech-core's LiteRT VoxCPM2 backend + the HF model downloader. Both
+  # check out speech-core as a sibling and build it with
+  # SPEECH_CORE_WITH_HF_DOWNLOAD=ON, so they depend on speech-core's main
+  # carrying sc_voxcpm2_create_from_pretrained (PR #48). Until that merges these
+  # jobs fail to compile — expected.
+  #
+  # NOTE: these produce installers but a runtime colocation of libLiteRt next to
+  # the bundled sidecar is still a packaging follow-up (Tauri places resources
+  # apart from externalBin) — same class as the macOS metallib handling.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - name: Check out speech-studio
+        uses: actions/checkout@v4
+        with:
+          path: speech-studio
+
+      - name: Check out speech-core (sibling repo)
+        uses: actions/checkout@v4
+        with:
+          repository: soniqo/speech-core
+          path: speech-core
+          ref: main
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node + pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: speech-studio/pnpm-lock.yaml
+
+      - name: Set up Python (for fetch_litert)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install JS deps
+        working-directory: speech-studio
+        run: pnpm install --frozen-lockfile
+
+      - name: Fetch libLiteRt (ai-edge-litert wheel)
+        working-directory: speech-core
+        shell: bash
+        run: ./scripts/fetch_litert.sh litert
+
+      - name: Install libcurl (vcpkg, static-MD / Schannel)
+        shell: pwsh
+        run: '& "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install curl:x64-windows-static-md'
+
+      - name: Build speech-core (LiteRT + HF download)
+        working-directory: speech-core
+        shell: pwsh
+        run: |
+          cmake -B build -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DSPEECH_CORE_WITH_LITERT=ON `
+            -DLITERT_DIR="$PWD/litert" `
+            -DSPEECH_CORE_WITH_HF_DOWNLOAD=ON `
+            -DSPEECH_CORE_BUILD_TESTS=OFF `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+          cmake --build build --config Release --target speech_core_models_litert
+
+      - name: Build core-sidecar
+        working-directory: speech-studio
+        shell: pwsh
+        run: |
+          cmake -B core-sidecar/build -A x64 core-sidecar `
+            -DSPEECH_CORE_DIR="$env:GITHUB_WORKSPACE/speech-core" `
+            -DSPEECH_CORE_BUILD_DIR="$env:GITHUB_WORKSPACE/speech-core/build" `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+          cmake --build core-sidecar/build --config Release
+
+      - name: Stage sidecar for Tauri bundler
+        working-directory: speech-studio
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
+          Copy-Item core-sidecar/build/Release/speech-core-tts-sidecar.exe `
+            src-tauri/binaries/speech-core-tts-sidecar-x86_64-pc-windows-msvc.exe
+          Copy-Item core-sidecar/build/Release/libLiteRt.dll src-tauri/binaries/libLiteRt.dll
+
+      - name: Build Tauri bundle (.msi + NSIS .exe)
+        working-directory: speech-studio
+        run: pnpm tauri build
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: speech-studio-windows-x86_64
+          path: |
+            speech-studio/src-tauri/target/release/bundle/msi/*.msi
+            speech-studio/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Attach installers to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            speech-studio/src-tauri/target/release/bundle/msi/*.msi
+            speech-studio/src-tauri/target/release/bundle/nsis/*-setup.exe
+          fail_on_unmatched_files: false
+
+  build-linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - name: Check out speech-studio
+        uses: actions/checkout@v4
+        with:
+          path: speech-studio
+
+      - name: Check out speech-core (sibling repo)
+        uses: actions/checkout@v4
+        with:
+          repository: soniqo/speech-core
+          path: speech-core
+          ref: main
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node + pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: speech-studio/pnpm-lock.yaml
+
+      - name: Set up Python (for fetch_litert)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system deps (Tauri + libcurl + cmake)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libssl-dev libcurl4-openssl-dev \
+            build-essential cmake curl wget file
+
+      - name: Install JS deps
+        working-directory: speech-studio
+        run: pnpm install --frozen-lockfile
+
+      - name: Fetch libLiteRt (ai-edge-litert wheel)
+        working-directory: speech-core
+        run: ./scripts/fetch_litert.sh litert
+
+      - name: Build speech-core (LiteRT + HF download)
+        working-directory: speech-core
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSPEECH_CORE_WITH_LITERT=ON \
+            -DLITERT_DIR="$PWD/litert" \
+            -DSPEECH_CORE_WITH_HF_DOWNLOAD=ON \
+            -DSPEECH_CORE_BUILD_TESTS=OFF
+          cmake --build build --parallel --target speech_core_models_litert
+
+      - name: Build core-sidecar
+        working-directory: speech-studio
+        run: |
+          cmake -B core-sidecar/build core-sidecar \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSPEECH_CORE_DIR="$GITHUB_WORKSPACE/speech-core" \
+            -DSPEECH_CORE_BUILD_DIR="$GITHUB_WORKSPACE/speech-core/build"
+          cmake --build core-sidecar/build --parallel
+
+      - name: Stage sidecar for Tauri bundler
+        working-directory: speech-studio
+        run: |
+          mkdir -p src-tauri/binaries
+          cp core-sidecar/build/speech-core-tts-sidecar \
+             src-tauri/binaries/speech-core-tts-sidecar-x86_64-unknown-linux-gnu
+          cp core-sidecar/build/libLiteRt.so src-tauri/binaries/libLiteRt.so
+
+      - name: Build Tauri bundle (.deb + .AppImage)
+        working-directory: speech-studio
+        run: pnpm tauri build
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: speech-studio-linux-x86_64
+          path: |
+            speech-studio/src-tauri/target/release/bundle/deb/*.deb
+            speech-studio/src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Attach installers to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            speech-studio/src-tauri/target/release/bundle/deb/*.deb
+            speech-studio/src-tauri/target/release/bundle/appimage/*.AppImage
+          fail_on_unmatched_files: false
