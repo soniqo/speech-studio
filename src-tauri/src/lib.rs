@@ -1181,6 +1181,19 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    // The clip cache must live under the app namespace and end in `clips`, so
+    // the Rust side and both sidecars (which compute it independently) agree.
+    #[test]
+    fn clip_cache_dir_under_app_namespace() {
+        let dir = clip_cache_dir();
+        assert!(dir.ends_with("clips"), "cache dir should end with clips: {:?}", dir);
+        assert!(
+            dir.to_string_lossy().contains("audio.soniqo.studio"),
+            "cache dir should be under the app namespace: {:?}",
+            dir
+        );
+    }
+
     // Simulates the installed-bundle layout: the sidecar binary sits next to
     // the main app binary while libLiteRt is staged in a separate resource dir.
     // The search path must include both so the loader finds the runtime.
