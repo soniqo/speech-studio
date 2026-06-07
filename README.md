@@ -1,5 +1,7 @@
 # Speech Studio
 
+**English** · [简体中文](README.zh-CN.md)
+
 > A [Soniqo](https://soniqo.audio) project.
 
 Open-source desktop app for content creators. Clone a voice from a short reference clip, write a script line by line, and synthesize the whole thing in that voice — with inline emotion markers for tone.
