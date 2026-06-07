@@ -110,9 +110,38 @@ struct SidecarProcess {
     stdout: BufReader<ChildStdout>,
 }
 
-#[derive(Default)]
 pub struct SidecarManager {
     inner: Mutex<Option<SidecarProcess>>,
+    // Bundled resource dir (Tauri ships libLiteRt here on Windows/Linux). Added
+    // to the spawned sidecar's library search path so it can load libLiteRt in
+    // an installed bundle, where the runtime lives apart from the binary.
+    resource_dir: Option<PathBuf>,
+}
+
+impl SidecarManager {
+    fn new(resource_dir: Option<PathBuf>) -> Self {
+        Self {
+            inner: Mutex::new(None),
+            resource_dir,
+        }
+    }
+}
+
+// Directories the spawned sidecar must be able to load libLiteRt from: its own
+// directory (dev — CMake colocates the runtime there) and the bundled resource
+// dir (release — Tauri ships it there). These build the child's library search
+// path: PATH on Windows, LD_LIBRARY_PATH on Linux. Not needed on macOS (the
+// Swift sidecar's MLX libs are linked / the metallib is handled separately).
+#[cfg(not(target_os = "macos"))]
+fn sidecar_lib_dirs(sidecar: &std::path::Path, resource_dir: Option<&std::path::Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(d) = sidecar.parent() {
+        dirs.push(d.to_path_buf());
+    }
+    if let Some(d) = resource_dir {
+        dirs.push(d.to_path_buf());
+    }
+    dirs
 }
 
 impl Drop for SidecarManager {
@@ -130,11 +159,14 @@ impl Drop for SidecarManager {
 }
 
 impl SidecarManager {
-    fn spawn() -> Result<SidecarProcess, String> {
+    fn spawn(resource_dir: Option<&std::path::Path>) -> Result<SidecarProcess, String> {
         let path = sidecar_path();
         #[cfg(target_os = "macos")]
-        if let Some(dir) = path.parent() {
-            colocate_metallib(dir);
+        {
+            let _ = resource_dir;
+            if let Some(dir) = path.parent() {
+                colocate_metallib(dir);
+            }
         }
         let mut command = Command::new(&path);
         command
@@ -150,6 +182,26 @@ impl SidecarManager {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             command.creation_flags(CREATE_NO_WINDOW);
+        }
+        // Make libLiteRt loadable from the sidecar's dir and the bundled
+        // resource dir by prepending them to the child's dynamic-loader search
+        // path. Child-only (via .env), so the parent process is untouched.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let dirs = sidecar_lib_dirs(&path, resource_dir);
+            if !dirs.is_empty() {
+                #[cfg(target_os = "windows")]
+                let var = "PATH";
+                #[cfg(not(target_os = "windows"))]
+                let var = "LD_LIBRARY_PATH";
+                let mut paths = dirs;
+                if let Some(existing) = std::env::var_os(var) {
+                    paths.extend(std::env::split_paths(&existing));
+                }
+                if let Ok(joined) = std::env::join_paths(&paths) {
+                    command.env(var, joined);
+                }
+            }
         }
         let mut child = command
             .spawn()
@@ -172,7 +224,7 @@ impl SidecarManager {
             Some(p) => matches!(p.child.try_wait(), Ok(Some(_)) | Err(_)),
         };
         if needs_spawn {
-            *guard = Some(Self::spawn()?);
+            *guard = Some(Self::spawn(self.resource_dir.as_deref())?);
         }
 
         let proc = guard.as_mut().expect("just spawned");
@@ -1104,7 +1156,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            app.manage(SidecarManager::default());
+            // resource_dir() is where Tauri stages bundled `resources` (incl.
+            // libLiteRt on Windows/Linux). None in some dev layouts — that's
+            // fine, the sidecar's own dir covers dev.
+            let resource_dir = app.path().resource_dir().ok();
+            app.manage(SidecarManager::new(resource_dir));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1124,6 +1180,25 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Simulates the installed-bundle layout: the sidecar binary sits next to
+    // the main app binary while libLiteRt is staged in a separate resource dir.
+    // The search path must include both so the loader finds the runtime.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn sidecar_lib_dirs_includes_binary_and_resource_dirs() {
+        let sidecar = std::path::Path::new("/app/bin/speech-core-tts-sidecar");
+        let res = std::path::Path::new("/app/resources");
+        let dirs = sidecar_lib_dirs(sidecar, Some(res));
+        assert_eq!(dirs, vec![
+            std::path::PathBuf::from("/app/bin"),
+            std::path::PathBuf::from("/app/resources"),
+        ]);
+
+        // Dev layout (no resource dir resolved) still yields the sidecar's dir.
+        let dirs = sidecar_lib_dirs(sidecar, None);
+        assert_eq!(dirs, vec![std::path::PathBuf::from("/app/bin")]);
+    }
 
     #[test]
     fn preprocess_target_strips_inline_period() {
