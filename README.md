@@ -45,15 +45,21 @@ Supported tags include `soft`, `warm`, `whispering`, `intense`, `excited`, `happ
 
 ## Download
 
+Grab the latest build from the [**releases page**](https://github.com/soniqo/speech-studio/releases/latest):
+
 | Platform | Artifact | Status |
 |---|---|---|
-| **macOS** (Apple Silicon) | `.dmg` — [releases page](https://github.com/soniqo/speech-studio/releases/latest) | ✅ Published |
-| **Windows** (x86_64) | `.msi` / `.exe` | 🚧 [Build from source](#build-from-source) |
-| **Linux** (x86_64) | `.deb` / `.AppImage` | 🚧 [Build from source](#build-from-source) |
+| **macOS** (Apple Silicon) | [`.dmg`](https://github.com/soniqo/speech-studio/releases/latest) | ✅ Published |
+| **Windows** (x86_64) | [`.msi` / `.exe`](https://github.com/soniqo/speech-studio/releases/latest) | ✅ Published |
+| **Linux** (x86_64) | [`.deb` / `.AppImage`](https://github.com/soniqo/speech-studio/releases/latest) | ✅ Published |
 
-**macOS:** grab the latest `.dmg` (~46 MB), drag into `/Applications`, and launch. First run downloads ~2.75 GB of model weights from Hugging Face into `~/.cache/huggingface/hub/`; subsequent runs reuse the cache.
+Every platform **downloads its speech model on first run** (resumable) and caches it, so the installers stay small:
 
-**Windows / Linux:** the backend is implemented and runs from source today (the engine is [`speech-core`](https://github.com/soniqo/speech-core)'s on-device LiteRT VoxCPM2), and — like macOS — it **downloads the model on first run** (resumable). Publishing installers is gated only on a CI lane that builds and attaches the artifacts on tag, the same flow that produces the macOS `.dmg`. Until then, see [Build from source](#build-from-source).
+- **macOS** — `.dmg` (~46 MB); drag into `/Applications`. First run pulls ~2.75 GB of MLX weights into `~/.cache/huggingface/hub/`.
+- **Windows** — `.msi` or the NSIS `-setup.exe`. First run pulls the ~4.6 GB VoxCPM2-LiteRT bundle into `%LOCALAPPDATA%\speech-core`.
+- **Linux** — `.deb` or `.AppImage`. First run pulls the same bundle into `~/.cache/speech-core`.
+
+The builds are **unsigned**: Windows SmartScreen needs *More info → Run anyway*, and macOS needs a right-click → *Open* the first time to bypass Gatekeeper.
 
 ## Build from source
 
