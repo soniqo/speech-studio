@@ -65,7 +65,7 @@ endif()
 find_package(CURL REQUIRED)
 
 # --- Sidecar executable ------------------------------------------------------
-add_executable(speech-core-tts-sidecar src/main.cpp src/audio_decode.cpp)
+add_executable(speech-core-tts-sidecar src/main.cpp src/audio_decode.cpp src/sidecar_text.cpp)
 target_include_directories(speech-core-tts-sidecar PRIVATE
     "${SPEECH_CORE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dr_libs")
@@ -90,3 +90,25 @@ add_custom_command(TARGET speech-core-tts-sidecar POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "$<TARGET_FILE:litert>" "$<TARGET_FILE_DIR:speech-core-tts-sidecar>"
     COMMENT "Colocating libLiteRt next to the sidecar binary")
+
+# --- Unit tests --------------------------------------------------------------
+# Cover the pure helpers (audio decoding, emotion-tag parsing, JSON escaping,
+# filename sanitizing) — no speech-core / libcurl / model needed. Run via ctest.
+option(SIDECAR_BUILD_TESTS "Build the core-sidecar unit tests" ON)
+if(SIDECAR_BUILD_TESTS)
+    enable_testing()
+    add_executable(test_sidecar
+        tests/test_sidecar.cpp
+        src/audio_decode.cpp
+        src/sidecar_text.cpp)
+    target_include_directories(test_sidecar PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dr_libs")
+    target_compile_definitions(test_sidecar PRIVATE
+        SIDECAR_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+    if(MSVC)
+        target_compile_definitions(test_sidecar PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+        target_compile_options(test_sidecar PRIVATE /utf-8)
+    endif()
+    add_test(NAME sidecar_unit COMMAND test_sidecar)
+endif()

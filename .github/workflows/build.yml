@@ -250,6 +250,10 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
           cmake --build core-sidecar/build --config Release
 
+      - name: Run sidecar unit tests
+        working-directory: speech-studio
+        run: ctest --test-dir core-sidecar/build -C Release --output-on-failure
+
       - name: Stage sidecar for Tauri bundler
         working-directory: speech-studio
         shell: pwsh
@@ -356,6 +360,10 @@ jobs:
             -DSPEECH_CORE_DIR="$GITHUB_WORKSPACE/speech-core" \
             -DSPEECH_CORE_BUILD_DIR="$GITHUB_WORKSPACE/speech-core/build"
           cmake --build core-sidecar/build --parallel
+
+      - name: Run sidecar unit tests
+        working-directory: speech-studio
+        run: ctest --test-dir core-sidecar/build --output-on-failure
 
       - name: Stage sidecar for Tauri bundler
         working-directory: speech-studio
