@@ -8,28 +8,61 @@ use tauri_plugin_dialog::DialogExt;
 
 // ---------- sidecar process management ----------
 
+// Sidecar binary name (Tauri's externalBin bundler strips the target-triple
+// suffix, so this is also the bundled name). macOS runs the Swift/MLX sidecar;
+// Windows/Linux run the speech-core LiteRT C++ sidecar.
+#[cfg(target_os = "macos")]
+const SIDECAR_BIN: &str = "soniqo-tts-sidecar";
+#[cfg(all(not(target_os = "macos"), target_os = "windows"))]
+const SIDECAR_BIN: &str = "speech-core-tts-sidecar.exe";
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+const SIDECAR_BIN: &str = "speech-core-tts-sidecar";
+
 fn sidecar_path() -> PathBuf {
-    // In a Tauri release bundle the sidecar lives next to the main binary at
-    // `<App>.app/Contents/MacOS/soniqo-tts-sidecar` (Tauri's externalBin
-    // bundler strips the target-triple suffix). In dev we read from the Swift
-    // package's debug build dir so `pnpm tauri dev` and `cargo run` both
-    // find the freshly-built sidecar.
+    // In a Tauri release bundle the sidecar lives next to the main binary
+    // (e.g. `<App>.app/Contents/MacOS/` on macOS, alongside the .exe on
+    // Windows). In dev we read from the sidecar's build dir so `pnpm tauri dev`
+    // and `cargo run` both find the freshly-built binary.
     if !cfg!(debug_assertions) {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(parent) = exe.parent() {
-                let bundled = parent.join("soniqo-tts-sidecar");
+                let bundled = parent.join(SIDECAR_BIN);
                 if bundled.exists() {
                     return bundled;
                 }
             }
         }
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("swift-sidecar")
-        .join(".build")
-        .join("debug")
-        .join("soniqo-tts-sidecar")
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    #[cfg(target_os = "macos")]
+    {
+        manifest
+            .join("..")
+            .join("swift-sidecar")
+            .join(".build")
+            .join("debug")
+            .join(SIDECAR_BIN)
+    }
+    // Windows: CMake's Visual Studio generator nests the binary under a
+    // per-config subdir (Release). Single-config generators (Ninja, Unix
+    // Makefiles on Linux) put it directly in the build dir.
+    #[cfg(all(not(target_os = "macos"), target_os = "windows"))]
+    {
+        manifest
+            .join("..")
+            .join("core-sidecar")
+            .join("build")
+            .join("Release")
+            .join(SIDECAR_BIN)
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        manifest
+            .join("..")
+            .join("core-sidecar")
+            .join("build")
+            .join(SIDECAR_BIN)
+    }
 }
 
 // MLX-Swift looks for `mlx.metallib` via `dladdr` on its own code — which in
@@ -41,6 +74,11 @@ fn sidecar_path() -> PathBuf {
 // symlink the bundled copy into the sidecar's directory the first time the
 // process starts. Idempotent — does nothing if the file is already present
 // or unreachable.
+//
+// macOS-only: the metallib + `std::os::unix::fs::symlink` are Apple/Unix
+// specifics. The Windows/Linux speech-core sidecar has no equivalent (LiteRT
+// ships its compute as `libLiteRt`, colocated by the sidecar's CMake build).
+#[cfg(target_os = "macos")]
 fn colocate_metallib(sidecar_dir: &std::path::Path) {
     let dest = sidecar_dir.join("mlx.metallib");
     if dest.exists() {
@@ -72,9 +110,38 @@ struct SidecarProcess {
     stdout: BufReader<ChildStdout>,
 }
 
-#[derive(Default)]
 pub struct SidecarManager {
     inner: Mutex<Option<SidecarProcess>>,
+    // Bundled resource dir (Tauri ships libLiteRt here on Windows/Linux). Added
+    // to the spawned sidecar's library search path so it can load libLiteRt in
+    // an installed bundle, where the runtime lives apart from the binary.
+    resource_dir: Option<PathBuf>,
+}
+
+impl SidecarManager {
+    fn new(resource_dir: Option<PathBuf>) -> Self {
+        Self {
+            inner: Mutex::new(None),
+            resource_dir,
+        }
+    }
+}
+
+// Directories the spawned sidecar must be able to load libLiteRt from: its own
+// directory (dev — CMake colocates the runtime there) and the bundled resource
+// dir (release — Tauri ships it there). These build the child's library search
+// path: PATH on Windows, LD_LIBRARY_PATH on Linux. Not needed on macOS (the
+// Swift sidecar's MLX libs are linked / the metallib is handled separately).
+#[cfg(not(target_os = "macos"))]
+fn sidecar_lib_dirs(sidecar: &std::path::Path, resource_dir: Option<&std::path::Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(d) = sidecar.parent() {
+        dirs.push(d.to_path_buf());
+    }
+    if let Some(d) = resource_dir {
+        dirs.push(d.to_path_buf());
+    }
+    dirs
 }
 
 impl Drop for SidecarManager {
@@ -92,15 +159,51 @@ impl Drop for SidecarManager {
 }
 
 impl SidecarManager {
-    fn spawn() -> Result<SidecarProcess, String> {
+    fn spawn(resource_dir: Option<&std::path::Path>) -> Result<SidecarProcess, String> {
         let path = sidecar_path();
-        if let Some(dir) = path.parent() {
-            colocate_metallib(dir);
+        #[cfg(target_os = "macos")]
+        {
+            let _ = resource_dir;
+            if let Some(dir) = path.parent() {
+                colocate_metallib(dir);
+            }
         }
-        let mut child = Command::new(&path)
+        let mut command = Command::new(&path);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        // The sidecar is a console-subsystem binary. Spawning it from a GUI
+        // (windows-subsystem) app would otherwise flash a console window on
+        // every launch. CREATE_NO_WINDOW suppresses it; stdio is still piped,
+        // so IPC is unaffected.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        // Make libLiteRt loadable from the sidecar's dir and the bundled
+        // resource dir by prepending them to the child's dynamic-loader search
+        // path. Child-only (via .env), so the parent process is untouched.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let dirs = sidecar_lib_dirs(&path, resource_dir);
+            if !dirs.is_empty() {
+                #[cfg(target_os = "windows")]
+                let var = "PATH";
+                #[cfg(not(target_os = "windows"))]
+                let var = "LD_LIBRARY_PATH";
+                let mut paths = dirs;
+                if let Some(existing) = std::env::var_os(var) {
+                    paths.extend(std::env::split_paths(&existing));
+                }
+                if let Ok(joined) = std::env::join_paths(&paths) {
+                    command.env(var, joined);
+                }
+            }
+        }
+        let mut child = command
             .spawn()
             .map_err(|e| format!("spawn {} failed: {}", path.display(), e))?;
         let stdin = child.stdin.take().ok_or("sidecar stdin missing")?;
@@ -121,7 +224,7 @@ impl SidecarManager {
             Some(p) => matches!(p.child.try_wait(), Ok(Some(_)) | Err(_)),
         };
         if needs_spawn {
-            *guard = Some(Self::spawn()?);
+            *guard = Some(Self::spawn(self.resource_dir.as_deref())?);
         }
 
         let proc = guard.as_mut().expect("just spawned");
@@ -286,6 +389,13 @@ struct SynthesizeResult {
     audio_path: String,
 }
 
+// Whether ASR-graded retry is wired on this platform. Grading shells out to the
+// `speech` CLI (Parakeet), which ships with the macOS speech-swift toolchain.
+// On Windows/Linux there's no grader yet, so we accept the first successful
+// take. Wiring Parakeet-via-sidecar grading on those platforms is a follow-up
+// (the LiteRT sidecar already links speech-core's Parakeet wrapper).
+const GRADING_AVAILABLE: bool = cfg!(target_os = "macos");
+
 #[tauri::command]
 async fn synthesize_clip(
     manager: State<'_, SidecarManager>,
@@ -390,6 +500,16 @@ async fn synthesize_clip(
             None => continue,
         };
         let duration = result.get("durationSec").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+        // No ASR grader on this platform — accept the first successful take
+        // rather than burning the whole seed ladder (each take is a full synth).
+        if !GRADING_AVAILABLE {
+            eprintln!(
+                "[synth] clip {} accepted first take (seed={}, {:.2}s; grading unavailable on this platform)",
+                args.clip_id, seed, duration
+            );
+            return Ok(SynthesizeResult { audio_path });
+        }
 
         // ASR-grade via Parakeet, then check transcript shape.
         let grade = asr_grade(&audio_path, &processed_text).unwrap_or_else(|| Grade {
@@ -689,18 +809,18 @@ fn short_hash(s: &str) -> u32 {
     h
 }
 
+// Per-clip audio cache. Must stay in sync with the sidecar's own cache dir
+// (see clips_cache_dir() in core-sidecar/src/main.cpp and clipsCacheDir() in
+// the Swift sidecar). `dirs::cache_dir()` resolves to the platform-native
+// location: ~/Library/Caches on macOS, %LOCALAPPDATA% on Windows, and
+// $XDG_CACHE_HOME (or ~/.cache) on Linux.
 fn clip_cache_dir() -> std::path::PathBuf {
-    let home = dirs_home();
-    let dir = home
-        .join("Library/Caches/audio.soniqo.studio/clips");
+    let dir = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("audio.soniqo.studio")
+        .join("clips");
     let _ = std::fs::create_dir_all(&dir);
     dir
-}
-
-fn dirs_home() -> std::path::PathBuf {
-    std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
 }
 
 fn wav_duration_sec(path: &std::path::Path) -> Result<f64, String> {
@@ -718,92 +838,6 @@ fn wav_duration_sec(path: &std::path::Path) -> Result<f64, String> {
     let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let audio_bytes = metadata.len().saturating_sub(44);
     Ok(audio_bytes as f64 / byte_rate as f64)
-}
-
-// ---------- Synthesis quality detection ----------
-//
-// Qwen3-TTS occasionally fails to emit EOS and produces a long tail of
-// silence or garbage. MLX-swift's Metal compute is non-deterministic across
-// processes, so the same input may succeed on one run and fail on another.
-// We detect failures heuristically (duration far off from text length, or
-// silent tail) and retry with a different sampling strategy.
-
-fn estimate_speech_duration_sec(text: &str) -> f64 {
-    // English speech ≈ 12 non-space chars per second.
-    let chars = text.chars().filter(|c| !c.is_whitespace()).count() as f64;
-    chars / 12.0
-}
-
-/// Read the last `tail_fraction` of a 16-bit PCM WAV and return RMS in [0,1].
-fn wav_tail_rms(path: &std::path::Path, tail_fraction: f64) -> Result<f64, String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut header = [0u8; 44];
-    f.read_exact(&mut header).map_err(|e| e.to_string())?;
-    let channels = u16::from_le_bytes([header[22], header[23]]) as u32;
-    let bits_per_sample = u16::from_le_bytes([header[34], header[35]]) as u32;
-    if bits_per_sample != 16 || channels == 0 {
-        return Err("unsupported wav format".into());
-    }
-    let bytes_per_frame = (bits_per_sample / 8) as u64 * channels as u64;
-    let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
-    let audio_bytes = metadata.len().saturating_sub(44);
-    let total_frames = audio_bytes / bytes_per_frame;
-    if total_frames == 0 {
-        return Ok(0.0);
-    }
-    let tail_frames = ((total_frames as f64 * tail_fraction.clamp(0.05, 1.0)) as u64).max(1);
-    let tail_start = 44u64 + (total_frames - tail_frames) * bytes_per_frame;
-    f.seek(SeekFrom::Start(tail_start)).map_err(|e| e.to_string())?;
-    let mut buf = Vec::with_capacity((tail_frames * bytes_per_frame) as usize);
-    f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-    let mut sum_sq: f64 = 0.0;
-    let mut count: u64 = 0;
-    for chunk in buf.chunks_exact(2) {
-        let sample = i16::from_le_bytes([chunk[0], chunk[1]]) as f64 / 32768.0;
-        sum_sq += sample * sample;
-        count += 1;
-    }
-    if count == 0 {
-        return Ok(0.0);
-    }
-    Ok((sum_sq / count as f64).sqrt())
-}
-
-/// Returns `Some(reason)` if the audio looks like a failed synthesis.
-fn synthesis_failure_reason(
-    audio_path: &str,
-    duration_sec: f64,
-    text: &str,
-) -> Option<String> {
-    let expected = estimate_speech_duration_sec(text).max(0.8);
-    // 1) Duration way off: model didn't emit EOS, or got truncated.
-    let max_ok = expected * 3.0 + 1.5;
-    if duration_sec > max_ok {
-        return Some(format!(
-            "audio too long ({:.1}s vs expected ≤ {:.1}s for {} chars)",
-            duration_sec,
-            max_ok,
-            text.chars().filter(|c| !c.is_whitespace()).count()
-        ));
-    }
-    if duration_sec < 0.4 {
-        return Some(format!("audio too short ({:.2}s)", duration_sec));
-    }
-    // 2) Tail is silent: likely 30s+ of empty audio after a partial utterance.
-    //    Only check if audio is suspiciously long.
-    if duration_sec > expected + 2.0 {
-        match wav_tail_rms(std::path::Path::new(audio_path), 0.3) {
-            Ok(rms) if rms < 0.005 => {
-                return Some(format!(
-                    "audio tail silent (RMS={:.4} over last 30%)",
-                    rms
-                ));
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 #[derive(Serialize, Clone)]
@@ -1122,7 +1156,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            app.manage(SidecarManager::default());
+            // resource_dir() is where Tauri stages bundled `resources` (incl.
+            // libLiteRt on Windows/Linux). None in some dev layouts — that's
+            // fine, the sidecar's own dir covers dev.
+            let resource_dir = app.path().resource_dir().ok();
+            app.manage(SidecarManager::new(resource_dir));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1142,6 +1180,25 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Simulates the installed-bundle layout: the sidecar binary sits next to
+    // the main app binary while libLiteRt is staged in a separate resource dir.
+    // The search path must include both so the loader finds the runtime.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn sidecar_lib_dirs_includes_binary_and_resource_dirs() {
+        let sidecar = std::path::Path::new("/app/bin/speech-core-tts-sidecar");
+        let res = std::path::Path::new("/app/resources");
+        let dirs = sidecar_lib_dirs(sidecar, Some(res));
+        assert_eq!(dirs, vec![
+            std::path::PathBuf::from("/app/bin"),
+            std::path::PathBuf::from("/app/resources"),
+        ]);
+
+        // Dev layout (no resource dir resolved) still yields the sidecar's dir.
+        let dirs = sidecar_lib_dirs(sidecar, None);
+        assert_eq!(dirs, vec![std::path::PathBuf::from("/app/bin")]);
+    }
 
     #[test]
     fn preprocess_target_strips_inline_period() {
@@ -1212,6 +1269,7 @@ mod tests {
         assert!(g.is_clean(), "should accept minor substitution");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn colocate_metallib_simulates_bundle_layout() {
         // Simulate `<App>.app/Contents/{MacOS,Resources}/` and verify the
@@ -1243,6 +1301,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn colocate_metallib_noop_when_source_absent() {
         // Dev/unbundled layout: no Resources/ sibling. Helper should do nothing

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["deb", "appimage"],
+    "externalBin": [
+      "binaries/speech-core-tts-sidecar"
+    ],
+    "resources": {
+      "binaries/libLiteRt.so": "libLiteRt.so"
+    }
+  }
+}
