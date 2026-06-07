@@ -3214,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "speech-studio"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
