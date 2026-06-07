@@ -18,6 +18,8 @@
 #include <speech_core/voxcpm2_c.h>
 #include <speech_core/util/json.h>
 
+#include "audio_decode.h"
+
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -84,58 +86,9 @@ static void emit_error(const std::string& id, const std::string& error) {
 }
 
 // ---------------------------------------------------------------------------
-// WAV read / write (mirrors speech-core/examples/litert/voxcpm2_clone.cpp)
+// WAV writer for synthesized output. Reference *input* decoding (WAV/MP3/FLAC)
+// lives in audio_decode.{h,cpp} via the vendored dr_libs.
 // ---------------------------------------------------------------------------
-
-// Minimal mono-float loader for a canonical PCM-16 RIFF/WAVE file. Multi-channel
-// input is down-mixed by averaging. Returns false on any parse failure.
-static bool load_wav_mono(const std::string& path, std::vector<float>& out, int& sample_rate) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
-
-    char riff[4], wave[4];
-    uint32_t file_size = 0;
-    f.read(riff, 4);
-    f.read(reinterpret_cast<char*>(&file_size), 4);
-    f.read(wave, 4);
-    if (std::memcmp(riff, "RIFF", 4) != 0 || std::memcmp(wave, "WAVE", 4) != 0) return false;
-
-    char chunk_id[4];
-    uint32_t chunk_size = 0;
-    uint16_t audio_format = 0, channels = 0, bits = 0;
-    uint32_t rate = 0;
-    bool have_fmt = false;
-
-    while (f.read(chunk_id, 4)) {
-        f.read(reinterpret_cast<char*>(&chunk_size), 4);
-        if (std::memcmp(chunk_id, "fmt ", 4) == 0) {
-            f.read(reinterpret_cast<char*>(&audio_format), 2);
-            f.read(reinterpret_cast<char*>(&channels), 2);
-            f.read(reinterpret_cast<char*>(&rate), 4);
-            f.seekg(6, std::ios::cur);                 // byte_rate + block_align
-            f.read(reinterpret_cast<char*>(&bits), 2);
-            if (chunk_size > 16) f.seekg(chunk_size - 16, std::ios::cur);
-            have_fmt = true;
-        } else if (std::memcmp(chunk_id, "data", 4) == 0) {
-            if (!have_fmt || audio_format != 1 || bits != 16 || channels == 0) return false;
-            const size_t n = chunk_size / 2;
-            std::vector<int16_t> pcm(n);
-            f.read(reinterpret_cast<char*>(pcm.data()), chunk_size);
-            const size_t frames = n / channels;
-            out.resize(frames);
-            for (size_t i = 0; i < frames; ++i) {
-                int acc = 0;
-                for (uint16_t c = 0; c < channels; ++c) acc += pcm[i * channels + c];
-                out[i] = static_cast<float>(acc) / (channels * 32768.0f);
-            }
-            sample_rate = static_cast<int>(rate);
-            return true;
-        } else {
-            f.seekg(chunk_size, std::ios::cur);
-        }
-    }
-    return false;
-}
 
 static bool write_wav(const std::string& path, const float* samples, size_t count, int rate) {
     std::ofstream f(path, std::ios::binary);
@@ -392,15 +345,17 @@ static void handle_synthesize(const json::Dict& req, const std::string& id) {
         return;
     }
 
-    if (std::string err = ensure_model(); !err.empty()) {
-        emit_error(id, err);
+    // Decode the reference first — it's cheap, and a bad/unsupported file
+    // should fail immediately rather than after a multi-second model load.
+    std::vector<float> ref;
+    int ref_rate = 0;
+    if (!load_audio_mono(ref_path, ref, ref_rate) || ref.empty()) {
+        emit_error(id, "could not decode reference audio (supported: WAV, MP3, FLAC): " + ref_path);
         return;
     }
 
-    std::vector<float> ref;
-    int ref_rate = 0;
-    if (!load_wav_mono(ref_path, ref, ref_rate) || ref.empty()) {
-        emit_error(id, "could not read reference WAV (16-bit PCM RIFF/WAVE required): " + ref_path);
+    if (std::string err = ensure_model(); !err.empty()) {
+        emit_error(id, err);
         return;
     }
 

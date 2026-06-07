@@ -65,8 +65,10 @@ endif()
 find_package(CURL REQUIRED)
 
 # --- Sidecar executable ------------------------------------------------------
-add_executable(speech-core-tts-sidecar src/main.cpp)
-target_include_directories(speech-core-tts-sidecar PRIVATE "${SPEECH_CORE_DIR}/include")
+add_executable(speech-core-tts-sidecar src/main.cpp src/audio_decode.cpp)
+target_include_directories(speech-core-tts-sidecar PRIVATE
+    "${SPEECH_CORE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dr_libs")
 target_link_libraries(speech-core-tts-sidecar PRIVATE
     "${SPEECH_CORE_MODELS_LITERT_LIB}"
     "${SPEECH_CORE_LIB}"
