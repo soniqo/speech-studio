@@ -33,10 +33,30 @@ export function pickAudio(): Promise<PickedAudio | null> {
   return invoke<PickedAudio | null>("pick_audio");
 }
 
+export interface ReferenceProbe {
+  sampleRate: number;
+  durationSec: number;
+  /** Full-clip RMS in [0,1]; < 0.005 = nearly silent, < 0.04 = quiet. */
+  rms: number;
+  peak: number;
+}
+
+/**
+ * Decode a candidate reference clip in the sidecar and measure its level.
+ * Resolves to null when the active sidecar has no probe support (callers
+ * should then skip level validation).
+ */
+export function probeReference(path: string): Promise<ReferenceProbe | null> {
+  return invoke<ReferenceProbe | null>("probe_reference", { args: { path } });
+}
+
 export interface CloneVoiceArgs {
   referencePath: string;
   name: string;
   referenceText: string;
+  referenceDurationSec?: number;
+  referenceSampleRate?: number;
+  referenceRms?: number;
 }
 
 export function cloneVoice(args: CloneVoiceArgs): Promise<Voice> {

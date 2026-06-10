@@ -314,10 +314,20 @@ struct PickedAudio {
 
 #[tauri::command]
 async fn pick_audio(app: tauri::AppHandle) -> Result<Option<PickedAudio>, String> {
+    // Offer only formats the active sidecar can actually decode. The C++
+    // sidecar (Windows/Linux) handles WAV/MP3/FLAC via dr_libs; offering
+    // m4a/aac/ogg there surfaced as a hard "could not decode" error long
+    // after the pick. The Swift sidecar decodes via AVFoundation and keeps
+    // the wider list.
+    #[cfg(target_os = "macos")]
+    const AUDIO_EXTS: &[&str] = &["wav", "mp3", "m4a", "aac", "flac", "ogg"];
+    #[cfg(not(target_os = "macos"))]
+    const AUDIO_EXTS: &[&str] = &["wav", "mp3", "flac"];
+
     let (tx, rx) = std::sync::mpsc::channel();
     app.dialog()
         .file()
-        .add_filter("Audio", &["wav", "mp3", "m4a", "aac", "flac", "ogg"])
+        .add_filter("Audio", AUDIO_EXTS)
         .pick_file(move |path| {
             let _ = tx.send(path);
         });
@@ -328,12 +338,72 @@ async fn pick_audio(app: tauri::AppHandle) -> Result<Option<PickedAudio>, String
 }
 
 #[derive(Deserialize)]
+struct ProbeReferenceArgs {
+    path: String,
+}
+
+#[derive(Serialize)]
+struct ReferenceProbe {
+    #[serde(rename = "sampleRate")]
+    sample_rate: u32,
+    #[serde(rename = "durationSec")]
+    duration_sec: f64,
+    rms: f64,
+    peak: f64,
+}
+
+/// Decode a candidate reference clip in the sidecar and report level stats,
+/// so the frontend can reject/warn on nearly-silent references at clone time
+/// (a -25 dB reference silently produced inaudible clones in the field —
+/// VoxCPM2 output tracks reference amplitude). Returns Ok(None) when the
+/// active sidecar predates the probe command (e.g. the Swift sidecar until
+/// it ships parity) — callers then skip validation rather than fail.
+#[tauri::command]
+async fn probe_reference(
+    manager: State<'_, SidecarManager>,
+    args: ProbeReferenceArgs,
+) -> Result<Option<ReferenceProbe>, String> {
+    let payload = serde_json::json!({
+        "id": format!("probe-{}", uuid::Uuid::new_v4().simple()),
+        "command": "probe_reference",
+        "referenceAudioPath": args.path,
+    });
+    let raw = manager.request(&payload)?;
+    if raw.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        let err = raw
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("probe_reference failed");
+        if err.contains("unknown command") {
+            return Ok(None); // sidecar without probe support — skip validation
+        }
+        return Err(err.to_string());
+    }
+    let result = raw.get("result").ok_or("probe_reference: missing result")?;
+    let f = |k: &str| result.get(k).and_then(|v| v.as_f64());
+    Ok(Some(ReferenceProbe {
+        sample_rate: f("sampleRate").unwrap_or(0.0) as u32,
+        duration_sec: f("durationSec").unwrap_or(0.0),
+        rms: f("rms").unwrap_or(0.0),
+        peak: f("peak").unwrap_or(0.0),
+    }))
+}
+
+#[derive(Deserialize)]
 struct CloneVoiceArgs {
     #[serde(rename = "referencePath")]
     reference_path: String,
     name: String,
     #[serde(rename = "referenceText", default)]
     reference_text: String,
+    // Probe metadata measured by probe_reference at pick time; persisted on
+    // the Voice so the card can show duration/rate/level and flag quiet refs.
+    #[serde(rename = "referenceDurationSec", default)]
+    reference_duration_sec: Option<f64>,
+    #[serde(rename = "referenceSampleRate", default)]
+    reference_sample_rate: Option<u32>,
+    #[serde(rename = "referenceRms", default)]
+    reference_rms: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -348,6 +418,12 @@ struct Voice {
     reference_text: String,
     #[serde(rename = "createdAt")]
     created_at: String,
+    #[serde(rename = "referenceDurationSec", skip_serializing_if = "Option::is_none")]
+    reference_duration_sec: Option<f64>,
+    #[serde(rename = "referenceSampleRate", skip_serializing_if = "Option::is_none")]
+    reference_sample_rate: Option<u32>,
+    #[serde(rename = "referenceRms", skip_serializing_if = "Option::is_none")]
+    reference_rms: Option<f64>,
 }
 
 #[tauri::command]
@@ -362,6 +438,9 @@ async fn clone_voice(args: CloneVoiceArgs) -> Result<Voice, String> {
         reference_audio_path: args.reference_path,
         reference_text: args.reference_text,
         created_at: chrono::Utc::now().to_rfc3339(),
+        reference_duration_sec: args.reference_duration_sec,
+        reference_sample_rate: args.reference_sample_rate,
+        reference_rms: args.reference_rms,
     })
 }
 
@@ -1168,6 +1247,7 @@ pub fn run() {
             init_model,
             pick_video,
             pick_audio,
+            probe_reference,
             clone_voice,
             synthesize_clip,
             export_project,

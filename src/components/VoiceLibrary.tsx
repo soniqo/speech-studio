@@ -1,10 +1,22 @@
 import { useEffect, useRef, useState } from "react";
-import { Plus, Pause, Play, AudioLines } from "lucide-react";
+import { Plus, Pause, Play, AudioLines, TriangleAlert } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useProjectStore } from "../state/projectStore";
-import { cloneVoice, pickAudio } from "../ipc/commands";
+import { cloneVoice, pickAudio, probeReference, type ReferenceProbe } from "../ipc/commands";
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
+
+// Reference-level thresholds, mirrored from speech-core's quiet-reference
+// rescue: below QUIET_RMS (0.04) the engine auto-boosts the reference; below
+// NEAR_SILENT_RMS the boosted result is still badly degraded (the field case
+// was a -25 dB conversion at RMS 0.0019 producing inaudible clones).
+const NEAR_SILENT_RMS = 0.005;
+const QUIET_RMS = 0.04;
+
+function levelDb(rms: number): string {
+  if (rms <= 0) return "-inf dB";
+  return `${Math.round(20 * Math.log10(rms))} dB`;
+}
 
 let currentRefAudio: HTMLAudioElement | null = null;
 
@@ -14,14 +26,49 @@ export function VoiceLibrary() {
   const addVoice = useProjectStore((s) => s.addVoice);
   const select = useProjectStore((s) => s.select);
 
+  const [pendingQuietRef, setPendingQuietRef] = useState<{
+    path: string;
+    name: string;
+    probe: ReferenceProbe;
+  } | null>(null);
+
+  async function createVoice(path: string, name: string, probe: ReferenceProbe | null) {
+    const voice = await cloneVoice({
+      referencePath: path,
+      name,
+      referenceText: "",
+      referenceDurationSec: probe?.durationSec,
+      referenceSampleRate: probe?.sampleRate,
+      referenceRms: probe?.rms,
+    });
+    addVoice(voice);
+    select({ kind: "voice", id: voice.id });
+  }
+
   async function addByReference() {
     try {
       const picked = await pickAudio();
       if (!picked) return;
       const name = picked.path.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "Voice";
-      const voice = await cloneVoice({ referencePath: picked.path, name, referenceText: "" });
-      addVoice(voice);
-      select({ kind: "voice", id: voice.id });
+
+      // Measure the clip before accepting it as a voice. A nearly-silent
+      // reference clones inaudibly (the engine tracks reference amplitude);
+      // surface that NOW — the only moment the user can act — instead of
+      // after a confusing broken synthesis. probe === null means the active
+      // sidecar has no probe support; skip validation in that case.
+      let probe: ReferenceProbe | null = null;
+      try {
+        probe = await probeReference(picked.path);
+      } catch (e) {
+        // Decode failure: the file can't work as a reference at all.
+        console.error("probe_reference failed", e);
+        return;
+      }
+      if (probe && probe.rms < NEAR_SILENT_RMS) {
+        setPendingQuietRef({ path: picked.path, name, probe });
+        return; // resolved by the confirm dialog below
+      }
+      await createVoice(picked.path, name, probe);
     } catch (e) {
       console.error("clone_voice failed", e);
     }
@@ -58,11 +105,56 @@ export function VoiceLibrary() {
             sourceKind={v.sourceKind}
             referenceAudioPath={v.referenceAudioPath}
             referenceText={v.referenceText}
+            referenceDurationSec={v.referenceDurationSec}
+            referenceSampleRate={v.referenceSampleRate}
+            referenceRms={v.referenceRms}
             selected={selection.kind === "voice" && selection.id === v.id}
             onSelect={() => select({ kind: "voice", id: v.id })}
           />
         ))}
       </div>
+      {pendingQuietRef && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="mx-4 max-w-md rounded-lg border border-border bg-background p-4 shadow-lg">
+            <div className="mb-1 flex items-center gap-2 text-sm font-semibold">
+              <TriangleAlert className="h-4 w-4 text-amber-500" />
+              This recording is nearly silent
+            </div>
+            <p className="mb-3 text-xs text-muted-foreground">
+              "{pendingQuietRef.name}" measured {levelDb(pendingQuietRef.probe.rms)} average
+              level — far below typical speech. Cloning from it will produce a
+              degraded, noisy voice. Use the original recording if you have it,
+              or re-export this one at normal volume.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-xs"
+                onClick={() => {
+                  const p = pendingQuietRef;
+                  setPendingQuietRef(null);
+                  void createVoice(p.path, p.name, p.probe).catch((e) =>
+                    console.error("clone_voice failed", e),
+                  );
+                }}
+              >
+                Use anyway
+              </Button>
+              <Button
+                size="sm"
+                className="text-xs"
+                onClick={() => {
+                  setPendingQuietRef(null);
+                  void addByReference();
+                }}
+              >
+                Choose another file
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -73,6 +165,9 @@ interface VoiceCardProps {
   sourceKind: string;
   referenceAudioPath?: string;
   referenceText: string;
+  referenceDurationSec?: number;
+  referenceSampleRate?: number;
+  referenceRms?: number;
   selected: boolean;
   onSelect: () => void;
 }
@@ -83,6 +178,9 @@ function VoiceCard({
   sourceKind,
   referenceAudioPath,
   referenceText,
+  referenceDurationSec,
+  referenceSampleRate,
+  referenceRms,
   selected,
   onSelect,
 }: VoiceCardProps) {
@@ -140,7 +238,23 @@ function VoiceCard({
         <div className="truncate text-sm font-medium">{name}</div>
         <div className="truncate text-[11px] text-muted-foreground">
           {sourceKind}
+          {referenceDurationSec != null && (
+            <>
+              {" "}&middot; {Math.round(referenceDurationSec)}s
+              {referenceSampleRate != null && <> &middot; {Math.round(referenceSampleRate / 1000)} kHz</>}
+              {referenceRms != null && <> &middot; {levelDb(referenceRms)}</>}
+            </>
+          )}
         </div>
+        {referenceRms != null && referenceRms < QUIET_RMS && (
+          <div
+            className="mt-0.5 flex items-center gap-1 text-[11px] text-amber-500"
+            title="Quiet reference — the engine auto-boosts it during synthesis; re-record at normal volume for best quality"
+          >
+            <TriangleAlert className="h-3 w-3" />
+            {referenceRms < NEAR_SILENT_RMS ? "nearly silent reference" : "quiet reference (auto-boosted)"}
+          </div>
+        )}
         {referenceText.trim().length > 0 && (
           <div className="mt-0.5 line-clamp-1 text-[11px] italic text-muted-foreground/80" title={referenceText}>
             {referenceText}
