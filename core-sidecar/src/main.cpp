@@ -17,8 +17,13 @@
 //   probe_reference      — decode a reference clip, report rate/duration/
 //                          rms/peak (no model load). Used at clone time to
 //                          reject/warn on nearly-silent references.
+//   transcribe           — ASR a rendered take (Omnilingual CTC-300M) so the
+//                          host can grade it against the target text and
+//                          retry bad takes. Model dir comes per-request.
 
 #include <speech_core/voxcpm2_c.h>
+#include <speech_core/audio/resampler.h>
+#include <speech_core/models/litert_omnilingual_stt.h>
 #include <speech_core/util/json.h>
 
 #include "audio_decode.h"
@@ -31,6 +36,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <regex>
 #include <string>
@@ -258,6 +264,51 @@ static void handle_probe(const json::Dict& req, const std::string& id) {
               fields + "}}");
 }
 
+// transcribe — ASR a rendered take so the host can grade it against the
+// target text (seed-ladder retry). Lazily loads Omnilingual CTC-300M from the
+// `modelDir` given in the request (omnilingual-ctc-300m.tflite +
+// tokenizer.model) and keeps it warm for subsequent grades.
+static std::unique_ptr<speech_core::LiteRTOmnilingualStt> g_stt;
+static std::string g_stt_dir;
+
+static void handle_transcribe(const json::Dict& req, const std::string& id) {
+    const std::string audio_path = get(req, "audioPath");
+    const std::string model_dir = get(req, "modelDir");
+    if (audio_path.empty() || model_dir.empty()) {
+        emit_error(id, "transcribe requires audioPath and modelDir");
+        return;
+    }
+    std::vector<float> audio;
+    int rate = 0;
+    if (!load_audio_mono(audio_path, audio, rate) || audio.empty()) {
+        emit_error(id, "could not decode audio: " + audio_path);
+        return;
+    }
+    if (!g_stt || g_stt_dir != model_dir) {
+        const std::string model = model_dir + "/omnilingual-ctc-300m.tflite";
+        const std::string tok = model_dir + "/tokenizer.model";
+        if (!fs::exists(model) || !fs::exists(tok)) {
+            emit_error(id, "STT model files not found under: " + model_dir);
+            return;
+        }
+        log_err("[sidecar] loading grading STT (Omnilingual CTC-300M) from " + model_dir);
+        try {
+            g_stt = std::make_unique<speech_core::LiteRTOmnilingualStt>(model, tok, false);
+            g_stt_dir = model_dir;
+        } catch (const std::exception& e) {
+            g_stt.reset();
+            emit_error(id, std::string("STT load failed: ") + e.what());
+            return;
+        }
+    }
+    std::vector<float> a16 = (rate == 16000)
+        ? std::move(audio)
+        : speech_core::Resampler::resample(audio.data(), audio.size(), rate, 16000);
+    auto res = g_stt->transcribe(a16.data(), a16.size(), 16000);
+    emit_line("{\"id\":\"" + json_escape(id) + "\",\"ok\":true,\"result\":{" +
+              "\"text\":\"" + json_escape(res.text) + "\"}}");
+}
+
 static void handle_synthesize(const json::Dict& req, const std::string& id) {
     const std::string ref_path = get(req, "referenceAudioPath");
     const std::string text = get(req, "text");
@@ -296,12 +347,20 @@ static void handle_synthesize(const json::Dict& req, const std::string& id) {
     long long max_steps = get_int(req, "maxTokens").value_or(256);
     if (max_steps < 32) max_steps = 32;
     if (max_steps > 512) max_steps = 512;
+    // minStopSteps: ignore the model's stop signal before this many AR steps.
+    // The Rust side scales it with word count — VoxCPM2 fires its stop token
+    // prematurely on long non-Latin-script lines (measured: a 19-word Hindi
+    // sentence stops at ~40 steps ≈ 6 s, audibly truncated), and with ASR
+    // grading unavailable on this platform the cut take would be accepted.
+    long long min_stop = get_int(req, "minStopSteps").value_or(32);
+    if (min_stop < 8) min_stop = 8;
+    if (min_stop > max_steps - 8) min_stop = max_steps - 8;
 
     sc_voxcpm2_clear_reference(g_synth);
     sc_voxcpm2_set_instruction(g_synth, instruct.c_str());
     sc_voxcpm2_set_seed(g_synth, seed);
     sc_voxcpm2_set_max_steps(g_synth, static_cast<int>(max_steps));
-    sc_voxcpm2_set_min_steps_before_stop(g_synth, 32);
+    sc_voxcpm2_set_min_steps_before_stop(g_synth, static_cast<int>(min_stop));
 
     if (sc_voxcpm2_set_reference(g_synth, ref.data(), ref.size(), ref_rate) != 0) {
         emit_error(id, std::string("set_reference failed: ") + sc_voxcpm2_last_error(g_synth));
@@ -320,6 +379,8 @@ static void handle_synthesize(const json::Dict& req, const std::string& id) {
             " refSamples=" + std::to_string(ref.size()) +
             " refRate=" + std::to_string(ref_rate) + ref_levels +
             " seed=" + std::to_string(seed) +
+            " maxSteps=" + std::to_string(max_steps) +
+            " minStop=" + std::to_string(min_stop) +
             " instruct=" + (instruct.empty() ? "(none)" : instruct));
 
     std::vector<float> audio;
@@ -388,6 +449,8 @@ int main() {
             handle_synthesize(req, id);
         } else if (command == "probe_reference") {
             handle_probe(req, id);
+        } else if (command == "transcribe") {
+            handle_transcribe(req, id);
         } else {
             emit_error(id, "unknown command: " + command);
         }
