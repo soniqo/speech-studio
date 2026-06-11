@@ -98,10 +98,9 @@ describe("projectStore.updateClip / removeClip", () => {
     useProjectStore.getState().addTrack(t);
     const clip = newClip({ trackId: t.id, startSec: 0, endSec: 2 });
     useProjectStore.getState().addClip(clip);
-    useProjectStore.getState().updateClip(clip.id, { text: "Updated", mode: "dynamic" });
+    useProjectStore.getState().updateClip(clip.id, { text: "Updated" });
     const updated = (useProjectStore.getState().project.tracks[0] as SpeakerTrack).clips[0];
     expect(updated.text).toBe("Updated");
-    expect(updated.mode).toBe("dynamic");
     expect(updated.startSec).toBe(0);
   });
 

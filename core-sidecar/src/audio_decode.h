@@ -14,4 +14,14 @@
 // (the VoxCPM2 C ABI resamples to 16 kHz internally).
 bool load_audio_mono(const std::string& path, std::vector<float>& out, int& sample_rate);
 
+// Level statistics over a decoded clip. Used by the probe_reference command
+// to surface "this reference is nearly silent" at clone time — the field
+// failure this guards against was a -25 dB reference accepted without a
+// word, producing inaudible clones (VoxCPM2 tracks reference amplitude).
+struct AudioStats {
+    double rms  = 0.0;  // full-clip root-mean-square, [0, 1] scale
+    float  peak = 0.0f; // max |sample|
+};
+AudioStats compute_audio_stats(const std::vector<float>& samples);
+
 #endif  // SONIQO_AUDIO_DECODE_H

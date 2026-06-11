@@ -24,8 +24,6 @@ export function wrapTag(text: string, tag: EmotionTag): string {
   return `<${tag}>${text}</${tag}>`;
 }
 
-export type GenerationMode = "fixed" | "dynamic";
-
 export type VoiceSource = "clip-clone" | "track-clone" | "library";
 
 export interface Voice {
@@ -37,6 +35,13 @@ export interface Voice {
   // call. Voice is "incomplete" until this is non-empty.
   referenceText: string;
   createdAt: string;
+  // Probe metadata measured at clone time (probe_reference). Absent on voices
+  // created before probing existed or on sidecars without probe support.
+  referenceDurationSec?: number;
+  referenceSampleRate?: number;
+  // Full-clip RMS in [0,1]. < 0.005 is nearly silent (clones inaudibly);
+  // < 0.04 is quiet (speech-core auto-boosts it during synthesis).
+  referenceRms?: number;
 }
 
 export interface ClipTake {
@@ -46,7 +51,6 @@ export interface ClipTake {
   createdAt: string;
   settings: {
     voiceId: string;
-    mode: GenerationMode;
   };
 }
 
@@ -57,7 +61,6 @@ export interface Clip {
   endSec: number;
   text: string;
   voiceOverrideId?: string;
-  mode: GenerationMode;
   locked: boolean;
   renderedAudioPath?: string;
   history: ClipTake[];

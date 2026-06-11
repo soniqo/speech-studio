@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { GenerationMode, Voice } from "../types/project";
+import type { Project, Voice } from "../types/project";
 
 export interface PingResult {
   id: string;
@@ -33,10 +33,30 @@ export function pickAudio(): Promise<PickedAudio | null> {
   return invoke<PickedAudio | null>("pick_audio");
 }
 
+export interface ReferenceProbe {
+  sampleRate: number;
+  durationSec: number;
+  /** Full-clip RMS in [0,1]; < 0.005 = nearly silent, < 0.04 = quiet. */
+  rms: number;
+  peak: number;
+}
+
+/**
+ * Decode a candidate reference clip in the sidecar and measure its level.
+ * Resolves to null when the active sidecar has no probe support (callers
+ * should then skip level validation).
+ */
+export function probeReference(path: string): Promise<ReferenceProbe | null> {
+  return invoke<ReferenceProbe | null>("probe_reference", { args: { path } });
+}
+
 export interface CloneVoiceArgs {
   referencePath: string;
   name: string;
   referenceText: string;
+  referenceDurationSec?: number;
+  referenceSampleRate?: number;
+  referenceRms?: number;
 }
 
 export function cloneVoice(args: CloneVoiceArgs): Promise<Voice> {
@@ -49,12 +69,12 @@ export interface SynthesizeClipArgs {
   voiceId: string;
   referenceAudioPath: string;
   referenceText: string;
-  mode: GenerationMode;
-  targetDurationSec?: number;
 }
 
 export interface SynthesizeClipResult {
   audioPath: string;
+  /** Real rendered duration — clips auto-fit their timeline slot to this. */
+  durationSec: number;
 }
 
 export function synthesizeClip(args: SynthesizeClipArgs): Promise<SynthesizeClipResult> {
@@ -81,6 +101,31 @@ export interface ExportProjectResult {
 
 export function exportProject(args: ExportProjectArgs): Promise<ExportProjectResult> {
   return invoke<ExportProjectResult>("export_project", { args });
+}
+
+export interface ProjectMeta {
+  id: string;
+  name: string;
+  savedAt: string;
+}
+
+export function listProjects(): Promise<ProjectMeta[]> {
+  return invoke<ProjectMeta[]>("list_projects");
+}
+
+/** Persist a project. The store object is serialized verbatim; Rust wraps it
+ * in a versioned envelope and writes <app-data>/projects/<id>.json. */
+export function saveProject(project: Project): Promise<ProjectMeta> {
+  return invoke<ProjectMeta>("save_project", { args: { projectJson: JSON.stringify(project) } });
+}
+
+/** Returns the saved Project as a JSON string (parse with JSON.parse). */
+export function loadProject(id: string): Promise<string> {
+  return invoke<string>("load_project", { args: { id } });
+}
+
+export function deleteProject(id: string): Promise<void> {
+  return invoke<void>("delete_project", { args: { id } });
 }
 
 export interface DemoVoiceSeed {

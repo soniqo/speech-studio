@@ -314,10 +314,20 @@ struct PickedAudio {
 
 #[tauri::command]
 async fn pick_audio(app: tauri::AppHandle) -> Result<Option<PickedAudio>, String> {
+    // Offer only formats the active sidecar can actually decode. The C++
+    // sidecar (Windows/Linux) handles WAV/MP3/FLAC via dr_libs; offering
+    // m4a/aac/ogg there surfaced as a hard "could not decode" error long
+    // after the pick. The Swift sidecar decodes via AVFoundation and keeps
+    // the wider list.
+    #[cfg(target_os = "macos")]
+    const AUDIO_EXTS: &[&str] = &["wav", "mp3", "m4a", "aac", "flac", "ogg"];
+    #[cfg(not(target_os = "macos"))]
+    const AUDIO_EXTS: &[&str] = &["wav", "mp3", "flac"];
+
     let (tx, rx) = std::sync::mpsc::channel();
     app.dialog()
         .file()
-        .add_filter("Audio", &["wav", "mp3", "m4a", "aac", "flac", "ogg"])
+        .add_filter("Audio", AUDIO_EXTS)
         .pick_file(move |path| {
             let _ = tx.send(path);
         });
@@ -328,12 +338,72 @@ async fn pick_audio(app: tauri::AppHandle) -> Result<Option<PickedAudio>, String
 }
 
 #[derive(Deserialize)]
+struct ProbeReferenceArgs {
+    path: String,
+}
+
+#[derive(Serialize)]
+struct ReferenceProbe {
+    #[serde(rename = "sampleRate")]
+    sample_rate: u32,
+    #[serde(rename = "durationSec")]
+    duration_sec: f64,
+    rms: f64,
+    peak: f64,
+}
+
+/// Decode a candidate reference clip in the sidecar and report level stats,
+/// so the frontend can reject/warn on nearly-silent references at clone time
+/// (a -25 dB reference silently produced inaudible clones in the field —
+/// VoxCPM2 output tracks reference amplitude). Returns Ok(None) when the
+/// active sidecar predates the probe command (e.g. the Swift sidecar until
+/// it ships parity) — callers then skip validation rather than fail.
+#[tauri::command]
+async fn probe_reference(
+    manager: State<'_, SidecarManager>,
+    args: ProbeReferenceArgs,
+) -> Result<Option<ReferenceProbe>, String> {
+    let payload = serde_json::json!({
+        "id": format!("probe-{}", uuid::Uuid::new_v4().simple()),
+        "command": "probe_reference",
+        "referenceAudioPath": args.path,
+    });
+    let raw = manager.request(&payload)?;
+    if raw.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        let err = raw
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("probe_reference failed");
+        if err.contains("unknown command") {
+            return Ok(None); // sidecar without probe support — skip validation
+        }
+        return Err(err.to_string());
+    }
+    let result = raw.get("result").ok_or("probe_reference: missing result")?;
+    let f = |k: &str| result.get(k).and_then(|v| v.as_f64());
+    Ok(Some(ReferenceProbe {
+        sample_rate: f("sampleRate").unwrap_or(0.0) as u32,
+        duration_sec: f("durationSec").unwrap_or(0.0),
+        rms: f("rms").unwrap_or(0.0),
+        peak: f("peak").unwrap_or(0.0),
+    }))
+}
+
+#[derive(Deserialize)]
 struct CloneVoiceArgs {
     #[serde(rename = "referencePath")]
     reference_path: String,
     name: String,
     #[serde(rename = "referenceText", default)]
     reference_text: String,
+    // Probe metadata measured by probe_reference at pick time; persisted on
+    // the Voice so the card can show duration/rate/level and flag quiet refs.
+    #[serde(rename = "referenceDurationSec", default)]
+    reference_duration_sec: Option<f64>,
+    #[serde(rename = "referenceSampleRate", default)]
+    reference_sample_rate: Option<u32>,
+    #[serde(rename = "referenceRms", default)]
+    reference_rms: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -348,6 +418,12 @@ struct Voice {
     reference_text: String,
     #[serde(rename = "createdAt")]
     created_at: String,
+    #[serde(rename = "referenceDurationSec", skip_serializing_if = "Option::is_none")]
+    reference_duration_sec: Option<f64>,
+    #[serde(rename = "referenceSampleRate", skip_serializing_if = "Option::is_none")]
+    reference_sample_rate: Option<u32>,
+    #[serde(rename = "referenceRms", skip_serializing_if = "Option::is_none")]
+    reference_rms: Option<f64>,
 }
 
 #[tauri::command]
@@ -362,6 +438,9 @@ async fn clone_voice(args: CloneVoiceArgs) -> Result<Voice, String> {
         reference_audio_path: args.reference_path,
         reference_text: args.reference_text,
         created_at: chrono::Utc::now().to_rfc3339(),
+        reference_duration_sec: args.reference_duration_sec,
+        reference_sample_rate: args.reference_sample_rate,
+        reference_rms: args.reference_rms,
     })
 }
 
@@ -376,98 +455,205 @@ struct SynthesizeArgs {
     reference_audio_path: String,
     #[serde(rename = "referenceText")]
     reference_text: String,
-    #[allow(dead_code)]
-    mode: String,
-    #[serde(rename = "targetDurationSec", default)]
-    #[allow(dead_code)]
-    target_duration_sec: Option<f64>,
 }
 
 #[derive(Serialize)]
 struct SynthesizeResult {
     #[serde(rename = "audioPath")]
     audio_path: String,
+    /// Real rendered duration from the sidecar — the frontend fits the
+    /// clip's timeline slot to this (generation is always "dynamic").
+    #[serde(rename = "durationSec")]
+    duration_sec: f64,
 }
 
-// Whether ASR-graded retry is wired on this platform. Grading shells out to the
-// `speech` CLI (Parakeet), which ships with the macOS speech-swift toolchain.
-// On Windows/Linux there's no grader yet, so we accept the first successful
-// take. Wiring Parakeet-via-sidecar grading on those platforms is a follow-up
-// (the LiteRT sidecar already links speech-core's Parakeet wrapper).
-const GRADING_AVAILABLE: bool = cfg!(target_os = "macos");
+/// How ASR-graded retry runs on this platform. macOS shells out to the
+/// `speech` CLI (Parakeet, ships with the speech-swift toolchain). Windows and
+/// Linux grade through the sidecar's `transcribe` command (Omnilingual
+/// CTC-300M, multilingual), enabled by pointing SONIQO_STT_MODEL_DIR at a
+/// directory holding omnilingual-ctc-300m.tflite + tokenizer.model. With
+/// neither available we accept the first successful take.
+enum Grader {
+    SpeechCli,
+    Sidecar(String),
+    None,
+}
 
-#[tauri::command]
-async fn synthesize_clip(
-    manager: State<'_, SidecarManager>,
-    args: SynthesizeArgs,
-) -> Result<SynthesizeResult, String> {
-    if args.text.trim().is_empty() {
-        return Err("clip text is empty".into());
+fn resolve_grader() -> Grader {
+    if cfg!(target_os = "macos") {
+        return Grader::SpeechCli;
     }
-    // CosyVoice is the active engine. Reference transcript is recommended but
-    // not strictly required (CosyVoice falls back to spk-embedding-only cloning
-    // if absent); validate the audio path though.
-    if args.reference_audio_path.trim().is_empty() {
-        return Err("reference audio path is required".into());
+    if let Ok(dir) = std::env::var("SONIQO_STT_MODEL_DIR") {
+        if std::path::Path::new(&dir).join("omnilingual-ctc-300m.tflite").exists()
+            && std::path::Path::new(&dir).join("tokenizer.model").exists()
+        {
+            return Grader::Sidecar(dir);
+        }
+        eprintln!("[synth] SONIQO_STT_MODEL_DIR set but model files missing: {}", dir);
     }
+    Grader::None
+}
 
-    // VoxCPM2 is the active engine. Cloning is much more deterministic than
-    // CosyVoice (no FSQ-prompt leak, no inline-period EOS bug), so we keep a
-    // small ladder of seeds in case any single take grades badly — the demo
-    // sweep showed most takes pass on seed 1000 with this engine.
+/// Split text into sentences on terminal punctuation, including the
+/// Devanagari danda/double-danda. The terminator stays attached to its
+/// sentence so the model gets a clean stop cue per chunk.
+fn split_sentences(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for ch in text.chars() {
+        cur.push(ch);
+        if matches!(ch, '.' | '!' | '?' | '\u{0964}' | '\u{0965}' | '\n') {
+            let t = cur.trim();
+            if !t.is_empty() {
+                out.push(t.to_string());
+            }
+            cur.clear();
+        }
+    }
+    let t = cur.trim();
+    if !t.is_empty() {
+        out.push(t.to_string());
+    }
+    out
+}
+
+/// Split a sentence at clause punctuation (comma/semicolon/colon, plus the
+/// Arabic comma/semicolon), keeping the separator attached. Used to break
+/// over-long sentences at natural pause points before resorting to raw
+/// word-count cuts.
+fn split_clauses(sent: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for ch in sent.chars() {
+        cur.push(ch);
+        if matches!(ch, ',' | ';' | ':' | '\u{060C}' | '\u{061B}') {
+            let t = cur.trim();
+            if !t.is_empty() {
+                out.push(t.to_string());
+            }
+            cur.clear();
+        }
+    }
+    let t = cur.trim();
+    if !t.is_empty() {
+        out.push(t.to_string());
+    }
+    out
+}
+
+/// Greedily pack sentences into chunks of at most `max_words` words. A
+/// sentence longer than the cap is broken down first — at clause punctuation
+/// where possible, then into balanced word groups — so no chunk ever exceeds
+/// the cap. An over-cap chunk pushes the stop-step floor past the natural end
+/// of the audio, and the AR fills the gap with babble (the >12 s degradation
+/// on undelimited Hindi paragraphs). Word counting mirrors canon_tokens
+/// (Unicode-aware), so Devanagari counts correctly.
+fn chunk_text_for_synthesis(text: &str, max_words: usize) -> Vec<String> {
+    let mut units: Vec<String> = Vec::new();
+    for sent in split_sentences(text) {
+        if canon_tokens(&sent).len() <= max_words {
+            units.push(sent);
+            continue;
+        }
+        for clause in split_clauses(&sent) {
+            if canon_tokens(&clause).len() <= max_words {
+                units.push(clause);
+                continue;
+            }
+            // Balanced groups read better than a full chunk plus a stub.
+            let words: Vec<&str> = clause.split_whitespace().collect();
+            let groups = words.len().div_ceil(max_words);
+            let per = words.len().div_ceil(groups.max(1)).max(1);
+            for group in words.chunks(per) {
+                units.push(group.join(" "));
+            }
+        }
+    }
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_words = 0usize;
+    for sent in units {
+        let w = canon_tokens(&sent).len();
+        if cur_words > 0 && cur_words + w > max_words {
+            chunks.push(cur.trim().to_string());
+            cur = String::new();
+            cur_words = 0;
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(&sent);
+        cur_words += w;
+    }
+    if !cur.trim().is_empty() {
+        chunks.push(cur.trim().to_string());
+    }
+    if chunks.is_empty() {
+        chunks.push(text.trim().to_string());
+    }
+    chunks
+}
+
+/// One synthesis pass (seed/cfg retry ladder + optional ASR grading) for a
+/// single piece of text. Returns (audio_path, duration_sec) of the accepted
+/// take. Extracted from synthesize_clip so long-form chunking can call it
+/// once per sentence group.
+#[allow(clippy::too_many_arguments)]
+fn synth_one_line(
+    manager: &SidecarManager,
+    clip_id: &str,
+    voice_id: &str,
+    reference_audio_path: &str,
+    reference_text: &str,
+    text: &str,
+    invocation_salt: &str,
+    part_idx: usize,
+) -> Result<(String, f64), String> {
+    // Seed ladder: VoxCPM2 cloning is fairly deterministic; retries cover the
+    // occasional bad take. cfg bumps on retries pull the model harder toward
+    // the text (suppresses trailing repetition); past ~3.5 prosody flattens.
     const SEED_LADDER: &[u64] = &[1000, 1001, 1002, 1010, 1011, 1012];
-
-    // cfg_value ladder. CLI default is 2.0. We bump to 2.5 on retries because
-    // higher classifier-free-guidance pulls the model harder toward the text,
-    // suppressing trailing repetition ("Tonight. Tonight."). Past ~3.5 the
-    // prosody starts flattening, so we cap there.
     const CFG_LADDER: &[f32] = &[2.0, 2.5, 3.0];
 
-    // Hard upper bound on generated audio patches. Each patch is ~50 ms of
-    // audio at VoxCPM2's mel rate, so 200 patches ≈ 10 s. For a typical demo
-    // line (~3 s) this is far more than enough, but tight enough to cut off
-    // a runaway repeat before it can complete a full second cycle. The
-    // library defaults to 2000 (≈100 s) — way too loose for short clips.
-    let target_word_count = canon_tokens(&args.text).len();
-    let max_tokens = (target_word_count.saturating_mul(12) + 40).clamp(60, 240);
+    // Token budget: ~12 steps/word + headroom (each step ≈ 50 ms of audio).
+    let target_word_count = canon_tokens(text).len();
+    let max_tokens = (target_word_count.saturating_mul(12) + 40).clamp(60, 320);
+    // Floor under the model's stop signal: VoxCPM2 fires its stop token
+    // prematurely on long non-Latin-script lines (a 19-word Hindi sentence
+    // stops at ~40 steps ≈ 6 s, cutting the sentence). The model speaks
+    // ~2-3 steps (×160 ms) per word, so ×3 ≈ a slow full read — forces past
+    // the false stop without pinning renders to the floor (×8 produced a
+    // 42 s render for a 33-word line: exactly the floor, babble tail).
+    // ×2.5 steps/word: above the false-stop rate (~2.1/word measured on the
+    // truncating 19-word Hindi line) but below a natural full read (~2.5-3),
+    // so short chunks can still end naturally. A flat floor of 32 forced a
+    // 6-word chunk (natural ≈ 15 steps) to ramble to 74 steps / 11.8 s.
+    let min_stop_steps = (target_word_count.saturating_mul(5) / 2).clamp(8, max_tokens - 16);
 
-    // Period→comma preprocessing was a CosyVoice-specific workaround for its
-    // EOS attractor on inline periods. VoxCPM2 doesn't share that quirk, but
-    // keeping the preprocess is harmless and stays useful if we fall back.
-    let processed_text = preprocess_target(&args.text);
-    if processed_text != args.text {
-        eprintln!(
-            "[synth] clip {} preprocessed text: {:?} -> {:?}",
-            args.clip_id, args.text, processed_text
-        );
-    }
+    let grader = resolve_grader();
+    // Non-Latin targets get a stricter accept rule (see below): the babble
+    // tail VoxCPM2 leaves on Hindi overshoots is short in ASR tokens (~2) but
+    // seconds long audibly, so the Latin-tuned suffix allowance is too loose.
+    let target_is_non_latin = text.chars().any(|c| !c.is_ascii() && c.is_alphabetic());
 
-    let mut best: Option<(String, Grade, u64)> = None;
+    let mut best: Option<(String, Grade, u64, f64)> = None;
     let mut last_error: Option<String> = None;
-
-    // Per-invocation salt so each regenerate writes to a fresh audio file —
-    // the sidecar names its output WAV after the request id. Without this,
-    // re-running synth on the same clip overwrites the previous file at the
-    // same path, and the frontend's `<audio key={path}>` doesn't remount
-    // because the string is identical (WKWebView then serves the cached
-    // response). The salt only changes the on-disk filename; identity of
-    // the clip in the project state is still args.clip_id.
-    let invocation_salt = uuid::Uuid::new_v4().simple().to_string();
 
     for (attempt_idx, &seed) in SEED_LADDER.iter().enumerate() {
         let cfg = CFG_LADDER[attempt_idx.min(CFG_LADDER.len() - 1)];
         let payload = serde_json::json!({
-            "id": format!("synth-{}-s{}-{}", args.clip_id, seed, invocation_salt),
+            "id": format!("synth-{}-p{}-s{}-{}", clip_id, part_idx, seed, invocation_salt),
             "command": "synthesize_voxcpm2",
-            "text": processed_text,
-            "voiceId": args.voice_id,
-            "referenceAudioPath": args.reference_audio_path,
+            "text": text,
+            "voiceId": voice_id,
+            "referenceAudioPath": reference_audio_path,
             // VoxCPM2 ignores referenceText; we still pass it for parity with
             // the cosyvoice fallback path.
-            "referenceText": args.reference_text,
+            "referenceText": reference_text,
             "seed": seed,
             "cfgValue": cfg,
             "maxTokens": max_tokens,
+            "minStopSteps": min_stop_steps,
         });
 
         let raw = match manager.request(&payload) {
@@ -489,8 +675,8 @@ async fn synthesize_clip(
         if !env.ok {
             last_error = Some(env.error.unwrap_or_else(|| "sidecar error".into()));
             eprintln!(
-                "[synth] clip {} attempt {} (seed={}) failed: {}",
-                args.clip_id, attempt_idx, seed, last_error.as_ref().unwrap()
+                "[synth] clip {} part {} attempt {} (seed={}) failed: {}",
+                clip_id, part_idx, attempt_idx, seed, last_error.as_ref().unwrap()
             );
             continue;
         }
@@ -503,16 +689,18 @@ async fn synthesize_clip(
 
         // No ASR grader on this platform — accept the first successful take
         // rather than burning the whole seed ladder (each take is a full synth).
-        if !GRADING_AVAILABLE {
-            eprintln!(
-                "[synth] clip {} accepted first take (seed={}, {:.2}s; grading unavailable on this platform)",
-                args.clip_id, seed, duration
-            );
-            return Ok(SynthesizeResult { audio_path });
-        }
-
-        // ASR-grade via Parakeet, then check transcript shape.
-        let grade = asr_grade(&audio_path, &processed_text).unwrap_or_else(|| Grade {
+        let graded = match &grader {
+            Grader::SpeechCli => asr_grade(&audio_path, text),
+            Grader::Sidecar(dir) => asr_grade_sidecar(manager, &audio_path, text, dir),
+            Grader::None => {
+                eprintln!(
+                    "[synth] clip {} part {} accepted first take (seed={}, {:.2}s; grading unavailable on this platform)",
+                    clip_id, part_idx, seed, duration
+                );
+                return Ok((audio_path, duration));
+            }
+        };
+        let grade = graded.unwrap_or_else(|| Grade {
             coverage: 0.0,
             prefix_words: 0,
             suffix_words: 0,
@@ -520,9 +708,9 @@ async fn synthesize_clip(
             transcript: String::new(),
         });
         eprintln!(
-            "[synth] clip {} attempt {} (seed={}) {} cov={:.0}% pre={} suf={} rep={} ({:.2}s)",
-            args.clip_id, attempt_idx, seed,
-            if grade.is_clean() { "✓" } else { "✗" },
+            "[synth] clip {} part {} attempt {} (seed={}) {} cov={:.0}% pre={} suf={} rep={} ({:.2}s)",
+            clip_id, part_idx, attempt_idx, seed,
+            if grade.is_clean_for(target_is_non_latin) { "✓" } else { "✗" },
             grade.coverage * 100.0,
             grade.prefix_words,
             grade.suffix_words,
@@ -533,29 +721,277 @@ async fn synthesize_clip(
         // Keep the best attempt as fallback (composite score, not raw coverage).
         let take_it = best
             .as_ref()
-            .map(|(_, g, _)| g.score() < grade.score())
+            .map(|(_, g, _, _)| g.score() < grade.score())
             .unwrap_or(true);
         if take_it {
-            best = Some((audio_path.clone(), grade.clone(), seed));
+            best = Some((audio_path.clone(), grade.clone(), seed, duration));
         }
 
-        if grade.is_clean() {
+        if grade.is_clean_for(target_is_non_latin) {
             eprintln!(
-                "[synth] clip {} accepted on attempt {} (seed={}, cov={:.0}%)",
-                args.clip_id, attempt_idx, seed, grade.coverage * 100.0
+                "[synth] clip {} part {} accepted on attempt {} (seed={}, cov={:.0}%)",
+                clip_id, part_idx, attempt_idx, seed, grade.coverage * 100.0
             );
-            return Ok(SynthesizeResult { audio_path });
+            return Ok((audio_path, duration));
         }
     }
 
-    if let Some((audio_path, grade, seed)) = best {
+    if let Some((audio_path, grade, seed, duration)) = best {
         eprintln!(
-            "[synth] clip {} all attempts below threshold; returning best (seed={}, cov={:.0}%, score={:.2})",
-            args.clip_id, seed, grade.coverage * 100.0, grade.score()
+            "[synth] clip {} part {} all attempts below threshold; returning best (seed={}, cov={:.0}%, score={:.2})",
+            clip_id, part_idx, seed, grade.coverage * 100.0, grade.score()
         );
-        return Ok(SynthesizeResult { audio_path });
+        return Ok((audio_path, duration));
     }
     Err(last_error.unwrap_or_else(|| "all synth attempts failed".into()))
+}
+
+/// Words per synthesis chunk. VoxCPM2's AR quality drifts past ~15-20 s of
+/// continuous generation; ~14 words ≈ 4-7 s of speech keeps every chunk in
+/// the model's sweet spot regardless of total clip length.
+const MAX_CHUNK_WORDS: usize = 14;
+
+/// Silence inserted between concatenated chunks (sentence gap).
+const CHUNK_GAP_SEC: f64 = 0.28;
+
+/// Trim leading/trailing low-energy tails from a rendered chunk. The model
+/// often pads renders with silence (and the forced stop floor can leave a
+/// quiet tail); trimming keeps concatenated long-form output tight. Keeps a
+/// short natural pad on both ends. Energy gate is RMS over 50 ms windows.
+fn trim_silence_edges(samples: &[f32], rate: u32) -> &[f32] {
+    let win = (rate as usize / 20).max(1); // 50 ms
+    let pad = (rate as usize) * 15 / 100; // 150 ms
+    let rms = |w: &[f32]| (w.iter().map(|s| (*s as f64) * (*s as f64)).sum::<f64>() / w.len() as f64).sqrt();
+    let gate = 0.004f64;
+    // Segment-based edge trim. VoxCPM2 takes can end with seconds of dead
+    // air containing a click and a short non-verbal burst (measured: speech
+    // ends 10.2 s, click at 11.4 s, 0.25 s grunt at 12.1 s). ASR grading
+    // can't catch those (non-verbal), and any loudness/run-length anchor is
+    // defeated by the burst being genuinely loud — so the rule is structural:
+    // an edge segment that is short AND far from the speech body is junk.
+    let voiced: Vec<bool> = samples
+        .chunks(win)
+        .map(|w| w.len() == win && rms(w) >= gate)
+        .collect();
+    // Voiced runs → segments [start, end) in window units.
+    let mut segs: Vec<(usize, usize)> = Vec::new();
+    let mut open: Option<usize> = None;
+    for (i, &v) in voiced.iter().enumerate() {
+        match (v, open) {
+            (true, None) => open = Some(i),
+            (false, Some(s)) => {
+                segs.push((s, i));
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = open {
+        segs.push((s, voiced.len()));
+    }
+    // Bridge intra-phrase pauses (≤ 200 ms) so words merge into one segment.
+    const BRIDGE: usize = 4;
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for seg in segs {
+        if let Some(prev) = merged.last_mut() {
+            if seg.0 - prev.1 <= BRIDGE {
+                prev.1 = seg.1;
+                continue;
+            }
+        }
+        merged.push(seg);
+    }
+    // Shed edge junk: < 0.5 s of audio sitting > 0.6 s away from the rest.
+    const MIN_DUR: usize = 10; // 0.5 s
+    const FAR: usize = 12; // 0.6 s
+    while merged.len() > 1 {
+        let last = merged[merged.len() - 1];
+        let gap = last.0 - merged[merged.len() - 2].1;
+        if last.1 - last.0 < MIN_DUR && gap > FAR {
+            merged.pop();
+        } else {
+            break;
+        }
+    }
+    while merged.len() > 1 {
+        let first = merged[0];
+        let gap = merged[1].0 - first.1;
+        if first.1 - first.0 < MIN_DUR && gap > FAR {
+            merged.remove(0);
+        } else {
+            break;
+        }
+    }
+    let Some(&(f, _)) = merged.first() else {
+        return samples; // all-quiet chunk: leave untouched
+    };
+    let l = merged.last().unwrap().1;
+    let s0 = (f * win).saturating_sub(pad);
+    let e0 = (l * win + pad).min(samples.len());
+    &samples[s0..e0]
+}
+
+/// RMS over only the voiced part of a chunk (50 ms windows above the same
+/// energy gate as trim_silence_edges), so inter-word silence doesn't skew
+/// the loudness estimate.
+fn voiced_rms(samples: &[f32], rate: u32) -> f64 {
+    let win = (rate as usize / 20).max(1);
+    let gate = 0.004f64;
+    let mut acc = 0f64;
+    let mut n = 0usize;
+    for w in samples.chunks(win) {
+        let e = w.iter().map(|s| (*s as f64) * (*s as f64)).sum::<f64>() / w.len() as f64;
+        if e.sqrt() >= gate {
+            acc += e * w.len() as f64;
+            n += w.len();
+        }
+    }
+    if n == 0 {
+        return 0.0;
+    }
+    (acc / n as f64).sqrt()
+}
+
+/// Scale each rendered chunk to the median voiced RMS of the set. VoxCPM2's
+/// output level wanders between independent AR runs — measured ~8 dB sag from
+/// the first to the last chunk of a 3-chunk Hindi render, heard as "quality
+/// degrading toward the end". Gain is clamped (0.5×–2.5×) and peak-capped at
+/// 0.95 so a quiet noisy chunk can't be blown up into audible hiss.
+fn equalize_chunk_loudness(rendered: &mut [Vec<f32>], rate: u32) {
+    if rendered.len() < 2 {
+        return;
+    }
+    let rms_vals: Vec<f64> = rendered.iter().map(|c| voiced_rms(c, rate)).collect();
+    let mut sorted: Vec<f64> = rms_vals.iter().copied().filter(|r| *r > 1e-5).collect();
+    if sorted.is_empty() {
+        return;
+    }
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let target = sorted[sorted.len() / 2];
+    for (chunk, rms) in rendered.iter_mut().zip(rms_vals) {
+        if rms <= 1e-5 {
+            continue;
+        }
+        let mut gain = (target / rms).clamp(0.5, 2.5);
+        let peak = chunk.iter().fold(0f32, |m, s| m.max(s.abs())) as f64;
+        if peak * gain > 0.95 {
+            gain = 0.95 / peak;
+        }
+        if (gain - 1.0).abs() < 0.05 {
+            continue;
+        }
+        for s in chunk.iter_mut() {
+            *s = (*s as f64 * gain) as f32;
+        }
+    }
+}
+
+#[tauri::command]
+async fn synthesize_clip(
+    manager: State<'_, SidecarManager>,
+    args: SynthesizeArgs,
+) -> Result<SynthesizeResult, String> {
+    if args.text.trim().is_empty() {
+        return Err("clip text is empty".into());
+    }
+    if args.reference_audio_path.trim().is_empty() {
+        return Err("reference audio path is required".into());
+    }
+
+    // Period→comma preprocessing was a CosyVoice-specific workaround for its
+    // EOS attractor on inline periods. VoxCPM2 doesn't share that quirk, but
+    // keeping the preprocess is harmless and stays useful if we fall back.
+    let processed_text = preprocess_target(&args.text);
+    if processed_text != args.text {
+        eprintln!(
+            "[synth] clip {} preprocessed text: {:?} -> {:?}",
+            args.clip_id, args.text, processed_text
+        );
+    }
+
+    // Per-invocation salt so each regenerate writes to a fresh audio file —
+    // the frontend's `<audio key={path}>` doesn't remount on an identical
+    // path string (the WebView serves the cached response).
+    let invocation_salt = uuid::Uuid::new_v4().simple().to_string();
+
+    // Long form: split into sentence groups and synthesize each with fresh
+    // AR state, concatenating with a natural gap. A single short text takes
+    // the direct path (identical to the previous behavior).
+    let chunks = chunk_text_for_synthesis(&processed_text, MAX_CHUNK_WORDS);
+    if chunks.len() <= 1 {
+        let (audio_path, duration_sec) = synth_one_line(
+            &manager,
+            &args.clip_id,
+            &args.voice_id,
+            &args.reference_audio_path,
+            &args.reference_text,
+            &processed_text,
+            &invocation_salt,
+            0,
+        )?;
+        return Ok(SynthesizeResult { audio_path, duration_sec });
+    }
+
+    eprintln!(
+        "[synth] clip {} long-form: {} chunks (≤{} words each)",
+        args.clip_id,
+        chunks.len(),
+        MAX_CHUNK_WORDS
+    );
+    let mut rendered: Vec<Vec<f32>> = Vec::new();
+    let mut rate: u32 = 0;
+    let mut first_path: Option<std::path::PathBuf> = None;
+    for (i, chunk) in chunks.iter().enumerate() {
+        let (path, _dur) = synth_one_line(
+            &manager,
+            &args.clip_id,
+            &args.voice_id,
+            &args.reference_audio_path,
+            &args.reference_text,
+            chunk,
+            &invocation_salt,
+            i,
+        )?;
+        let pb = std::path::PathBuf::from(&path);
+        let (r, ch, samples) = read_wav_pcm_mono(&pb)?;
+        if ch != 1 {
+            return Err(format!("chunk {} WAV is not mono", i));
+        }
+        if rate == 0 {
+            rate = r;
+        } else if r != rate {
+            return Err(format!("chunk {} sample rate {} != {}", i, r, rate));
+        }
+        rendered.push(trim_silence_edges(&samples, rate).to_vec());
+        if first_path.is_none() {
+            first_path = Some(pb);
+        }
+    }
+    equalize_chunk_loudness(&mut rendered, rate);
+    let mut combined: Vec<f32> = Vec::new();
+    for (i, chunk) in rendered.iter().enumerate() {
+        if i > 0 {
+            let gap = (rate as f64 * CHUNK_GAP_SEC) as usize;
+            combined.extend(std::iter::repeat(0.0f32).take(gap));
+        }
+        combined.extend_from_slice(chunk);
+    }
+    let dir = first_path
+        .as_ref()
+        .and_then(|p| p.parent())
+        .ok_or("no chunk output dir")?
+        .to_path_buf();
+    let out_path = dir.join(format!("synth-{}-full-{}.wav", args.clip_id, invocation_salt));
+    write_wav_pcm16_mono(&out_path, rate, &combined)?;
+    let duration_sec = combined.len() as f64 / rate as f64;
+    eprintln!(
+        "[synth] clip {} long-form done: {:.2}s across {} chunks",
+        args.clip_id, duration_sec, chunks.len()
+    );
+    Ok(SynthesizeResult {
+        audio_path: out_path.to_string_lossy().into_owned(),
+        duration_sec,
+    })
 }
 
 /// Replace inline periods ('. ' inside the body) with ', '. CosyVoice3's LLM
@@ -621,9 +1057,26 @@ impl Grade {
     ///     repetition or filler.
     ///   - repeated == 0 blocks line-repetition takes entirely.
     fn is_clean(&self) -> bool {
-        self.coverage >= 0.75
-            && self.prefix_words <= 1
-            && self.suffix_words <= 2
+        self.is_clean_for(false)
+    }
+
+    /// Accept rule with script-aware strictness. Non-Latin (e.g. Hindi)
+    /// targets use a lower coverage bar — the grading ASR (Omnilingual) mixes
+    /// Devanagari and Urdu script for Hindustani, and even skeleton-folded
+    /// matching (see tokens_match) drops some words — but a tighter suffix
+    /// bound: VoxCPM2's overshoot babble on Hindi decodes to only ~2 junk
+    /// tokens yet is seconds long audibly, so 2 trailing words is already a
+    /// broken take there. The prefix allowance is looser for non-Latin (≤2):
+    /// cross-script ASR reliably mishears a chunk's cold-start word as two
+    /// unalignable tokens (measured pre=2 on every seed of a clean Hindi
+    /// chunk), while real reference-echo prefixes are far longer (pre=31 on
+    /// the one bad take in the same ladder).
+    fn is_clean_for(&self, non_latin: bool) -> bool {
+        let (min_cov, max_prefix, max_suffix) =
+            if non_latin { (0.6, 2, 1) } else { (0.75, 1, 2) };
+        self.coverage >= min_cov
+            && self.prefix_words <= max_prefix
+            && self.suffix_words <= max_suffix
             && self.repeated_target_words == 0
     }
 
@@ -661,6 +1114,175 @@ fn asr_grade(audio_path: &str, target: &str) -> Option<Grade> {
     Some(grade_transcript(&transcript, target))
 }
 
+/// Grade via the sidecar's `transcribe` command (Omnilingual CTC-300M) —
+/// the Windows/Linux counterpart of asr_grade's `speech` CLI shell-out.
+fn asr_grade_sidecar(
+    manager: &SidecarManager,
+    audio_path: &str,
+    target: &str,
+    model_dir: &str,
+) -> Option<Grade> {
+    let payload = serde_json::json!({
+        "id": format!("grade-{}", uuid::Uuid::new_v4().simple()),
+        "command": "transcribe",
+        "audioPath": audio_path,
+        "modelDir": model_dir,
+    });
+    let raw = match manager.request(&payload) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[synth] sidecar transcribe failed: {}", e);
+            return None;
+        }
+    };
+    let env: SidecarResponse = serde_json::from_value(raw).ok()?;
+    if !env.ok {
+        eprintln!(
+            "[synth] sidecar transcribe error: {}",
+            env.error.unwrap_or_else(|| "unknown".into())
+        );
+        return None;
+    }
+    let result = env.result.unwrap_or_default();
+    let transcript = result.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    Some(grade_transcript(&transcript, target))
+}
+
+/// Fold a token to a script-agnostic consonant skeleton. Omnilingual decodes
+/// Hindustani in mixed Devanagari/Urdu script (no language pin), so grading
+/// "जोड़े" against "جوڑے" requires both to reduce to the same key. Both
+/// scripts are phonetic: keep consonant classes, drop vowels/diacritics.
+/// ASCII passes through unchanged.
+fn fold_skeleton(token: &str) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = token.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // Decomposed nukta forms (base + U+093C) change the consonant class:
+        // ड़/ढ़ are flaps (= Urdu ڑ → 'r'), ज़ → 'j', फ़ → 'f'. Consume the pair.
+        if chars.get(i + 1) == Some(&'\u{093C}') {
+            let k = match c {
+                'ड' | 'ढ' => Some('r'),
+                'ज' => Some('j'),
+                'फ' => Some('f'),
+                'क' | 'ख' => Some('k'),
+                'ग' => Some('g'),
+                _ => None,
+            };
+            if let Some(k) = k {
+                out.push(k);
+                i += 2;
+                continue;
+            }
+        }
+        let k: Option<char> = match c {
+            // Devanagari consonants (incl. precomposed nukta forms U+0958-095E;
+            // decomposed base+nukta also works — base maps, nukta drops below)
+            'क' | 'ख' | '\u{0958}' | '\u{0959}' => Some('k'),
+            'ग' | 'घ' | '\u{095A}' => Some('g'),
+            'च' | 'छ' => Some('c'),
+            'ज' | 'झ' | '\u{095B}' => Some('j'),
+            'ट' | 'ठ' | 'त' | 'थ' => Some('t'),
+            'ड' | 'ढ' | 'द' | 'ध' => Some('d'),
+            '\u{095C}' | '\u{095D}' => Some('r'),
+            'ण' | 'न' | 'ङ' | 'ञ' => Some('n'),
+            'प' => Some('p'),
+            'फ' => Some('p'),
+            '\u{095E}' => Some('f'),
+            'ब' | 'भ' => Some('b'),
+            'म' => Some('m'),
+            'य' => Some('y'),
+            'र' => Some('r'),
+            'ल' => Some('l'),
+            'व' => Some('v'),
+            'श' | 'ष' | 'स' => Some('s'),
+            'ह' => Some('h'),
+            // Devanagari vowels, matras, anusvara, virama, nukta → drop
+            '\u{0900}'..='\u{0903}'
+            | '\u{0904}'..='\u{0914}'
+            | '\u{093A}'..='\u{094F}'
+            | '\u{0962}'..='\u{0963}' => None,
+            // Urdu/Arabic consonants
+            'ک' | 'ق' | 'خ' => Some('k'),
+            'گ' | 'غ' => Some('g'),
+            'چ' => Some('c'),
+            'ج' | 'ز' | 'ذ' | 'ض' | 'ظ' | 'ژ' => Some('j'),
+            'ت' | 'ٹ' | 'ط' => Some('t'),
+            'د' | 'ڈ' => Some('d'),
+            'ڑ' => Some('r'),
+            'ن' => Some('n'),
+            // ں (nun ghunna) is nasalisation — drops like Devanagari anusvara.
+            'ں' => None,
+            'پ' => Some('p'),
+            'ف' => Some('f'),
+            'ب' => Some('b'),
+            'م' => Some('m'),
+            'ی' | 'ئ' => Some('y'),
+            'ر' => Some('r'),
+            'ل' => Some('l'),
+            'و' => Some('v'),
+            'س' | 'ش' | 'ص' | 'ث' => Some('s'),
+            'ہ' | 'ح' | 'ه' | 'ۂ' => Some('h'),
+            // ھ (heh doachashmee) marks aspiration in digraphs (ٹھ, کھ…) —
+            // drops so aspirated/unaspirated fold to the same class, matching
+            // how Devanagari ठ/ट both map to 't'.
+            'ھ' => None,
+            'ع' | 'ا' | 'آ' | 'أ' | 'إ' | 'ء' | 'ے' | 'ۓ' => None,
+            // Arabic tashkeel → drop
+            '\u{064B}'..='\u{0652}' => None,
+            other if other.is_ascii_alphanumeric() => Some(other),
+            _ => None,
+        };
+        if let Some(k) = k {
+            out.push(k);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Levenshtein distance over the (ASCII) folded skeletons.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<u8> = a.bytes().collect();
+    let b: Vec<u8> = b.bytes().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, &ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            cur.push((prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// Token equivalence for grading. Exact match first; for non-ASCII tokens,
+/// compare consonant skeletons with a small edit-distance tolerance — the
+/// Urdu spelling of a Hindi word carries vowel letters (و/ی) that fold into
+/// the skeleton, so an off-by-one consonant must still count as the same
+/// word. ASCII-vs-ASCII never matches fuzzily (English grading unchanged).
+fn tokens_match(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    if a.is_ascii() && b.is_ascii() {
+        return false;
+    }
+    let fa = fold_skeleton(a);
+    let fb = fold_skeleton(b);
+    if fa.is_empty() || fb.is_empty() {
+        return false;
+    }
+    if fa == fb {
+        return true;
+    }
+    let min_len = fa.len().min(fb.len());
+    let tol = if min_len >= 6 { 2 } else { usize::from(min_len >= 2) };
+    edit_distance(&fa, &fb) <= tol
+}
+
 /// LCS-based grading: find the longest subsequence of `target` words that
 /// appears (in order, with skips allowed) inside `transcript`. The position
 /// of the first/last aligned transcript words tells us about prefix/suffix
@@ -690,11 +1312,13 @@ fn grade_transcript(transcript: &str, target: &str) -> Grade {
 
     let n = trans.len();
     let m = targ.len();
-    // dp[i][j] = LCS length over trans[0..i] vs targ[0..j].
+    // dp[i][j] = LCS length over trans[0..i] vs targ[0..j]. Equivalence is
+    // tokens_match (script-folded fuzzy), not string equality, so a transcript
+    // in Urdu script still aligns against a Devanagari target.
     let mut dp = vec![vec![0u32; m + 1]; n + 1];
     for i in 1..=n {
         for j in 1..=m {
-            dp[i][j] = if trans[i - 1] == targ[j - 1] {
+            dp[i][j] = if tokens_match(&trans[i - 1], &targ[j - 1]) {
                 dp[i - 1][j - 1] + 1
             } else {
                 dp[i - 1][j].max(dp[i][j - 1])
@@ -716,7 +1340,7 @@ fn grade_transcript(transcript: &str, target: &str) -> Grade {
     let mut aligned: Vec<usize> = Vec::with_capacity(matched);
     let (mut i, mut j) = (n, m);
     while i > 0 && j > 0 {
-        if trans[i - 1] == targ[j - 1] {
+        if tokens_match(&trans[i - 1], &targ[j - 1]) && dp[i][j] == dp[i - 1][j - 1] + 1 {
             aligned.push(i - 1);
             i -= 1;
             j -= 1;
@@ -753,7 +1377,18 @@ fn grade_transcript(transcript: &str, target: &str) -> Grade {
 fn canon_tokens(s: &str) -> Vec<String> {
     s.to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' })
+        .map(|c| {
+            // Combining marks aren't is_alphanumeric() but are word-internal
+            // in Indic/Arabic scripts (matras, nukta, anusvara, tashkeel) —
+            // splitting on them shreds every Devanagari word into fragments
+            // and inflates word counts. Danda (U+0964/65) stays a separator.
+            let word_mark = ('\u{0900}'..='\u{0963}').contains(&c)
+                || ('\u{0610}'..='\u{061A}').contains(&c)
+                || ('\u{064B}'..='\u{065F}').contains(&c)
+                || c == '\u{0670}'
+                || ('\u{06D6}'..='\u{06ED}').contains(&c);
+            if c.is_alphanumeric() || c == '\'' || word_mark { c } else { ' ' }
+        })
         .collect::<String>()
         .split_whitespace()
         .map(|s| s.to_string())
@@ -984,6 +1619,129 @@ struct ExportResult {
     clip_count: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Project persistence — JSON files under <app_data_dir>/projects/.
+//
+// Format: one file per project, named <project-id>.json, wrapped in a
+// versioned envelope so the schema can evolve:
+//   { "formatVersion": 1, "savedAt": "<rfc3339>", "project": { ...Project } }
+// The frontend owns (de)serialization of the Project shape; Rust treats it
+// as opaque JSON and only reads id/name for the listing.
+// ---------------------------------------------------------------------------
+
+const PROJECT_FORMAT_VERSION: u64 = 1;
+
+fn projects_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?
+        .join("projects");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+#[derive(Serialize)]
+struct ProjectMeta {
+    id: String,
+    name: String,
+    #[serde(rename = "savedAt")]
+    saved_at: String,
+}
+
+#[tauri::command]
+async fn list_projects(app: tauri::AppHandle) -> Result<Vec<ProjectMeta>, String> {
+    let dir = projects_dir(&app)?;
+    let mut out = Vec::new();
+    let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        let project = &v["project"];
+        let (Some(id), Some(name)) = (project["id"].as_str(), project["name"].as_str()) else {
+            continue; // unreadable/foreign file — skip, don't fail the listing
+        };
+        out.push(ProjectMeta {
+            id: id.to_string(),
+            name: name.to_string(),
+            saved_at: v["savedAt"].as_str().unwrap_or_default().to_string(),
+        });
+    }
+    // Most recently saved first.
+    out.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
+    Ok(out)
+}
+
+#[derive(Deserialize)]
+struct SaveProjectArgs {
+    /// JSON serialization of the frontend Project object.
+    #[serde(rename = "projectJson")]
+    project_json: String,
+}
+
+#[tauri::command]
+async fn save_project(app: tauri::AppHandle, args: SaveProjectArgs) -> Result<ProjectMeta, String> {
+    let project: serde_json::Value =
+        serde_json::from_str(&args.project_json).map_err(|e| format!("parse project: {e}"))?;
+    let id = project["id"]
+        .as_str()
+        .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .ok_or("project.id missing or not a plain uuid")?
+        .to_string();
+    let name = project["name"].as_str().unwrap_or("Untitled").to_string();
+    let saved_at = chrono::Utc::now().to_rfc3339();
+
+    let envelope = serde_json::json!({
+        "formatVersion": PROJECT_FORMAT_VERSION,
+        "savedAt": saved_at,
+        "project": project,
+    });
+    let dir = projects_dir(&app)?;
+    let path = dir.join(format!("{id}.json"));
+    // Write-then-rename so a crash mid-write can't corrupt an existing save.
+    let tmp = dir.join(format!("{id}.json.tmp"));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&envelope).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("rename to {}: {e}", path.display()))?;
+
+    Ok(ProjectMeta { id, name, saved_at })
+}
+
+#[derive(Deserialize)]
+struct LoadProjectArgs {
+    id: String,
+}
+
+#[tauri::command]
+async fn load_project(app: tauri::AppHandle, args: LoadProjectArgs) -> Result<String, String> {
+    if !args.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("invalid project id".into());
+    }
+    let path = projects_dir(&app)?.join(format!("{}.json", args.id));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("parse: {e}"))?;
+    let version = v["formatVersion"].as_u64().unwrap_or(0);
+    if version > PROJECT_FORMAT_VERSION {
+        return Err(format!(
+            "project was saved by a newer Speech Studio (format v{version}); update the app"
+        ));
+    }
+    serde_json::to_string(&v["project"]).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_project(app: tauri::AppHandle, args: LoadProjectArgs) -> Result<(), String> {
+    if !args.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("invalid project id".into());
+    }
+    let path = projects_dir(&app)?.join(format!("{}.json", args.id));
+    std::fs::remove_file(&path).map_err(|e| format!("delete {}: {e}", path.display()))
+}
+
 #[tauri::command]
 async fn export_project(args: ExportArgs) -> Result<ExportResult, String> {
     if args.clips.is_empty() {
@@ -1168,9 +1926,14 @@ pub fn run() {
             init_model,
             pick_video,
             pick_audio,
+            probe_reference,
             clone_voice,
             synthesize_clip,
             export_project,
+            list_projects,
+            save_project,
+            load_project,
+            delete_project,
             seed_demo,
         ])
         .run(tauri::generate_context!())
@@ -1234,6 +1997,52 @@ mod tests {
     #[test]
     fn preprocess_target_handles_no_trailing_punctuation() {
         assert_eq!(preprocess_target("hello world"), "hello world");
+    }
+
+    #[test]
+    fn trim_sheds_far_short_tail_bursts() {
+        // Shape measured on a real take: 3 s speech, 1.1 s dead air, a 0.1 s
+        // click, 0.65 s dead air, a 0.25 s non-verbal burst at the very end.
+        // The click and burst must be shed; the speech body must survive.
+        let rate = 48000u32;
+        let mut s: Vec<f32> = Vec::new();
+        let mut push = |secs: f64, amp: f32| {
+            let n = (secs * rate as f64) as usize;
+            for i in 0..n {
+                s.push(if i % 2 == 0 { amp } else { -amp });
+            }
+        };
+        push(3.0, 0.02);
+        push(1.1, 0.0);
+        push(0.10, 0.05);
+        push(0.65, 0.0);
+        push(0.25, 0.03);
+        let dur = trim_silence_edges(&s, rate).len() as f64 / rate as f64;
+        assert!(dur < 3.3, "tail junk not shed: {:.2}s", dur);
+        assert!(dur > 2.9, "speech body cut: {:.2}s", dur);
+    }
+
+    #[test]
+    fn tokens_match_folds_devanagari_vs_urdu_script() {
+        // Omnilingual decodes Hindustani in mixed script; the same spoken word
+        // must align across spellings via the consonant skeleton.
+        assert!(tokens_match("जोड़े", "جوڑے"));
+        assert!(tokens_match("लाइन", "لائن"));
+        assert!(tokens_match("नीचे", "نیچے"));
+        // ASCII never matches fuzzily.
+        assert!(!tokens_match("line", "lane"));
+    }
+
+    #[test]
+    fn grade_hindi_mixed_script_transcript_flags_babble_tail() {
+        // Real Omnilingual transcript of a take whose last second was AR
+        // babble ("یان کھن"); target is the chunk text in Devanagari.
+        let target = "गेम अपने आप सेव नहीं होता कि ठीक बीच में एक हॉरिजॉन्टल लाइन जोड़े।";
+        let transcript = "گیم اپنے سیو نہیں ہوتا کہ ٹھیک بیچ میں ایک ہاریجانٹل لائن جوڑے یان کھن";
+        let g = grade_transcript(transcript, target);
+        assert!(g.coverage >= 0.6, "cross-script coverage too low: {}", g.coverage);
+        assert!(g.suffix_words >= 2, "babble tail not detected: suffix={}", g.suffix_words);
+        assert!(!g.is_clean_for(true), "babble take must be rejected for non-Latin targets");
     }
 
     #[test]

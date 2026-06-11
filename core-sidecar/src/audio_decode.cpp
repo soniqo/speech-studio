@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 
 // Single-translation-unit home for the dr_libs implementations.
@@ -90,4 +91,17 @@ bool load_audio_mono(const std::string& path, std::vector<float>& out, int& samp
     if (try_flac(path, out, sample_rate)) return true;
     if (try_mp3(path, out, sample_rate)) return true;
     return false;
+}
+
+AudioStats compute_audio_stats(const std::vector<float>& samples) {
+    AudioStats s;
+    if (samples.empty()) return s;
+    double sum_sq = 0.0;
+    for (float v : samples) {
+        sum_sq += static_cast<double>(v) * v;
+        const float a = v < 0 ? -v : v;
+        if (a > s.peak) s.peak = a;
+    }
+    s.rms = std::sqrt(sum_sq / static_cast<double>(samples.size()));
+    return s;
 }

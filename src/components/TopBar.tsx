@@ -2,8 +2,8 @@ import { useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { AlertCircle, Loader2 } from "lucide-react";
 import { useProjectStore, type ModelStatus } from "../state/projectStore";
-import { buildDemoProject } from "../state/demoProject";
 import { DevPing } from "./DevPing";
+import { ProjectsMenu } from "./ProjectsMenu";
 import { useSynthesizeAll, useUnsynthesizedCount } from "../hooks/useSynthesizeAll";
 import { exportProject, type ExportClip } from "../ipc/commands";
 import { Button } from "./ui/button";
@@ -40,18 +40,15 @@ function ModelChip({ status, error }: { status: ModelStatus; error?: string }) {
 
 export function TopBar() {
   const project = useProjectStore((s) => s.project);
-  const setProject = useProjectStore((s) => s.setProject);
+  const renameProject = useProjectStore((s) => s.renameProject);
   const modelStatus = useProjectStore((s) => s.model.status);
   const modelError = useProjectStore((s) => s.model.error);
-  const demoProgress = useProjectStore((s) => s.demoProgress);
-  const setDemoProgress = useProjectStore((s) => s.setDemoProgress);
   const synthesisStatus = useProjectStore((s) => s.synthesisStatus);
   const synthesisProgress = useProjectStore((s) => s.synthesisProgress);
   const hasContent = project.tracks.length > 0;
   const missingCount = useUnsynthesizedCount();
   const { run: runSynthesize } = useSynthesizeAll();
-  const [loadingDemo, setLoadingDemo] = useState(false);
-  const [demoError, setDemoError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const synthBusy = synthesisStatus === "running";
   const synthDisabled = synthBusy || modelStatus !== "ready" || !hasContent;
@@ -65,25 +62,19 @@ export function TopBar() {
       : "Resynthesize all";
 
   async function onSynthesize() {
+    setActionError(null);
     try {
-      await runSynthesize(synthMode);
+      const result = await runSynthesize(synthMode);
+      if (result.total === 0) {
+        setActionError(
+          "Nothing to synthesize — clips need text and an assigned voice (locked clips are skipped)",
+        );
+      } else if (result.failed > 0) {
+        setActionError(`${result.failed}/${result.total} clips failed — see console`);
+      }
     } catch (e) {
       console.error("synthesize failed", e);
-    }
-  }
-
-  async function loadDemo() {
-    setLoadingDemo(true);
-    setDemoError(null);
-    try {
-      const p = await buildDemoProject();
-      setProject(p);
-    } catch (e) {
-      console.error("Load demo failed", e);
-      setDemoError(String(e));
-    } finally {
-      setLoadingDemo(false);
-      setDemoProgress(null);
+      setActionError(String(e));
     }
   }
 
@@ -123,7 +114,7 @@ export function TopBar() {
       console.log("[export] ok", result);
     } catch (e) {
       console.error("[export] failed", e);
-      setDemoError(`export failed: ${e}`);
+      setActionError(`export failed: ${e}`);
     }
   }
 
@@ -143,40 +134,21 @@ export function TopBar() {
         <Input
           className="h-7 max-w-[220px] text-xs"
           value={project.name}
-          onChange={(e) => setProject({ ...project, name: e.target.value })}
+          onChange={(e) => renameProject(e.target.value)}
           spellCheck={false}
         />
       </div>
       <div className="ml-auto flex items-center gap-2">
         <ModelChip status={modelStatus} error={modelError} />
         <DevPing />
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={loadDemo}
-          disabled={loadingDemo}
-          title={
-            loadingDemo
-              ? "Synthesizing demo clips (first run loads the model + 4 clips; subsequent loads are cached)"
-              : modelStatus !== "ready"
-                ? "Will start once the VoxCPM2 model finishes loading"
-                : "Generate a demo scene via VoxCPM2 (cached after first run)"
-          }
-        >
-          {loadingDemo && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-          {loadingDemo
-            ? demoProgress
-              ? `${demoProgress.current}/${demoProgress.total} — ${demoProgress.message}`
-              : "Loading demo…"
-            : "Load demo"}
-        </Button>
-        {demoError && (
+        <ProjectsMenu />
+        {actionError && (
           <span
             className="flex items-center gap-1 truncate text-xs text-destructive max-w-[280px]"
-            title={demoError}
+            title={actionError}
           >
             <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-            {demoError}
+            {actionError}
           </span>
         )}
         <Button
@@ -196,9 +168,6 @@ export function TopBar() {
         >
           {synthBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
           {synthLabel}
-        </Button>
-        <Button variant="ghost" size="sm" disabled={!hasContent}>
-          Save
         </Button>
         <Button
           variant="default"

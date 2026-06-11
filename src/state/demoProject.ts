@@ -58,7 +58,7 @@ export async function buildDemoProject(): Promise<Project> {
               audioPath: sc.audioPath,
               text: sc.text,
               createdAt: now,
-              settings: { voiceId, mode: "fixed" as const },
+              settings: { voiceId },
             },
           ]
         : [];
@@ -68,7 +68,6 @@ export async function buildDemoProject(): Promise<Project> {
       startSec,
       endSec,
       text: sc.text,
-      mode: "fixed",
       locked: false,
       renderedAudioPath: sc.audioPath,
       history,

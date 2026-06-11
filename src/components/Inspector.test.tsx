@@ -63,7 +63,7 @@ describe("Inspector dispatch by selection kind", () => {
     expect(screen.getByDisplayValue("Sample reference transcript.")).toBeInTheDocument();
   });
 
-  it("shows the clip pane with mode label for a clip selection", () => {
+  it("shows the clip pane for a clip selection", () => {
     const track: SpeakerTrack = {
       kind: "speaker",
       id: "t1",
@@ -78,7 +78,7 @@ describe("Inspector dispatch by selection kind", () => {
     }));
     render(<Inspector />);
     expect(screen.getByText(/^Clip/)).toBeInTheDocument();
-    expect(screen.getByText(/fixed mode/i)).toBeInTheDocument();
+    expect(screen.getByText(/^Clip$/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /regenerate/i })).toBeDisabled();
   });
 });

@@ -22,7 +22,10 @@ function collectJobs(state: ReturnType<typeof useProjectStore.getState>, mode: "
       const voiceId = clip.voiceOverrideId ?? track.voiceId;
       if (!voiceId) continue;
       const voice = state.project.voices.find((v) => v.id === voiceId);
-      if (!voice || !voice.referenceAudioPath || !voice.referenceText.trim()) continue;
+      // referenceText is NOT required: VoxCPM2 clones from audio alone (the
+      // sidecar ignores reference transcripts). Requiring it silently skipped
+      // every voice created via the "+ Reference" flow.
+      if (!voice || !voice.referenceAudioPath) continue;
 
       const needs = mode === "all" ? true : !clip.renderedAudioPath;
       if (!needs) continue;
@@ -71,19 +74,21 @@ export function useSynthesizeAll() {
             voiceId: job.voice.id,
             referenceAudioPath: job.voice.referenceAudioPath!,
             referenceText: job.voice.referenceText,
-            mode: job.clip.mode,
-            targetDurationSec: job.clip.endSec - job.clip.startSec,
           });
           const take = {
             id: crypto.randomUUID(),
             audioPath: out.audioPath,
             text: job.clip.text,
             createdAt: new Date().toISOString(),
-            settings: { voiceId: job.voice.id, mode: job.clip.mode },
+            settings: { voiceId: job.voice.id },
           };
           updateClip(job.clip.id, {
             renderedAudioPath: out.audioPath,
             history: [take, ...job.clip.history],
+            // Generation is dynamic: the timeline slot follows the audio.
+            ...(out.durationSec > 0
+              ? { endSec: job.clip.startSec + out.durationSec }
+              : {}),
           });
           completed++;
         } catch (e) {

@@ -68,6 +68,9 @@ find_package(CURL REQUIRED)
 add_executable(speech-core-tts-sidecar src/main.cpp src/audio_decode.cpp src/sidecar_text.cpp)
 target_include_directories(speech-core-tts-sidecar PRIVATE
     "${SPEECH_CORE_DIR}/include"
+    # Vendored LiteRT C API headers — needed since the transcribe command uses
+    # speech-core's C++ LiteRT wrappers directly (litert_engine.h).
+    "${SPEECH_CORE_DIR}/third_party/litert"
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dr_libs")
 target_link_libraries(speech-core-tts-sidecar PRIVATE
     "${SPEECH_CORE_MODELS_LITERT_LIB}"
