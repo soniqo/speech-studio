@@ -1,7 +1,6 @@
 import { create } from "zustand";
 import {
   Clip,
-  GenerationMode,
   Project,
   Selection,
   SpeakerTrack,
@@ -46,7 +45,15 @@ interface ProjectStore {
   setSynthesisProgress: (p: { current: number; total: number; label: string } | null) => void;
 
   setProject: (project: Project) => void;
+  renameProject: (name: string) => void;
   resetProject: (name?: string) => void;
+
+  // JSON snapshot of the project at last save/load; null = never saved this
+  // session. Components derive dirty as:
+  //   savedSnapshot ? JSON.stringify(project) !== savedSnapshot
+  //                 : project has any content
+  savedSnapshot: string | null;
+  markSaved: (snapshot: string) => void;
 
   addTrack: (track: Track) => void;
   removeTrack: (trackId: string) => void;
@@ -57,6 +64,7 @@ interface ProjectStore {
   removeClip: (clipId: string) => void;
 
   addVoice: (voice: Voice) => void;
+  removeVoice: (voiceId: string) => void;
   assignVoiceToTrack: (trackId: string, voiceId: string | undefined) => void;
 
   select: (selection: Selection) => void;
@@ -113,7 +121,24 @@ export const useProjectStore = create<ProjectStore>((set) => ({
   setSynthesisProgress: (synthesisProgress) => set(() => ({ synthesisProgress })),
 
   setProject: (project) => set({ project, selection: { kind: "none" } }),
-  resetProject: (name) => set({ project: emptyProject(name), selection: { kind: "none" } }),
+  resetProject: (name) =>
+    set(() => {
+      const project = emptyProject(name);
+      return {
+        project,
+        selection: { kind: "none" } as Selection,
+        // A fresh empty project is "clean" — never prompts to save.
+        savedSnapshot: JSON.stringify(project),
+      };
+    }),
+
+  savedSnapshot: null,
+  markSaved: (snapshot) => set(() => ({ savedSnapshot: snapshot })),
+
+  // Functional update: safe to call while synthesis is mutating clips —
+  // a spread-from-render setProject({...project, name}) could clobber
+  // concurrent clip updates with stale state.
+  renameProject: (name) => set((s) => ({ project: { ...s.project, name } })),
 
   addTrack: (track) =>
     set((s) => ({ project: { ...s.project, tracks: [...s.project.tracks, track] } })),
@@ -180,6 +205,32 @@ export const useProjectStore = create<ProjectStore>((set) => ({
   addVoice: (voice) =>
     set((s) => ({ project: { ...s.project, voices: [...s.project.voices, voice] } })),
 
+  // Removing a voice also unassigns it everywhere it's referenced (speaker
+  // tracks and per-clip overrides) so nothing dangles; affected clips show
+  // as voiceless and synthesis for them is disabled until reassigned.
+  removeVoice: (voiceId) =>
+    set((s) => ({
+      project: {
+        ...s.project,
+        voices: s.project.voices.filter((v) => v.id !== voiceId),
+        tracks: s.project.tracks.map((t) =>
+          t.kind === "speaker"
+            ? {
+                ...t,
+                voiceId: t.voiceId === voiceId ? undefined : t.voiceId,
+                clips: t.clips.map((c) =>
+                  c.voiceOverrideId === voiceId ? { ...c, voiceOverrideId: undefined } : c,
+                ),
+              }
+            : t,
+        ),
+      },
+      selection:
+        s.selection.kind === "voice" && s.selection.id === voiceId
+          ? { kind: "none" }
+          : s.selection,
+    })),
+
   assignVoiceToTrack: (trackId, voiceId) =>
     set((s) => ({
       project: {
@@ -202,7 +253,7 @@ export function newClip(opts: {
   startSec: number;
   endSec: number;
   text?: string;
-  mode?: GenerationMode;
+
 }): Clip {
   return {
     id: crypto.randomUUID(),
@@ -210,7 +261,7 @@ export function newClip(opts: {
     startSec: opts.startSec,
     endSec: opts.endSec,
     text: opts.text ?? "",
-    mode: opts.mode ?? "fixed",
+
     locked: false,
     history: [],
   };

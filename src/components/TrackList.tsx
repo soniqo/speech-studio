@@ -1,4 +1,4 @@
-import { Plus, Video, Mic, AudioWaveform } from "lucide-react";
+import { Plus, Video, Mic, AudioWaveform, Trash2 } from "lucide-react";
 import { useProjectStore } from "../state/projectStore";
 import type { SpeakerTrack, Track } from "../types/project";
 import { Button } from "./ui/button";
@@ -22,6 +22,7 @@ export function TrackList() {
   const selection = useProjectStore((s) => s.selection);
   const select = useProjectStore((s) => s.select);
   const renameTrack = useProjectStore((s) => s.renameTrack);
+  const removeTrack = useProjectStore((s) => s.removeTrack);
   const addTrack = useProjectStore((s) => s.addTrack);
 
   function addSpeaker() {
@@ -80,6 +81,19 @@ export function TrackList() {
                   {metaForTrack(t, voiceName)}
                 </div>
               </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removeTrack(t.id);
+                }}
+                title="Delete track and its clips"
+                aria-label="Delete track"
+                className="h-6 w-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+              >
+                <Trash2 className="h-3 w-3" />
+              </Button>
             </button>
           );
         })}

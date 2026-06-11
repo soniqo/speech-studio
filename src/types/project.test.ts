@@ -15,18 +15,16 @@ describe("wrapTag", () => {
 });
 
 describe("newClip", () => {
-  it("defaults to fixed mode, unlocked, empty history", () => {
+  it("defaults to unlocked, empty history", () => {
     const c = newClip({ trackId: "t1", startSec: 0, endSec: 1 });
-    expect(c.mode).toBe("fixed");
     expect(c.locked).toBe(false);
     expect(c.history).toEqual([]);
     expect(c.text).toBe("");
   });
 
-  it("accepts text and mode overrides", () => {
-    const c = newClip({ trackId: "t1", startSec: 1, endSec: 2, text: "hi", mode: "dynamic" });
+  it("accepts text override", () => {
+    const c = newClip({ trackId: "t1", startSec: 1, endSec: 2, text: "hi" });
     expect(c.text).toBe("hi");
-    expect(c.mode).toBe("dynamic");
   });
 
   it("emits a unique id per clip", () => {

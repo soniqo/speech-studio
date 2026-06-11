@@ -24,8 +24,6 @@ export function wrapTag(text: string, tag: EmotionTag): string {
   return `<${tag}>${text}</${tag}>`;
 }
 
-export type GenerationMode = "fixed" | "dynamic";
-
 export type VoiceSource = "clip-clone" | "track-clone" | "library";
 
 export interface Voice {
@@ -53,7 +51,6 @@ export interface ClipTake {
   createdAt: string;
   settings: {
     voiceId: string;
-    mode: GenerationMode;
   };
 }
 
@@ -64,7 +61,6 @@ export interface Clip {
   endSec: number;
   text: string;
   voiceOverrideId?: string;
-  mode: GenerationMode;
   locked: boolean;
   renderedAudioPath?: string;
   history: ClipTake[];

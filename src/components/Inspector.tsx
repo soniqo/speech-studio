@@ -244,19 +244,18 @@ export function Inspector() {
         voiceId: effectiveVoice.id,
         referenceAudioPath: effectiveVoice.referenceAudioPath,
         referenceText: effectiveVoice.referenceText,
-        mode: current.mode,
-        targetDurationSec: current.endSec - current.startSec,
       });
       const take = {
         id: crypto.randomUUID(),
         audioPath: out.audioPath,
         text: current.text,
         createdAt: new Date().toISOString(),
-        settings: { voiceId: effectiveVoice.id, mode: current.mode },
+        settings: { voiceId: effectiveVoice.id },
       };
       updateClip(current.id, {
         renderedAudioPath: out.audioPath,
         history: [take, ...current.history],
+        ...(out.durationSec > 0 ? { endSec: current.startSec + out.durationSec } : {}),
       });
     } catch (e) {
       console.error("synthesize_clip failed", e);
@@ -278,37 +277,8 @@ export function Inspector() {
     <aside className="flex w-[320px] flex-col border-l border-border bg-card/40">
       <header className="flex items-center justify-between border-b border-border px-3.5 py-2">
         <span className="text-sm font-medium">Clip</span>
-        <span className="text-xs text-muted-foreground">{clip.mode} mode</span>
       </header>
       <div className="flex-1 space-y-4 overflow-y-auto px-3.5 py-3">
-        <Section>
-          <Label>Generation mode</Label>
-          <div className="inline-flex rounded-md border border-border bg-background p-0.5">
-            <button
-              className={cn(
-                "rounded-sm px-2.5 py-1 text-xs transition-colors",
-                clip.mode === "fixed"
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-              onClick={() => updateClip(clip.id, { mode: "fixed" })}
-            >
-              Fixed
-            </button>
-            <button
-              className={cn(
-                "rounded-sm px-2.5 py-1 text-xs transition-colors",
-                clip.mode === "dynamic"
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-              onClick={() => updateClip(clip.id, { mode: "dynamic" })}
-            >
-              Dynamic
-            </button>
-          </div>
-        </Section>
-
         <Section>
           <Label>Voice override</Label>
           <Select

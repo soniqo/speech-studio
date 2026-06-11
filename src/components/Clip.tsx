@@ -79,7 +79,6 @@ export function Clip({ clip, zoomPxPerSec }: ClipProps) {
       <div className="absolute bottom-1 left-2 right-2 flex items-center justify-between text-[10px] text-muted-foreground">
         <span className="inline-flex items-center gap-1">
           {clip.locked && <Lock className="h-2.5 w-2.5" />}
-          {clip.mode}
         </span>
         <span>{(clip.endSec - clip.startSec).toFixed(2)}s</span>
       </div>

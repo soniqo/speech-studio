@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Plus, Pause, Play, AudioLines, TriangleAlert } from "lucide-react";
+import { Plus, Pause, Play, AudioLines, TriangleAlert, Trash2 } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useProjectStore } from "../state/projectStore";
 import { cloneVoice, pickAudio, probeReference, type ReferenceProbe } from "../ipc/commands";
@@ -24,6 +24,7 @@ export function VoiceLibrary() {
   const voices = useProjectStore((s) => s.project.voices);
   const selection = useProjectStore((s) => s.selection);
   const addVoice = useProjectStore((s) => s.addVoice);
+  const removeVoice = useProjectStore((s) => s.removeVoice);
   const select = useProjectStore((s) => s.select);
 
   const [pendingQuietRef, setPendingQuietRef] = useState<{
@@ -110,6 +111,7 @@ export function VoiceLibrary() {
             referenceRms={v.referenceRms}
             selected={selection.kind === "voice" && selection.id === v.id}
             onSelect={() => select({ kind: "voice", id: v.id })}
+            onDelete={() => removeVoice(v.id)}
           />
         ))}
       </div>
@@ -170,6 +172,7 @@ interface VoiceCardProps {
   referenceRms?: number;
   selected: boolean;
   onSelect: () => void;
+  onDelete: () => void;
 }
 
 function VoiceCard({
@@ -183,6 +186,7 @@ function VoiceCard({
   referenceRms,
   selected,
   onSelect,
+  onDelete,
 }: VoiceCardProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -271,6 +275,19 @@ function VoiceCard({
         className="h-7 w-7 shrink-0"
       >
         {playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        title="Delete voice (tracks and clips using it become unassigned)"
+        aria-label="Delete voice"
+        className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+      >
+        <Trash2 className="h-3.5 w-3.5" />
       </Button>
     </button>
   );
