@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  Speech Studio's Swift sidecar runs MLX-Swift statically linked (verified by
+  inspecting Speech Studio.app/Contents — only two Mach-O binaries, no
+  embedded dylibs or frameworks). Metal is loaded from the system framework
+  path so library validation always accepts it. The sidecar opens no audio
+  input, no network sockets the sandbox would care about, and reads/writes
+  user-owned cache dirs that hardened runtime does not gate.
+
+  Result: minimum-privilege under hardened runtime is an empty entitlement
+  set. The re-sign step in CI applies this to override the app-wide
+  entitlements (mic, JIT) that Tauri's bundler stamps onto the sidecar by
+  default — those are irrelevant to the sidecar and removing them shrinks
+  attack surface on the most privileged process (it holds the loaded TTS
+  model).
+
+  Re-add entries here only with a concrete crash log or load failure
+  reproducing the need.
+-->
+<dict/>
+</plist>
