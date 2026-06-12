@@ -625,6 +625,56 @@ jobs:
           # Staple the .app too so the zipped artifact verifies offline.
           xcrun stapler staple "src-tauri/target/release/bundle/macos/Speech Studio.app"
 
+      # In-app auto-update artifact (tauri-plugin-updater). Built from the
+      # FINAL notarized + stapled .app — the updater swaps the archive's
+      # contents onto the installed app, so it must carry the production
+      # Apple signature. The minisign signature over the tar.gz bytes is a
+      # separate trust layer from Apple codesigning; the .sig content is
+      # embedded into latest.json, which the app polls at
+      # releases/latest/download/latest.json.
+      - name: Build updater artifact + latest.json
+        working-directory: speech-studio
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="src-tauri/target/release/bundle/macos"
+          APP="Speech Studio.app"
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE="Speech-Studio_${VERSION}_aarch64.app.tar.gz"
+          # The installer strips the first path component of every entry,
+          # so the .app must be the SINGLE top-level directory. AppleDouble
+          # (._*) and xattr entries would break the embedded codesign seal
+          # on extraction — suppress them.
+          COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata \
+            -czf "$BUNDLE_DIR/$ARCHIVE" -C "$BUNDLE_DIR" "$APP"
+          pnpm tauri signer sign "$BUNDLE_DIR/$ARCHIVE"
+          SIG="$(cat "$BUNDLE_DIR/$ARCHIVE.sig")"
+          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # latest.json schema notes: `signature` is the CONTENT of the .sig
+          # (a path or URL does not work); the asset URL must match the
+          # uploaded name exactly. Windows/Linux platform entries are a
+          # follow-up — the plugin treats a newer version with a missing
+          # platform key as an error, which the frontend hook logs and
+          # ignores.
+          python3 - "$VERSION" "$SIG" "$PUB_DATE" "$ARCHIVE" > "$BUNDLE_DIR/latest.json" <<'EOF'
+          import json, sys
+          version, sig, pub_date, archive = sys.argv[1:5]
+          print(json.dumps({
+              "version": version,
+              "notes": f"https://github.com/soniqo/speech-studio/releases/tag/v{version}",
+              "pub_date": pub_date,
+              "platforms": {
+                  "darwin-aarch64": {
+                      "signature": sig,
+                      "url": f"https://github.com/soniqo/speech-studio/releases/download/v{version}/{archive}",
+                  }
+              },
+          }, indent=2))
+          EOF
+          cat "$BUNDLE_DIR/latest.json"
+
       - name: Tear down signing keychain
         if: always()
         run: |
@@ -649,8 +699,12 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Attach .dmg to GitHub Release
+      - name: Attach .dmg + updater artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: speech-studio/src-tauri/target/release/bundle/dmg/*.dmg
+          files: |
+            speech-studio/src-tauri/target/release/bundle/dmg/*.dmg
+            speech-studio/src-tauri/target/release/bundle/macos/*.app.tar.gz
+            speech-studio/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+            speech-studio/src-tauri/target/release/bundle/macos/latest.json
           fail_on_unmatched_files: true
