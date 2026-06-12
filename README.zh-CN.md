@@ -55,13 +55,35 @@
 | **Windows**（x86_64） | [`.msi` / `.exe`](https://github.com/soniqo/speech-studio/releases/latest) | ✅ 已发布 |
 | **Linux**（x86_64） | [`.deb` / `.AppImage`](https://github.com/soniqo/speech-studio/releases/latest) | ✅ 已发布 |
 
-每个平台都会在**首次运行时下载语音模型**（支持断点续传）并缓存，因此安装包本身很小：
+每个平台都会在**首次运行时下载语音模型**并缓存，因此安装包本身很小：
 
-- **macOS** — `.dmg`（约 46 MB）；拖入 `/Applications`。首次运行会将约 2.75 GB 的 MLX 权重下载到 `~/.cache/huggingface/hub/`。
+- **macOS** — `.dmg`（约 46 MB）；拖入 `/Applications`。首次运行会将约 2.75 GB 的 MLX 权重下载到 `~/Library/Caches/qwen3-speech/`。
 - **Windows** — `.msi` 或 NSIS `-setup.exe`。首次运行会将约 4.6 GB 的 VoxCPM2-LiteRT 模型包下载到 `%LOCALAPPDATA%\speech-core`。
 - **Linux** — `.deb` 或 `.AppImage`。首次运行会将同样的模型包下载到 `~/.cache/speech-core`。
 
 这些构建**未签名**：Windows SmartScreen 需要点击 *More info → Run anyway*，macOS 首次打开需右键 → *打开* 以绕过 Gatekeeper。
+
+### 手动下载模型（macOS）
+
+如果应用内下载在不稳定或缓慢的网络上反复失败（`Download stalled for …: no progress` / `Failed to download …`），可以自行下载模型并放到应用读取的目录。共两部分：模型权重和一小组分词器文件。
+
+**方式 A — `hf` 命令行（推荐：支持断点续传）：**
+
+```bash
+pip install -U huggingface_hub
+
+hf download aufklarer/VoxCPM2-MLX-int8 \
+  --local-dir ~/Library/Caches/qwen3-speech/models/aufklarer/VoxCPM2-MLX-int8
+
+hf download openbmb/VoxCPM2 \
+  config.json tokenizer.json tokenizer_config.json \
+  tokenization_voxcpm2.py special_tokens_map.json \
+  --local-dir ~/Library/Caches/qwen3-speech-voxcpm2-tokenizer/models/openbmb/VoxCPM2
+```
+
+**方式 B — 浏览器：** 从 [aufklarer/VoxCPM2-MLX-int8](https://huggingface.co/aufklarer/VoxCPM2-MLX-int8/tree/main) 和 [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2/tree/main) 下载文件到上述两个目录。最小文件集：模型目录需要 `config.json` 和所有 `*.safetensors` 文件；分词器目录需要上面命令中列出的五个文件。
+
+应用会在下次启动时检测到这些文件并完全跳过下载。如果你覆盖了 `SONIQO_VOXCPM2_MODEL_ID`，请在模型路径中替换为对应的仓库 id。从终端启动的源码构建还可以通过 `HF_DOWNLOAD_STALL_TIMEOUT=<秒数>` 延长应用内下载的停滞容忍时间。
 
 ## 从源码构建
 
@@ -80,7 +102,7 @@ cd swift-sidecar && swift build       # 构建 Swift sidecar
 cd .. && pnpm tauri dev               # 启动应用，热重载 UI
 ```
 
-首次合成时同样会下载约 2.75 GB 的模型。
+首次合成时同样会下载约 2.75 GB 的模型（位于 `~/Library/Caches/qwen3-speech/`——如果网络不稳定，请参阅[手动下载模型](#手动下载模型macos)）。
 
 ### 开发循环 — Windows / Linux
 
