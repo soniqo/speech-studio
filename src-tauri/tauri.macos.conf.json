@@ -7,6 +7,10 @@
     ],
     "resources": {
       "binaries/mlx.metallib": "mlx.metallib"
+    },
+    "macOS": {
+      "entitlements": "Entitlements.app.plist",
+      "minimumSystemVersion": "15.0"
     }
   }
 }

@@ -17,12 +17,15 @@ concurrency:
 jobs:
   build:
     name: macOS (Apple Silicon)
+    # Tag pushes are handled by the release-macos job below (signed +
+    # notarized, gated on the `release` environment). This job covers PRs
+    # and main pushes with the ad-hoc bundle, so skip it on tags rather
+    # than building the same commit twice.
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     runs-on: macos-15
     timeout-minutes: 60
-    # softprops/action-gh-release needs to write to the Releases API on tag
-    # pushes; the default GITHUB_TOKEN is read-only without this block.
     permissions:
-      contents: write
+      contents: read
 
     steps:
       - name: Check out speech-studio
@@ -143,17 +146,6 @@ jobs:
           path: speech-studio/src-tauri/target/release/bundle/macos/*.app
           if-no-files-found: warn
           retention-days: 14
-
-      # Attach the .dmg to a GitHub Release when a tag like `v0.1.0` is
-      # pushed. Manual `git push origin v0.1.0` triggers this. We typically
-      # pre-create the release with `gh release create` (so we control the
-      # body); this step just uploads the CI-built artifact alongside.
-      - name: Attach .dmg to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: speech-studio/src-tauri/target/release/bundle/dmg/*.dmg
-          fail_on_unmatched_files: true
 
   # ---------------------------------------------------------------------------
   # Windows / Linux build the cross-platform C++ sidecar (core-sidecar), which
@@ -395,3 +387,270 @@ jobs:
             speech-studio/src-tauri/target/release/bundle/deb/*.deb
             speech-studio/src-tauri/target/release/bundle/appimage/*.AppImage
           fail_on_unmatched_files: false
+
+  # ---------------------------------------------------------------------------
+  # Signed + notarized macOS release. Runs ONLY on tag pushes and is bound to
+  # the `release` GitHub environment, whose required-reviewer rule pauses the
+  # job until a maintainer approves — so the signing secrets (environment-
+  # scoped, not repo-scoped) are never exposed to a run nobody signed off on.
+  # The plain `build` job covers PRs and main pushes with an ad-hoc bundle.
+  # ---------------------------------------------------------------------------
+  release-macos:
+    name: macOS release (signed + notarized)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: release
+    # softprops/action-gh-release writes to the Releases API.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out speech-studio
+        uses: actions/checkout@v4
+        with:
+          path: speech-studio
+
+      - name: Check out speech-swift (sibling repo)
+        uses: actions/checkout@v4
+        with:
+          repository: soniqo/speech-swift
+          path: speech-swift
+          ref: main
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            speech-studio/src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('speech-studio/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Set up Node + pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: speech-studio/pnpm-lock.yaml
+
+      - name: Install JS deps
+        working-directory: speech-studio
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Swift sidecar
+        working-directory: speech-studio/swift-sidecar
+        run: swift build -c release
+
+      - name: Stage sidecar + metallib for Tauri bundler
+        env:
+          SPEECH_SWIFT_RELEASE: v0.0.18
+        working-directory: speech-studio
+        run: |
+          mkdir -p src-tauri/binaries
+          cp swift-sidecar/.build/release/soniqo-tts-sidecar \
+             src-tauri/binaries/soniqo-tts-sidecar-aarch64-apple-darwin
+          curl -sSL --fail \
+            "https://github.com/soniqo/speech-swift/releases/download/${SPEECH_SWIFT_RELEASE}/speech-macos-arm64.tar.gz" \
+            -o /tmp/speech-release.tar.gz
+          tar -xzf /tmp/speech-release.tar.gz -C /tmp mlx.metallib
+          cp /tmp/mlx.metallib src-tauri/binaries/mlx.metallib
+
+      # A release build is still a tested build.
+      - name: Run Rust unit tests
+        working-directory: speech-studio/src-tauri
+        run: cargo test --lib
+
+      - name: Run frontend tests
+        working-directory: speech-studio
+        run: pnpm test
+
+      - name: Type-check
+        working-directory: speech-studio
+        run: pnpm tsc --noEmit
+
+      # Missing-secret on a release tag fails LOUDLY here rather than
+      # silently shipping unsigned.
+      - name: Set up signing keychain
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_CERTIFICATE:-}" ]]; then
+            echo "::error::APPLE_CERTIFICATE secret is empty — cannot sign release."
+            exit 1
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PW="$(openssl rand -hex 24)"
+          P12_PATH="$RUNNER_TEMP/cert.p12"
+          echo -n "$APPLE_CERTIFICATE" | base64 -d > "$P12_PATH"
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security import "$P12_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -k "$KEYCHAIN_PATH" \
+            -A -t cert -f pkcs12 \
+            -T /usr/bin/codesign -T /usr/bin/security
+          # Documented partition list per Apple TN3147; `-T codesign` at
+          # import time already grants codesign access.
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          # Pin an explicit login-keychain path rather than word-splitting
+          # `security list-keychains` output.
+          security list-keychain -d user -s "$KEYCHAIN_PATH" \
+            "$HOME/Library/Keychains/login.keychain-db"
+          rm -f "$P12_PATH"
+          # Only KEYCHAIN_PATH survives to the teardown step;
+          # `security delete-keychain` doesn't need the password and leaving
+          # it in the job env would expose it to every later step.
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Build Tauri bundle (.app + .dmg, Developer ID signed)
+        working-directory: speech-studio
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: pnpm tauri build
+
+      # NSMicrophoneUsageDescription has to live in Info.plist for the TCC
+      # mic prompt to render; Tauri 2 has no config knob for arbitrary plist
+      # keys. Mutating Info.plist breaks the bundler's signature — the
+      # re-sign steps below restore it.
+      - name: Inject NSMicrophoneUsageDescription into Info.plist
+        working-directory: speech-studio
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/release/bundle/macos/Speech Studio.app"
+          PLIST="$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c \
+            "Add :NSMicrophoneUsageDescription string 'Speech Studio uses the microphone to capture short reference clips for cloning your voice.'" \
+            "$PLIST" 2>/dev/null \
+          || /usr/libexec/PlistBuddy -c \
+            "Set :NSMicrophoneUsageDescription 'Speech Studio uses the microphone to capture short reference clips for cloning your voice.'" \
+            "$PLIST"
+
+      # Codesign order matters: nested binaries first, then the outer .app
+      # (the outer sign recomputes CodeResources from current nested sigs).
+      # Tauri's bundler signs the sidecar with the APP's entitlements (mic,
+      # JIT) — wrong for a Swift CLI hosting MLX — and omits --timestamp,
+      # which notarization requires. This replaces both.
+      - name: Re-sign sidecar with hardened runtime + sidecar entitlements
+        working-directory: speech-studio
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/release/bundle/macos/Speech Studio.app"
+          codesign --force --timestamp --options runtime \
+            --entitlements src-tauri/Entitlements.sidecar.plist \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            "$APP/Contents/MacOS/soniqo-tts-sidecar"
+          codesign -d --verbose=2 "$APP/Contents/MacOS/soniqo-tts-sidecar" 2>&1 \
+            | grep -E "flags=.*runtime" \
+            || { echo "::error::sidecar missing hardened runtime"; exit 1; }
+          codesign -d --verbose=2 "$APP/Contents/MacOS/soniqo-tts-sidecar" 2>&1 \
+            | grep -E "Timestamp=" \
+            || { echo "::error::sidecar missing secure timestamp"; exit 1; }
+
+      - name: Re-sign .app with hardened runtime + app entitlements
+        working-directory: speech-studio
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/release/bundle/macos/Speech Studio.app"
+          codesign --force --timestamp --options runtime \
+            --entitlements src-tauri/Entitlements.app.plist \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            "$APP"
+          codesign --verify --strict --deep --verbose=2 "$APP"
+
+      # The .dmg Tauri built embeds a STALE copy of the .app (pre re-sign).
+      # Rebuild from the now-properly-signed .app.
+      - name: Rebuild .dmg from re-signed .app
+        working-directory: speech-studio
+        run: |
+          set -euo pipefail
+          DMG_DIR="src-tauri/target/release/bundle/dmg"
+          APP="src-tauri/target/release/bundle/macos/Speech Studio.app"
+          OLD_DMG="$(ls "$DMG_DIR"/*.dmg | head -1)"
+          DMG_NAME="$(basename "$OLD_DMG")"
+          STAGE="$RUNNER_TEMP/dmg-stage"
+          rm -rf "$STAGE" && mkdir -p "$STAGE"
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          rm -f "$OLD_DMG"
+          hdiutil create -volname "Speech Studio" -srcfolder "$STAGE" \
+            -ov -format UDZO "$DMG_DIR/$DMG_NAME"
+          rm -rf "$STAGE"
+
+      - name: Codesign .dmg
+        working-directory: speech-studio
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          DMG="$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)"
+          codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DMG"
+
+      - name: Notarize and staple
+        working-directory: speech-studio
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          DMG="$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)"
+          # --wait blocks until Apple finishes scanning (~3-15 min) and
+          # exits non-zero on rejection, so we never staple unverified bits.
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$DMG"
+          # Staple the .app too so the zipped artifact verifies offline.
+          xcrun stapler staple "src-tauri/target/release/bundle/macos/Speech Studio.app"
+
+      - name: Tear down signing keychain
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -n "${KEYCHAIN_PATH:-}" && -f "${KEYCHAIN_PATH}" ]]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi
+
+      - name: Upload .dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: speech-studio-macos-arm64-dmg-signed
+          path: speech-studio/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload .app (zipped)
+        uses: actions/upload-artifact@v4
+        with:
+          name: speech-studio-macos-arm64-app-signed
+          path: speech-studio/src-tauri/target/release/bundle/macos/*.app
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach .dmg to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: speech-studio/src-tauri/target/release/bundle/dmg/*.dmg
+          fail_on_unmatched_files: true
