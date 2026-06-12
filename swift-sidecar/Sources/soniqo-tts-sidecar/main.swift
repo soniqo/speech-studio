@@ -228,6 +228,33 @@ let cosyHolder = CosyHolder()
 
 // MARK: - VoxCPM2 model state
 
+/// A model-download failure annotated with the manual recovery path.
+///
+/// The request loop serializes errors with `"\(error)"` interpolation, which
+/// calls `String(describing:)` — NOT `errorDescription`. A plain
+/// LocalizedError struct would render as a reflection dump there, so the
+/// guidance lives in CustomStringConvertible.description and
+/// errorDescription forwards to it.
+struct ModelDownloadFailure: LocalizedError, CustomStringConvertible {
+    let underlying: Error
+    let modelId: String
+    let modelDir: String
+    let tokenizerDir: String
+
+    var description: String {
+        """
+        \(underlying.localizedDescription) \
+        You can pre-download the model manually: weights from \
+        huggingface.co/\(modelId) into \(modelDir), tokenizer files from \
+        huggingface.co/openbmb/VoxCPM2 into \(tokenizerDir). See "Manual \
+        model download" in the README: \
+        https://github.com/soniqo/speech-studio#manual-model-download-macos
+        """
+    }
+
+    var errorDescription: String? { description }
+}
+
 /// Lazily loaded VoxCPM2 TTS model. VoxCPM2 cloning is dramatically simpler
 /// than CosyVoice ICL: pass `refAudio` (16 kHz samples) and the model encodes
 /// it through its AudioVAE — no reference transcript required, no FSQ codes,
@@ -248,12 +275,28 @@ final class VoxCPM2Holder: @unchecked Sendable {
         let modelId = ProcessInfo.processInfo.environment["SONIQO_VOXCPM2_MODEL_ID"]
             ?? "aufklarer/VoxCPM2-MLX-int8"
         logErr("[sidecar] loading VoxCPM2 model \(modelId)…")
-        let m = try await VoxCPM2TTSModel.fromPretrained(
-            modelId: modelId,
-            progressHandler: { progress, message in
-                logErr(String(format: "[sidecar] vox %3d%% %@", Int(progress * 100), message))
-            }
-        )
+        let m: VoxCPM2TTSModel
+        do {
+            m = try await VoxCPM2TTSModel.fromPretrained(
+                modelId: modelId,
+                progressHandler: { progress, message in
+                    logErr(String(format: "[sidecar] vox %3d%% %@", Int(progress * 100), message))
+                }
+            )
+        } catch let error as DownloadError {
+            // The user-facing dead end of issue #15: a failed first-run
+            // download with no hint where to put manually-fetched files.
+            // Resolve the live cache dirs once, here (honors QWEN3_CACHE_DIR
+            // overrides), so rendering the message later has no side effects.
+            let modelDir = (try? HuggingFaceDownloader.getCacheDirectory(for: modelId))?.path
+                ?? "~/Library/Caches/qwen3-speech/models/\(modelId)"
+            let tokenizerDir = (try? HuggingFaceDownloader.getCacheDirectory(
+                for: "openbmb/VoxCPM2", cacheDirName: "qwen3-speech-voxcpm2-tokenizer"))?.path
+                ?? "~/Library/Caches/qwen3-speech-voxcpm2-tokenizer/models/openbmb/VoxCPM2"
+            throw ModelDownloadFailure(
+                underlying: error, modelId: modelId,
+                modelDir: modelDir, tokenizerDir: tokenizerDir)
+        }
         model = m
         logErr("[sidecar] vox ready")
         return m

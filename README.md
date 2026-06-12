@@ -55,13 +55,35 @@ Grab the latest build from the [**releases page**](https://github.com/soniqo/spe
 | **Windows** (x86_64) | [`.msi` / `.exe`](https://github.com/soniqo/speech-studio/releases/latest) | ✅ Published |
 | **Linux** (x86_64) | [`.deb` / `.AppImage`](https://github.com/soniqo/speech-studio/releases/latest) | ✅ Published |
 
-Every platform **downloads its speech model on first run** (resumable) and caches it, so the installers stay small:
+Every platform **downloads its speech model on first run** and caches it, so the installers stay small:
 
-- **macOS** — `.dmg` (~46 MB); drag into `/Applications`. First run pulls ~2.75 GB of MLX weights into `~/.cache/huggingface/hub/`.
+- **macOS** — `.dmg` (~46 MB); drag into `/Applications`. First run pulls ~2.75 GB of MLX weights into `~/Library/Caches/qwen3-speech/`.
 - **Windows** — `.msi` or the NSIS `-setup.exe`. First run pulls the ~4.6 GB VoxCPM2-LiteRT bundle into `%LOCALAPPDATA%\speech-core`.
 - **Linux** — `.deb` or `.AppImage`. First run pulls the same bundle into `~/.cache/speech-core`.
 
 The builds are **unsigned**: Windows SmartScreen needs *More info → Run anyway*, and macOS needs a right-click → *Open* the first time to bypass Gatekeeper.
+
+### Manual model download (macOS)
+
+If the in-app download keeps failing on a flaky or slow network (`Download stalled for …: no progress` / `Failed to download …`), fetch the model yourself and place it where the app looks. Two pieces: the model weights and a small set of tokenizer files.
+
+**Option A — `hf` CLI (recommended: it resumes interrupted downloads):**
+
+```bash
+pip install -U huggingface_hub
+
+hf download aufklarer/VoxCPM2-MLX-int8 \
+  --local-dir ~/Library/Caches/qwen3-speech/models/aufklarer/VoxCPM2-MLX-int8
+
+hf download openbmb/VoxCPM2 \
+  config.json tokenizer.json tokenizer_config.json \
+  tokenization_voxcpm2.py special_tokens_map.json \
+  --local-dir ~/Library/Caches/qwen3-speech-voxcpm2-tokenizer/models/openbmb/VoxCPM2
+```
+
+**Option B — browser:** download the files from [aufklarer/VoxCPM2-MLX-int8](https://huggingface.co/aufklarer/VoxCPM2-MLX-int8/tree/main) and [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2/tree/main) into the same two directories. Minimum set: the model directory needs `config.json` plus every `*.safetensors` file; the tokenizer directory needs the five files listed in the command above.
+
+The app detects the files on the next launch and skips the download entirely. If you overrode `SONIQO_VOXCPM2_MODEL_ID`, substitute that repo id in the model path. Source builds launched from a terminal can also extend the in-app stall patience with `HF_DOWNLOAD_STALL_TIMEOUT=<seconds>`.
 
 ## Build from source
 
@@ -80,7 +102,7 @@ cd swift-sidecar && swift build       # builds the Swift sidecar
 cd .. && pnpm tauri dev               # launches the app, hot-reloads the UI
 ```
 
-Same ~2.75 GB model download on first synth.
+Same ~2.75 GB model download on first synth (into `~/Library/Caches/qwen3-speech/` — see [Manual model download](#manual-model-download-macos) if your network keeps dropping it).
 
 ### Dev loop — Windows / Linux
 
