@@ -1,15 +1,50 @@
 import { useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
-import { AlertCircle, Loader2 } from "lucide-react";
+import { AlertCircle, ArrowDownToLine, Loader2 } from "lucide-react";
 import { useProjectStore, type ModelStatus } from "../state/projectStore";
 import { DevPing } from "./DevPing";
 import { ProjectsMenu } from "./ProjectsMenu";
 import { useSynthesizeAll, useUnsynthesizedCount } from "../hooks/useSynthesizeAll";
+import { useUpdater } from "../hooks/useUpdater";
 import { exportProject, type ExportClip } from "../ipc/commands";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Badge } from "./ui/badge";
 import { cn } from "@/lib/utils";
+
+/** Quiet until an update exists; one click downloads + relaunches. */
+function UpdateChip() {
+  const { status, version, progress, install } = useUpdater();
+  if (status === "idle") return null;
+  if (status === "error") {
+    return (
+      <Badge variant="destructive" title="Update failed — try again from the next launch, or download manually from GitHub releases">
+        update failed
+      </Badge>
+    );
+  }
+  const downloading = status === "downloading";
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={install}
+      disabled={downloading}
+      title={`Update to v${version} and restart`}
+    >
+      {downloading ? (
+        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+      ) : (
+        <ArrowDownToLine className="mr-1.5 h-3.5 w-3.5" />
+      )}
+      {downloading
+        ? progress != null
+          ? `Updating ${Math.round(progress * 100)}%`
+          : "Updating…"
+        : `Update to v${version}`}
+    </Button>
+  );
+}
 
 function ModelChip({ status, error }: { status: ModelStatus; error?: string }) {
   const variant =
@@ -139,6 +174,7 @@ export function TopBar() {
         />
       </div>
       <div className="ml-auto flex items-center gap-2">
+        <UpdateChip />
         <ModelChip status={modelStatus} error={modelError} />
         <DevPing />
         <ProjectsMenu />

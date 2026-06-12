@@ -1913,6 +1913,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // resource_dir() is where Tauri stages bundled `resources` (incl.
             // libLiteRt on Windows/Linux). None in some dev layouts — that's
