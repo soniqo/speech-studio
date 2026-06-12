@@ -61,7 +61,7 @@
 - **Windows** — `.msi` 或 NSIS `-setup.exe`。首次运行会将约 4.6 GB 的 VoxCPM2-LiteRT 模型包下载到 `%LOCALAPPDATA%\speech-core`。
 - **Linux** — `.deb` 或 `.AppImage`。首次运行会将同样的模型包下载到 `~/.cache/speech-core`。
 
-这些构建**未签名**：Windows SmartScreen 需要点击 *More info → Run anyway*，macOS 首次打开需右键 → *打开* 以绕过 Gatekeeper。
+**macOS 构建已签名并经过公证**（自 v0.0.5 起）——像普通应用一样直接打开，无需绕过 Gatekeeper。Windows 安装包仍未签名：SmartScreen 需要点击 *More info → Run anyway*。
 
 ### 手动下载模型（macOS）
 
