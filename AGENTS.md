@@ -51,7 +51,7 @@ Common: Rust 1.95+ via `rustup`, Node 20+ and `pnpm` 11+.
 **Windows / Linux (x86_64)** — C++ sidecar linking speech-core:
 - A C++17 toolchain + CMake 3.16+ (MSVC + Visual Studio on Windows; gcc/clang on Linux)
 - A built `speech-core` checkout with LiteRT **and** the model downloader: `-DSPEECH_CORE_WITH_LITERT=ON -DLITERT_DIR=... -DSPEECH_CORE_WITH_HF_DOWNLOAD=ON`. The download feature needs libcurl (`find_package(CURL)`) — system libcurl on Linux; on Windows, vcpkg (`vcpkg install curl:x64-windows-static-md`, then pass the vcpkg toolchain + triplet at configure).
-- The `VoxCPM2-LiteRT` model bundle (~4.6 GB) is **downloaded on first run** by the sidecar (`sc_voxcpm2_create_from_pretrained`) — no manual fetch needed. To use a pre-downloaded bundle instead, set `SONIQO_VOXCPM2_BUNDLE_DIR`.
+- The `VoxCPM2-LiteRT` model bundle (~8.8 GB fp16 on disk, ~10 GiB RAM at load) is **downloaded on first run** by the sidecar (`sc_voxcpm2_create_from_pretrained`) — no manual fetch needed. To use a pre-downloaded bundle instead, set `SONIQO_VOXCPM2_BUNDLE_DIR`.
 
 ### One-time install
 
@@ -116,7 +116,7 @@ pnpm tauri build                      # add --no-bundle to skip msi/nsis install
 - **Windows/Linux sidecar (`core-sidecar`)**: `cfg`'d off macOS. On `init_model` it loads the bundle from `SONIQO_VOXCPM2_BUNDLE_DIR` if set, else calls `sc_voxcpm2_create_from_pretrained` to download+cache it (`SONIQO_VOXCPM2_MODEL_ID`, default `soniqo/VoxCPM2-LiteRT`; cache via `SONIQO_MODEL_CACHE_DIR`/`SPEECH_CORE_CACHE_DIR`). The CMake colocates `libLiteRt` next to the binary; libcurl is linked statically (no extra DLL). `cfgValue` from the synth ladder has no LiteRT knob and is ignored (the ladder still varies `seed`).
 - **TTS model**: macOS MLX path defaults to `aufklarer/VoxCPM2-MLX-int8`. Windows/Linux use the `VoxCPM2-LiteRT` bundle — downloaded on first run (resumable; see speech-core's `SPEECH_CORE_WITH_HF_DOWNLOAD`) or supplied via `SONIQO_VOXCPM2_BUNDLE_DIR`.
 - Generated clip audio is cached under `dirs::cache_dir()/audio.soniqo.studio/clips/` (`~/Library/Caches/...` on macOS, `%LOCALAPPDATA%\...` on Windows, `$XDG_CACHE_HOME`/`~/.cache` on Linux). The Rust and sidecar sides compute this independently and must stay in sync.
-- **Follow-ups**: (1) ASR-graded retry is macOS-only (`GRADING_AVAILABLE` in `lib.rs`); Windows/Linux accept the first successful take — wiring Parakeet-via-sidecar grading is TODO. (2) A Windows/Linux CI lane to build + publish installers on tag (`build.yml` only covers macOS today). First-run model download is now handled by speech-core, so installers don't embed the bundle.
+- **Follow-ups**: (1) ASR-graded retry is macOS-only (`GRADING_AVAILABLE` in `lib.rs`); Windows/Linux accept the first successful take — wiring Parakeet-via-sidecar grading is TODO. (2) The Windows/Linux CI lanes (`build.yml` `build-windows` / `build-linux`) build the sidecar, run `ctest`, `pnpm tauri build`, and attach installers to the Release on tag — but they check out speech-core at the moving `ref: main` (not a pinned SHA) and run no model inference, so an x86_64 LiteRT runtime regression can still slip past CI. First-run model download is handled by speech-core, so installers don't embed the bundle.
 
 ## Structure
 

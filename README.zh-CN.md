@@ -58,8 +58,10 @@
 每个平台都会在**首次运行时下载语音模型**并缓存，因此安装包本身很小：
 
 - **macOS** — `.dmg`（约 46 MB）；拖入 `/Applications`。首次运行会将约 2.75 GB 的 MLX 权重下载到 `~/Library/Caches/qwen3-speech/`。
-- **Windows** — `.msi` 或 NSIS `-setup.exe`。首次运行会将约 4.6 GB 的 VoxCPM2-LiteRT 模型包下载到 `%LOCALAPPDATA%\speech-core`。
+- **Windows** — `.msi` 或 NSIS `-setup.exe`。首次运行会将约 8.8 GB 的 VoxCPM2-LiteRT 模型包下载到 `%LOCALAPPDATA%\speech-core`。
 - **Linux** — `.deb` 或 `.AppImage`。首次运行会将同样的模型包下载到 `~/.cache/speech-core`。
+
+Windows/Linux 的 LiteRT 模型包为 fp16 格式，加载时约需 **10 GiB 空闲内存** —— 8 GB 内存的机器可能不够。
 
 **macOS 构建已签名并经过公证**（自 v0.0.5 起）——像普通应用一样直接打开，无需绕过 Gatekeeper。Windows 安装包仍未签名：SmartScreen 需要点击 *More info → Run anyway*。
 

@@ -195,7 +195,7 @@ static std::string ensure_model() {
     // SONIQO_MODEL_CACHE_DIR / SPEECH_CORE_CACHE_DIR).
     const std::string cache = env_or("SONIQO_MODEL_CACHE_DIR", "");
     log_err("[sidecar] ensuring VoxCPM2 bundle " + model_id +
-            " (first run downloads ~4.6 GB from Hugging Face)…");
+            " (first run downloads ~8.8 GB from Hugging Face)…");
     g_synth = sc_voxcpm2_create_from_pretrained(
         model_id.c_str(), "main", cache.empty() ? nullptr : cache.c_str(),
         on_download_progress, nullptr);
