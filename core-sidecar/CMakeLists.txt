@@ -65,7 +65,7 @@ endif()
 find_package(CURL REQUIRED)
 
 # --- Sidecar executable ------------------------------------------------------
-add_executable(speech-core-tts-sidecar src/main.cpp src/audio_decode.cpp src/sidecar_text.cpp)
+add_executable(speech-core-tts-sidecar src/main.cpp src/audio_decode.cpp src/sidecar_text.cpp src/sidecar_sysinfo.cpp)
 target_include_directories(speech-core-tts-sidecar PRIVATE
     "${SPEECH_CORE_DIR}/include"
     # Vendored LiteRT C API headers — needed since the transcribe command uses
@@ -96,14 +96,16 @@ add_custom_command(TARGET speech-core-tts-sidecar POST_BUILD
 
 # --- Unit tests --------------------------------------------------------------
 # Cover the pure helpers (audio decoding, emotion-tag parsing, JSON escaping,
-# filename sanitizing) — no speech-core / libcurl / model needed. Run via ctest.
+# filename sanitizing, the RAM pre-flight decision) — no speech-core / libcurl /
+# model needed. Run via ctest.
 option(SIDECAR_BUILD_TESTS "Build the core-sidecar unit tests" ON)
 if(SIDECAR_BUILD_TESTS)
     enable_testing()
     add_executable(test_sidecar
         tests/test_sidecar.cpp
         src/audio_decode.cpp
-        src/sidecar_text.cpp)
+        src/sidecar_text.cpp
+        src/sidecar_sysinfo.cpp)
     target_include_directories(test_sidecar PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dr_libs")

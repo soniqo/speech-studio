@@ -28,6 +28,7 @@
 
 #include "audio_decode.h"
 #include "sidecar_text.h"
+#include "sidecar_sysinfo.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -174,6 +175,39 @@ static void on_download_progress(const char* file, int idx, int count,
 static std::string ensure_model() {
     if (g_synth) return "";
 
+    // Pre-flight RAM guard. The fp16 VoxCPM2-LiteRT bundle needs ~10 GiB
+    // resident; on a smaller machine sc_voxcpm2_create() is OOM-killed mid-load
+    // (a silent SIGKILL of the sidecar). Surface an actionable error first.
+    // Tunable via SONIQO_VOXCPM2_MIN_RAM_GIB; SONIQO_SKIP_RAM_CHECK=1 bypasses.
+    {
+        // Parse the RAM floor (GiB). strtol (not atoi) avoids UB on out-of-range
+        // input; reject non-numeric / trailing garbage / absurd values and fall
+        // back to the default so a typo can't silently disable the guard.
+        const std::string min_env = env_or("SONIQO_VOXCPM2_MIN_RAM_GIB", "10");
+        char* end = nullptr;
+        long min_gib = std::strtol(min_env.c_str(), &end, 10);
+        if (end == min_env.c_str() || *end != '\0' || min_gib < 1 || min_gib > 1024) {
+            log_err("[sidecar] ignoring invalid SONIQO_VOXCPM2_MIN_RAM_GIB='" +
+                    min_env + "', using default 10 GiB");
+            min_gib = 10;
+        }
+        const uint64_t required = static_cast<uint64_t>(min_gib) << 30;
+        const bool force = !env_or("SONIQO_SKIP_RAM_CHECK", "").empty();
+        uint64_t total = 0, avail = 0;
+        if (query_physical_memory(total, avail)) {
+            // Log the effective threshold too, so a misconfig is visible.
+            log_err("[sidecar] system RAM: total=" + format_gib(total) +
+                    " available=" + (avail ? format_gib(avail) : "unknown") +
+                    " (need >=" + std::to_string(min_gib) + " GiB" +
+                    (force ? "; check overridden" : "") + ")");
+            RamCheckResult r = check_model_ram(total, avail, required, force);
+            if (!r.ok) {
+                log_err("[sidecar] " + r.message);
+                return r.message;
+            }
+        }
+    }
+
     std::string dir = env_or("SONIQO_VOXCPM2_BUNDLE_DIR", "");
     if (!dir.empty()) {
         if (!fs::exists(fs::path(dir) / "tokenizer.json")) {
@@ -195,7 +229,7 @@ static std::string ensure_model() {
     // SONIQO_MODEL_CACHE_DIR / SPEECH_CORE_CACHE_DIR).
     const std::string cache = env_or("SONIQO_MODEL_CACHE_DIR", "");
     log_err("[sidecar] ensuring VoxCPM2 bundle " + model_id +
-            " (first run downloads ~4.6 GB from Hugging Face)…");
+            " (first run downloads ~8.8 GB from Hugging Face)…");
     g_synth = sc_voxcpm2_create_from_pretrained(
         model_id.c_str(), "main", cache.empty() ? nullptr : cache.c_str(),
         on_download_progress, nullptr);

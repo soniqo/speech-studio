@@ -58,8 +58,10 @@ Grab the latest build from the [**releases page**](https://github.com/soniqo/spe
 Every platform **downloads its speech model on first run** and caches it, so the installers stay small:
 
 - **macOS** — `.dmg` (~46 MB); drag into `/Applications`. First run pulls ~2.75 GB of MLX weights into `~/Library/Caches/qwen3-speech/`.
-- **Windows** — `.msi` or the NSIS `-setup.exe`. First run pulls the ~4.6 GB VoxCPM2-LiteRT bundle into `%LOCALAPPDATA%\speech-core`.
+- **Windows** — `.msi` or the NSIS `-setup.exe`. First run pulls the ~8.8 GB VoxCPM2-LiteRT bundle into `%LOCALAPPDATA%\speech-core`.
 - **Linux** — `.deb` or `.AppImage`. First run pulls the same bundle into `~/.cache/speech-core`.
+
+The Windows/Linux LiteRT bundle is fp16 and needs **~10 GiB of free RAM** to load — an 8 GB machine may fall short.
 
 The **macOS build is signed and notarized** (from v0.0.5 on) — it opens like any other app, no Gatekeeper hoops. The Windows installers are still unsigned: SmartScreen needs *More info → Run anyway*.
 
