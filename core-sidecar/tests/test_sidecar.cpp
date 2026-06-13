@@ -4,6 +4,7 @@
 
 #include "audio_decode.h"
 #include "sidecar_text.h"
+#include "sidecar_sysinfo.h"
 
 #include <cmath>
 #include <cstdint>
@@ -116,6 +117,39 @@ int main() {
     // --- safe_filename ---
     {
         CHECK(safe_filename("a/b\\c:d*e?") == "a_b_c_d_e_", "filesystem-unsafe chars replaced");
+    }
+
+    // --- check_model_ram: pre-flight RAM decision (fp16 OOM guard) ---
+    {
+        const uint64_t GiB = uint64_t{1} << 30;
+        CHECK(check_model_ram(16 * GiB, 12 * GiB, 10 * GiB, false).ok,
+              "ample available RAM -> ok");
+        CHECK(check_model_ram(16 * GiB, 10 * GiB, 10 * GiB, false).ok,
+              "available == required -> ok (>=)");
+
+        auto low = check_model_ram(8 * GiB, 5 * GiB, 10 * GiB, false);
+        CHECK(!low.ok, "low available RAM -> blocked");
+        CHECK(low.message.find("10.0 GiB") != std::string::npos,
+              "block message states the requirement");
+        CHECK(low.message.find("SONIQO_SKIP_RAM_CHECK") != std::string::npos,
+              "block message names the override");
+
+        CHECK(check_model_ram(8 * GiB, 5 * GiB, 10 * GiB, true).ok,
+              "force override bypasses the block");
+        CHECK(check_model_ram(0, 0, 10 * GiB, false).ok,
+              "unknown RAM -> not blocked");
+        CHECK(!check_model_ram(8 * GiB, 0, 10 * GiB, false).ok,
+              "total-only below requirement -> blocked");
+        CHECK(check_model_ram(16 * GiB, 0, 10 * GiB, false).ok,
+              "total-only above requirement -> ok");
+    }
+
+    // --- format_gib ---
+    {
+        CHECK(format_gib(uint64_t{1} << 30) == "1.0 GiB", "format_gib 1 GiB");
+        CHECK(format_gib(uint64_t{10} << 30) == "10.0 GiB", "format_gib 10 GiB");
+        CHECK(format_gib((uint64_t{10} << 30) - 1) == "9.9 GiB",
+              "format_gib floors sub-threshold (never rounds up to 10.0)");
     }
 
     if (g_fail == 0) {
