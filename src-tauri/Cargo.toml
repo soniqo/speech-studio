@@ -1,6 +1,6 @@
 [package]
 name = "speech-studio"
-version = "0.0.4"
+version = "0.0.5"
 description = "Speech Studio — voice cloning + scripted synthesis"
 authors = ["Soniqo"]
 edition = "2021"
