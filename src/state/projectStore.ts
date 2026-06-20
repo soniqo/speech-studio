@@ -8,6 +8,7 @@ import {
   Voice,
   emptyProject,
 } from "../types/project";
+import type { TtsEngineId, TtsEngineInfo } from "../ipc/commands";
 
 interface TransportState {
   playing: boolean;
@@ -18,6 +19,8 @@ interface TransportState {
 export type ModelStatus = "idle" | "loading" | "ready" | "error";
 
 interface ModelState {
+  engine: TtsEngineId;
+  engines: TtsEngineInfo[];
   status: ModelStatus;
   error?: string;
 }
@@ -35,6 +38,8 @@ interface ProjectStore {
   transport: TransportState;
   model: ModelState;
   setModelStatus: (status: ModelStatus, error?: string) => void;
+  setTtsEngine: (engine: TtsEngineId) => void;
+  setAvailableTtsEngines: (engines: TtsEngineInfo[]) => void;
 
   demoProgress: DemoProgress | null;
   setDemoProgress: (p: DemoProgress | null) => void;
@@ -108,9 +113,17 @@ export const useProjectStore = create<ProjectStore>((set) => ({
   project: emptyProject(),
   selection: { kind: "none" },
   transport: { playing: false, positionSec: 0, zoomPxPerSec: 100 },
-  model: { status: "idle" },
+  model: {
+    engine: "voxcpm2",
+    engines: [],
+    status: "idle",
+  },
   setModelStatus: (status, error) =>
-    set(() => ({ model: { status, error } })),
+    set((s) => ({ model: { ...s.model, status, error } })),
+  setTtsEngine: (engine) =>
+    set((s) => ({ model: { ...s.model, engine, error: undefined } })),
+  setAvailableTtsEngines: (engines) =>
+    set((s) => ({ model: { ...s.model, engines } })),
 
   demoProgress: null,
   setDemoProgress: (p) => set(() => ({ demoProgress: p })),

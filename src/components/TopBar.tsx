@@ -6,10 +6,11 @@ import { DevPing } from "./DevPing";
 import { ProjectsMenu } from "./ProjectsMenu";
 import { useSynthesizeAll, useUnsynthesizedCount } from "../hooks/useSynthesizeAll";
 import { useUpdater } from "../hooks/useUpdater";
-import { exportProject, type ExportClip } from "../ipc/commands";
+import { exportProject, initModel, type ExportClip, type TtsEngineId } from "../ipc/commands";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Badge } from "./ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { cn } from "@/lib/utils";
 
 /** Quiet until an update exists; one click downloads + relaunches. */
@@ -46,17 +47,25 @@ function UpdateChip() {
   );
 }
 
-function ModelChip({ status, error }: { status: ModelStatus; error?: string }) {
+function ModelChip({
+  status,
+  error,
+  engineName,
+}: {
+  status: ModelStatus;
+  error?: string;
+  engineName: string;
+}) {
   const variant =
     status === "ready" ? "success" : status === "error" ? "destructive" : "muted";
   const label =
     status === "ready"
-      ? "VoxCPM2 ready"
+      ? `${engineName} ready`
       : status === "loading"
-        ? "VoxCPM2 loading…"
+        ? `${engineName} loading…`
         : status === "error"
-          ? "VoxCPM2 error"
-          : "VoxCPM2 idle";
+          ? `${engineName} error`
+          : `${engineName} idle`;
   return (
     <Badge variant={variant} title={error ?? `Model status: ${status}`}>
       <span
@@ -76,8 +85,9 @@ function ModelChip({ status, error }: { status: ModelStatus; error?: string }) {
 export function TopBar() {
   const project = useProjectStore((s) => s.project);
   const renameProject = useProjectStore((s) => s.renameProject);
-  const modelStatus = useProjectStore((s) => s.model.status);
-  const modelError = useProjectStore((s) => s.model.error);
+  const model = useProjectStore((s) => s.model);
+  const setModelStatus = useProjectStore((s) => s.setModelStatus);
+  const setTtsEngine = useProjectStore((s) => s.setTtsEngine);
   const synthesisStatus = useProjectStore((s) => s.synthesisStatus);
   const synthesisProgress = useProjectStore((s) => s.synthesisProgress);
   const hasContent = project.tracks.length > 0;
@@ -86,6 +96,9 @@ export function TopBar() {
   const [actionError, setActionError] = useState<string | null>(null);
 
   const synthBusy = synthesisStatus === "running";
+  const modelStatus = model.status;
+  const engineInfo = model.engines.find((candidate) => candidate.id === model.engine);
+  const engineName = engineInfo?.displayName ?? "VoxCPM2";
   const synthDisabled = synthBusy || modelStatus !== "ready" || !hasContent;
   const synthMode: "missing" | "all" = missingCount > 0 ? "missing" : "all";
   const synthLabel = synthBusy
@@ -110,6 +123,19 @@ export function TopBar() {
     } catch (e) {
       console.error("synthesize failed", e);
       setActionError(String(e));
+    }
+  }
+
+  async function onEngineChange(next: TtsEngineId) {
+    if (next === model.engine || synthBusy) return;
+    setActionError(null);
+    setTtsEngine(next);
+    setModelStatus("loading");
+    try {
+      await initModel(next);
+      setModelStatus("ready");
+    } catch (e) {
+      setModelStatus("error", String(e));
     }
   }
 
@@ -175,7 +201,28 @@ export function TopBar() {
       </div>
       <div className="ml-auto flex items-center gap-2">
         <UpdateChip />
-        <ModelChip status={modelStatus} error={modelError} />
+        {model.engines.length > 1 && (
+          <Select
+            value={model.engine}
+            onValueChange={(value) => void onEngineChange(value as TtsEngineId)}
+            disabled={modelStatus === "loading" || synthBusy}
+          >
+            <SelectTrigger
+              className="h-7 w-[132px] text-xs"
+              title="Switches the loaded voice-cloning engine"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {model.engines.map((engine) => (
+                <SelectItem key={engine.id} value={engine.id}>
+                  {engine.displayName}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+        <ModelChip status={modelStatus} error={model.error} engineName={engineName} />
         <DevPing />
         <ProjectsMenu />
         {actionError && (
@@ -194,7 +241,7 @@ export function TopBar() {
           disabled={synthDisabled}
           title={
             modelStatus !== "ready"
-              ? "Wait for the VoxCPM2 model to finish loading"
+              ? `Wait for ${engineName} to finish loading`
               : !hasContent
                 ? "Load a project first"
                 : missingCount > 0

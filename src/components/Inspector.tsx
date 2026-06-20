@@ -45,6 +45,10 @@ export function Inspector() {
   const updateClip = useProjectStore((s) => s.updateClip);
   const assignVoiceToTrack = useProjectStore((s) => s.assignVoiceToTrack);
   const removeClip = useProjectStore((s) => s.removeClip);
+  const engine = useProjectStore((s) => s.model.engine);
+  const activeEngine = useProjectStore((s) =>
+    s.model.engines.find((candidate) => candidate.id === s.model.engine),
+  );
   // Regenerate-state hooks must live at the top, BEFORE any early return.
   // Putting them inside the `selection.kind === 'clip'` branch violates the
   // Rules of Hooks — when the user clicks a clip after the pane was on a
@@ -201,7 +205,7 @@ export function Inspector() {
                   },
                 }))
               }
-              placeholder="VoxCPM2 clones from the reference audio alone; a transcript is only used by legacy CosyVoice/Qwen3 paths."
+              placeholder="Required by CosyVoice to anchor a clone. VoxCPM2 clones from the reference audio alone."
               className="min-h-[88px]"
             />
           </Section>
@@ -227,10 +231,12 @@ export function Inspector() {
   const effectiveVoiceId = clip.voiceOverrideId ?? trackVoiceId;
   const effectiveVoice = project.voices.find((v) => v.id === effectiveVoiceId);
   const current = clip;
+  const needsReferenceTranscript = activeEngine?.requiresReferenceTranscript ?? engine === "cosyvoice";
   const canRegenerate =
     !isRegenerating &&
     !!effectiveVoice &&
     !!effectiveVoice.referenceAudioPath &&
+    (!needsReferenceTranscript || !!effectiveVoice.referenceText.trim()) &&
     current.text.trim().length > 0;
 
   async function regenerate() {
@@ -240,6 +246,7 @@ export function Inspector() {
     try {
       const out = await synthesizeClip({
         clipId: current.id,
+        engine,
         text: current.text,
         voiceId: effectiveVoice.id,
         referenceAudioPath: effectiveVoice.referenceAudioPath,
@@ -269,6 +276,9 @@ export function Inspector() {
     if (isRegenerating) return "Generating…";
     if (!effectiveVoice) return "Assign a voice first";
     if (!effectiveVoice.referenceAudioPath) return "Voice is missing a reference clip";
+    if (needsReferenceTranscript && !effectiveVoice.referenceText.trim()) {
+      return "CosyVoice needs the reference transcript";
+    }
     if (current.text.trim().length === 0) return "Write something first";
     return "Generate audio";
   }
