@@ -266,6 +266,7 @@ struct SidecarResponse {
 enum TtsEngine {
     VoxCPM2,
     CosyVoice,
+    Qwen3,
 }
 
 impl TtsEngine {
@@ -273,6 +274,7 @@ impl TtsEngine {
         match self {
             Self::VoxCPM2 => "synthesize_voxcpm2",
             Self::CosyVoice => "synthesize_cosyvoice",
+            Self::Qwen3 => "synthesize_icl",
         }
     }
 
@@ -280,11 +282,12 @@ impl TtsEngine {
         match self {
             Self::VoxCPM2 => "VoxCPM2",
             Self::CosyVoice => "CosyVoice 3",
+            Self::Qwen3 => "Qwen3-TTS",
         }
     }
 
     fn requires_reference_transcript(self) -> bool {
-        matches!(self, Self::CosyVoice)
+        matches!(self, Self::CosyVoice | Self::Qwen3)
     }
 }
 
@@ -292,6 +295,7 @@ fn engine_is_supported(engine: TtsEngine) -> bool {
     match engine {
         TtsEngine::VoxCPM2 => true,
         TtsEngine::CosyVoice => cfg!(target_os = "macos"),
+        TtsEngine::Qwen3 => cfg!(target_os = "macos"),
     }
 }
 
@@ -327,6 +331,7 @@ async fn available_tts_engines() -> Vec<TtsEngineInfo> {
     let mut engines = vec![tts_engine_info(TtsEngine::VoxCPM2)];
     if cfg!(target_os = "macos") {
         engines.push(tts_engine_info(TtsEngine::CosyVoice));
+        engines.push(tts_engine_info(TtsEngine::Qwen3));
     }
     engines
 }

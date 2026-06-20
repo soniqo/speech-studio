@@ -100,10 +100,11 @@ final class ModelHolder: @unchecked Sendable {
         if let m = model, let e = tokenizerEncoder {
             return (m, e)
         }
-        // 1.7B 8-bit gives noticeably better fidelity than 0.6B 4-bit; we have
-        // it cached locally. Override via SONIQO_TTS_MODEL_ID if needed.
+        // 1.7B bf16 is the highest-fidelity variant. Its 4-bit was dropped (it
+        // degraded badly — near-silent/garbled on some inputs); 8-bit remains an
+        // option. Override via SONIQO_TTS_MODEL_ID if needed.
         let modelId = ProcessInfo.processInfo.environment["SONIQO_TTS_MODEL_ID"]
-            ?? "aufklarer/Qwen3-TTS-12Hz-1.7B-Base-MLX-8bit"
+            ?? "aufklarer/Qwen3-TTS-12Hz-1.7B-Base-MLX-bf16"
         logErr("[sidecar] loading Qwen3-TTS model \(modelId) (first run downloads weights from HuggingFace)…")
         let result = try await Qwen3TTSModel.fromPretrainedWithEncoder(
             modelId: modelId,
