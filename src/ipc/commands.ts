@@ -12,8 +12,20 @@ export function pingSidecar(): Promise<PingResult> {
   return invoke<PingResult>("ping_sidecar");
 }
 
-export function initModel(): Promise<void> {
-  return invoke<void>("init_model");
+export type TtsEngineId = "voxcpm2" | "cosyvoice";
+
+export interface TtsEngineInfo {
+  id: TtsEngineId;
+  displayName: string;
+  requiresReferenceTranscript: boolean;
+}
+
+export function availableTtsEngines(): Promise<TtsEngineInfo[]> {
+  return invoke<TtsEngineInfo[]>("available_tts_engines");
+}
+
+export function initModel(engine: TtsEngineId): Promise<void> {
+  return invoke<void>("init_model", { args: { engine } });
 }
 
 export interface PickedVideo {
@@ -65,6 +77,7 @@ export function cloneVoice(args: CloneVoiceArgs): Promise<Voice> {
 
 export interface SynthesizeClipArgs {
   clipId: string;
+  engine: TtsEngineId;
   text: string;
   voiceId: string;
   referenceAudioPath: string;

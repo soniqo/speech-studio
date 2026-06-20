@@ -51,6 +51,15 @@ export function useSynthesizeAll() {
     async (mode: "missing" | "all"): Promise<SynthesizeAllResult> => {
       const initialState = useProjectStore.getState();
       const jobs = collectJobs(initialState, mode);
+      const engine = initialState.model.engine;
+      if (
+        engine === "cosyvoice" &&
+        jobs.some((job) => !job.voice.referenceText.trim())
+      ) {
+        throw new Error(
+          "CosyVoice needs an accurate reference transcript for every voice being synthesized",
+        );
+      }
       if (jobs.length === 0) {
         return { total: 0, completed: 0, failed: 0 };
       }
@@ -70,6 +79,7 @@ export function useSynthesizeAll() {
         try {
           const out = await synthesizeClip({
             clipId: job.clip.id,
+            engine,
             text: job.clip.text,
             voiceId: job.voice.id,
             referenceAudioPath: job.voice.referenceAudioPath!,

@@ -258,6 +258,79 @@ struct SidecarResponse {
 
 // ---------- commands ----------
 
+/// TTS backends exposed by the Studio. CosyVoice is currently available only
+/// through the macOS Swift/MLX sidecar; Windows and Linux continue to expose
+/// VoxCPM2 through speech-core.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum TtsEngine {
+    VoxCPM2,
+    CosyVoice,
+}
+
+impl TtsEngine {
+    fn sidecar_command(self) -> &'static str {
+        match self {
+            Self::VoxCPM2 => "synthesize_voxcpm2",
+            Self::CosyVoice => "synthesize_cosyvoice",
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::VoxCPM2 => "VoxCPM2",
+            Self::CosyVoice => "CosyVoice 3",
+        }
+    }
+
+    fn requires_reference_transcript(self) -> bool {
+        matches!(self, Self::CosyVoice)
+    }
+}
+
+fn engine_is_supported(engine: TtsEngine) -> bool {
+    match engine {
+        TtsEngine::VoxCPM2 => true,
+        TtsEngine::CosyVoice => cfg!(target_os = "macos"),
+    }
+}
+
+fn ensure_engine_supported(engine: TtsEngine) -> Result<(), String> {
+    if engine_is_supported(engine) {
+        return Ok(());
+    }
+    Err(format!(
+        "{} is currently available only on macOS (Apple Silicon)",
+        engine.display_name()
+    ))
+}
+
+#[derive(Serialize)]
+struct TtsEngineInfo {
+    id: TtsEngine,
+    #[serde(rename = "displayName")]
+    display_name: &'static str,
+    #[serde(rename = "requiresReferenceTranscript")]
+    requires_reference_transcript: bool,
+}
+
+fn tts_engine_info(engine: TtsEngine) -> TtsEngineInfo {
+    TtsEngineInfo {
+        id: engine,
+        display_name: engine.display_name(),
+        requires_reference_transcript: engine.requires_reference_transcript(),
+    }
+}
+
+#[tauri::command]
+async fn available_tts_engines() -> Vec<TtsEngineInfo> {
+    let mut engines = vec![tts_engine_info(TtsEngine::VoxCPM2)];
+    if cfg!(target_os = "macos") {
+        engines.push(tts_engine_info(TtsEngine::CosyVoice));
+    }
+    engines
+}
+
 #[tauri::command]
 async fn ping_sidecar(manager: State<'_, SidecarManager>) -> Result<SidecarResponse, String> {
     let payload = serde_json::json!({
@@ -268,11 +341,21 @@ async fn ping_sidecar(manager: State<'_, SidecarManager>) -> Result<SidecarRespo
     serde_json::from_value(raw).map_err(|e| e.to_string())
 }
 
+#[derive(Deserialize)]
+struct InitModelArgs {
+    engine: TtsEngine,
+}
+
 #[tauri::command]
-async fn init_model(manager: State<'_, SidecarManager>) -> Result<(), String> {
+async fn init_model(
+    manager: State<'_, SidecarManager>,
+    args: InitModelArgs,
+) -> Result<(), String> {
+    ensure_engine_supported(args.engine)?;
     let payload = serde_json::json!({
         "id": format!("init-{}", uuid::Uuid::new_v4()),
         "command": "init_model",
+        "engine": args.engine,
     });
     let raw = manager.request(&payload)?;
     let env: SidecarResponse = serde_json::from_value(raw).map_err(|e| e.to_string())?;
@@ -448,6 +531,7 @@ async fn clone_voice(args: CloneVoiceArgs) -> Result<Voice, String> {
 struct SynthesizeArgs {
     #[serde(rename = "clipId")]
     clip_id: String,
+    engine: TtsEngine,
     text: String,
     #[serde(rename = "voiceId")]
     voice_id: String,
@@ -601,6 +685,7 @@ fn chunk_text_for_synthesis(text: &str, max_words: usize) -> Vec<String> {
 #[allow(clippy::too_many_arguments)]
 fn synth_one_line(
     manager: &SidecarManager,
+    engine: TtsEngine,
     clip_id: &str,
     voice_id: &str,
     reference_audio_path: &str,
@@ -609,9 +694,8 @@ fn synth_one_line(
     invocation_salt: &str,
     part_idx: usize,
 ) -> Result<(String, f64), String> {
-    // Seed ladder: VoxCPM2 cloning is fairly deterministic; retries cover the
-    // occasional bad take. cfg bumps on retries pull the model harder toward
-    // the text (suppresses trailing repetition); past ~3.5 prosody flattens.
+    // Seed ladder: both backends are deterministic per seed. VoxCPM2 also
+    // consumes cfgValue; CosyVoice ignores that optional field.
     const SEED_LADDER: &[u64] = &[1000, 1001, 1002, 1010, 1011, 1012];
     const CFG_LADDER: &[f32] = &[2.0, 2.5, 3.0];
 
@@ -643,12 +727,11 @@ fn synth_one_line(
         let cfg = CFG_LADDER[attempt_idx.min(CFG_LADDER.len() - 1)];
         let payload = serde_json::json!({
             "id": format!("synth-{}-p{}-s{}-{}", clip_id, part_idx, seed, invocation_salt),
-            "command": "synthesize_voxcpm2",
+            "command": engine.sidecar_command(),
+            "engine": engine,
             "text": text,
             "voiceId": voice_id,
             "referenceAudioPath": reference_audio_path,
-            // VoxCPM2 ignores referenceText; we still pass it for parity with
-            // the cosyvoice fallback path.
             "referenceText": reference_text,
             "seed": seed,
             "cfgValue": cfg,
@@ -891,11 +974,15 @@ async fn synthesize_clip(
     manager: State<'_, SidecarManager>,
     args: SynthesizeArgs,
 ) -> Result<SynthesizeResult, String> {
+    ensure_engine_supported(args.engine)?;
     if args.text.trim().is_empty() {
         return Err("clip text is empty".into());
     }
     if args.reference_audio_path.trim().is_empty() {
         return Err("reference audio path is required".into());
+    }
+    if args.engine.requires_reference_transcript() && args.reference_text.trim().is_empty() {
+        return Err("CosyVoice needs an accurate transcript for the reference audio".into());
     }
 
     // Period→comma preprocessing was a CosyVoice-specific workaround for its
@@ -921,6 +1008,7 @@ async fn synthesize_clip(
     if chunks.len() <= 1 {
         let (audio_path, duration_sec) = synth_one_line(
             &manager,
+            args.engine,
             &args.clip_id,
             &args.voice_id,
             &args.reference_audio_path,
@@ -944,6 +1032,7 @@ async fn synthesize_clip(
     for (i, chunk) in chunks.iter().enumerate() {
         let (path, _dur) = synth_one_line(
             &manager,
+            args.engine,
             &args.clip_id,
             &args.voice_id,
             &args.reference_audio_path,
@@ -1925,6 +2014,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ping_sidecar,
+            available_tts_engines,
             init_model,
             pick_video,
             pick_audio,
@@ -1945,6 +2035,28 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tts_engine_protocol_names_are_stable() {
+        let cosy: TtsEngine = serde_json::from_str("\"cosyvoice\"").unwrap();
+        assert_eq!(cosy, TtsEngine::CosyVoice);
+        assert_eq!(serde_json::to_string(&TtsEngine::VoxCPM2).unwrap(), "\"voxcpm2\"");
+        assert_eq!(cosy.sidecar_command(), "synthesize_cosyvoice");
+    }
+
+    #[test]
+    fn cosyvoice_requires_reference_transcript() {
+        assert!(TtsEngine::CosyVoice.requires_reference_transcript());
+        assert!(!TtsEngine::VoxCPM2.requires_reference_transcript());
+    }
+
+    #[test]
+    fn cosyvoice_availability_matches_platform() {
+        assert_eq!(
+            engine_is_supported(TtsEngine::CosyVoice),
+            cfg!(target_os = "macos")
+        );
+    }
 
     // The clip cache must live under the app namespace and end in `clips`, so
     // the Rust side and both sidecars (which compute it independently) agree.

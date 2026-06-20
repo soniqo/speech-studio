@@ -11,18 +11,18 @@ import VoxCPM2TTS
 //
 // Commands:
 //   ping                  — health check.
-//   init_model            — preload the active TTS engine (CosyVoice by default,
-//                           Qwen3-TTS when SONIQO_TTS_ENGINE=qwen3).
-//   synthesize_cosyvoice  — CosyVoice zero-shot voice clone. Default engine.
-//                           Caches the per-reference voice profile so a second
-//                           call against the same reference WAV skips the
-//                           ~1s feature-extraction step.
-//   synthesize_icl        — Qwen3-TTS ICL voice clone. Legacy fallback path,
-//                           kept for one release behind SONIQO_TTS_ENGINE=qwen3.
+//   init_model            — preload the requested TTS engine and release the
+//                           inactive one before it can retain Metal memory.
+//   synthesize_voxcpm2    — VoxCPM2 voice clone (48 kHz).
+//   synthesize_cosyvoice  — CosyVoice zero-shot voice clone (24 kHz).
+//   synthesize_icl        — Qwen3-TTS ICL voice clone; legacy fallback only.
 
 struct Request: Decodable {
     let id: String
     let command: String
+    // Selected backend. The Studio sends this for init_model and synthesis;
+    // SONIQO_TTS_ENGINE remains a compatibility default for direct callers.
+    let engine: String?
     let text: String?
     let voiceId: String?
     let referenceAudioPath: String?
@@ -116,6 +116,12 @@ final class ModelHolder: @unchecked Sendable {
         logErr("[sidecar] model ready")
         return result
     }
+
+    func unload() {
+        model?.unload()
+        model = nil
+        tokenizerEncoder = nil
+    }
 }
 
 let holder = ModelHolder()
@@ -135,8 +141,9 @@ final class CosyHolder: @unchecked Sendable {
         if let m = model, let s = speechTokenizer {
             return (m, s)
         }
-        let modelId = ProcessInfo.processInfo.environment["SONIQO_COSYVOICE_MODEL_ID"]
-            ?? "aufklarer/CosyVoice3-0.5B-MLX-8bit-full"
+        // Studio uses the full bf16 bundle: both the LLM and DiT remain
+        // unquantized (~2.1 GB on disk), which is the quality-first choice.
+        let modelId = "aufklarer/CosyVoice3-0.5B-MLX-bf16"
         logErr("[sidecar] loading CosyVoice model \(modelId)…")
 
         // 1. Main TTS bundle (LLM + Flow + HiFiGAN + tokenizer)
@@ -222,6 +229,13 @@ final class CosyHolder: @unchecked Sendable {
         let textHash = referenceText?.hashValue ?? 0
         return "\(path)#\(Int(mtime))#\(size)#\(textHash)"
     }
+
+    func unload() {
+        model?.unload()
+        model = nil
+        speechTokenizer = nil
+        profileCache.removeAll()
+    }
 }
 
 let cosyHolder = CosyHolder()
@@ -301,22 +315,66 @@ final class VoxCPM2Holder: @unchecked Sendable {
         logErr("[sidecar] vox ready")
         return m
     }
+
+    func unload() {
+        model?.unload()
+        model = nil
+    }
 }
 
 let voxHolder = VoxCPM2Holder()
 
-// Engine selector. VoxCPM2 is the default for v0.2 — much better cloning
-// quality without the reference-transcript fragility. SONIQO_TTS_ENGINE=cosyvoice
-// or =qwen3 keep the older paths for A/B and rollback.
+// Engine selector. VoxCPM2 is the default. SONIQO_TTS_ENGINE remains a
+// process-level compatibility default, but Studio chooses the engine per
+// request so a user can switch without restarting the app.
 enum TTSEngine: String {
     case voxcpm2, cosyvoice, qwen3
 }
 
-let activeEngine: TTSEngine = {
+let defaultEngine: TTSEngine = {
     if let raw = ProcessInfo.processInfo.environment["SONIQO_TTS_ENGINE"]?.lowercased(),
        let e = TTSEngine(rawValue: raw) { return e }
     return .voxcpm2
 }()
+
+func requestedEngine(for request: Request) -> TTSEngine? {
+    guard let raw = request.engine?.lowercased() else { return defaultEngine }
+    return TTSEngine(rawValue: raw)
+}
+
+/// Legacy direct callers selected a backend by command name. Preserve that
+/// behavior when `engine` is omitted, while making mismatched Studio requests
+/// fail rather than accidentally synthesizing with the wrong model.
+func requestMatchesEngine(_ request: Request, _ expected: TTSEngine) -> Bool {
+    guard let raw = request.engine?.lowercased() else { return true }
+    return TTSEngine(rawValue: raw) == expected
+}
+
+func unloadInactiveModels(keeping engine: TTSEngine) {
+    switch engine {
+    case .voxcpm2:
+        cosyHolder.unload()
+        holder.unload()
+    case .cosyvoice:
+        voxHolder.unload()
+        holder.unload()
+    case .qwen3:
+        voxHolder.unload()
+        cosyHolder.unload()
+    }
+    MLX.Memory.clearCache()
+}
+
+// The NDJSON loop is synchronous, so this process-wide state cannot race.
+// It avoids clearing MLX's reusable buffer cache for ordinary synthesis while
+// still guaranteeing that an engine switch releases the old model first.
+var residentEngine: TTSEngine?
+
+func activateEngine(_ engine: TTSEngine) {
+    guard residentEngine != engine else { return }
+    unloadInactiveModels(keeping: engine)
+    residentEngine = engine
+}
 
 // MARK: - output cache
 
@@ -480,8 +538,20 @@ while let line = readLine(strippingNewline: true) {
         ))
 
     case "init_model":
+        guard let engine = requestedEngine(for: request) else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "unsupported engine: \(request.engine ?? "")"
+            ))
+            continue
+        }
         do {
-            switch activeEngine {
+            // Keep exactly one large model resident. Loading both VoxCPM2 and
+            // CosyVoice would needlessly exhaust unified memory on common
+            // Apple Silicon configurations.
+            activateEngine(engine)
+            switch engine {
             case .voxcpm2:
                 _ = try await voxHolder.load()
             case .cosyvoice:
@@ -500,6 +570,14 @@ while let line = readLine(strippingNewline: true) {
         }
 
     case "synthesize_voxcpm2":
+        guard requestMatchesEngine(request, .voxcpm2) else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "synthesize_voxcpm2 requires engine voxcpm2"
+            ))
+            continue
+        }
         guard let refPath = request.referenceAudioPath, !refPath.isEmpty,
               let targetText = request.text, !targetText.isEmpty else {
             emit(ErrorResponse(
@@ -511,6 +589,7 @@ while let line = readLine(strippingNewline: true) {
         }
 
         do {
+            activateEngine(.voxcpm2)
             let model = try await voxHolder.load()
             let refURL = URL(fileURLWithPath: refPath)
             // VoxCPM2's AudioVAE runs at 16 kHz internally; load the ref at
@@ -579,6 +658,14 @@ while let line = readLine(strippingNewline: true) {
         }
 
     case "synthesize_cosyvoice":
+        guard requestMatchesEngine(request, .cosyvoice) else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "synthesize_cosyvoice requires engine cosyvoice"
+            ))
+            continue
+        }
         guard let refPath = request.referenceAudioPath, !refPath.isEmpty,
               let targetText = request.text, !targetText.isEmpty else {
             emit(ErrorResponse(
@@ -590,6 +677,7 @@ while let line = readLine(strippingNewline: true) {
         }
 
         do {
+            activateEngine(.cosyvoice)
             let (model, _) = try await cosyHolder.load()
             let refURL = URL(fileURLWithPath: refPath)
             // Match the CLI: load reference at 16 kHz. extractVoiceProfile
@@ -598,8 +686,14 @@ while let line = readLine(strippingNewline: true) {
             // that produces marginally different FSQ codes.
             let refSamples = try AudioFileLoader.load(url: refURL, targetSampleRate: 16000)
 
-            let cleanText = stripEmotionTags(targetText)
-            logErr("[sidecar] cosy synth voice=\(request.voiceId ?? "?") chars=\(cleanText.count) refSamples=\(refSamples.count)")
+            // CosyVoice accepts one global instruction per clone render. The
+            // speech-swift `instruct2` clone path keeps the Flow voice anchor
+            // while applying this first inline emotion marker to the LLM.
+            let (cleanText, extractedInstruct) = extractFirstEmotionTag(targetText)
+            let finalInstruct = request.instruct?.isEmpty == false
+                ? request.instruct!
+                : extractedInstruct ?? "You are a helpful assistant."
+            logErr("[sidecar] cosy synth voice=\(request.voiceId ?? "?") chars=\(cleanText.count) refSamples=\(refSamples.count) instruct=\(finalInstruct)")
 
             // Extract the voice profile from the reference.
             let profile = try cosyHolder.voiceProfile(
@@ -629,7 +723,7 @@ while let line = readLine(strippingNewline: true) {
             let rawAudio = model.synthesize(
                 text: cleanText,
                 language: "english",
-                instruction: "You are a helpful assistant.",
+                instruction: finalInstruct,
                 speakerEmbedding: nil,
                 promptToken: profile.promptToken,
                 promptFeat: profile.promptFeat,
@@ -680,6 +774,7 @@ while let line = readLine(strippingNewline: true) {
         }
 
         do {
+            activateEngine(.qwen3)
             let (model, codecEncoder) = try await holder.load()
 
             let refURL = URL(fileURLWithPath: refPath)
