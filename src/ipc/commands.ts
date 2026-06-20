@@ -12,7 +12,7 @@ export function pingSidecar(): Promise<PingResult> {
   return invoke<PingResult>("ping_sidecar");
 }
 
-export type TtsEngineId = "voxcpm2" | "cosyvoice";
+export type TtsEngineId = "voxcpm2" | "cosyvoice" | "qwen3";
 
 export interface TtsEngineInfo {
   id: TtsEngineId;
