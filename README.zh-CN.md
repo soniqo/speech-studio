@@ -126,7 +126,6 @@ pnpm tauri dev
 |---|---|---|---|---|
 | `aufklarer/VoxCPM2-MLX-int8`  | 2.75 GB | 3.1 GB | **5.4 GB** | ✅ |
 | `aufklarer/VoxCPM2-MLX-bf16`  | 4.6 GB  | 9.1 GB | 11.4 GB | |
-| `aufklarer/VoxCPM2-MLX-int4`  | 1.75 GB | （未基准测试） | | |
 
 MLX 缓冲缓存上限为 1 GB（可用 `SONIQO_MLX_CACHE_MB` 覆盖）——若没有该上限，长会话中峰值会随着不同形状的缓冲累积增长到数十 GB。如需更高保真度的权重，用 `SONIQO_VOXCPM2_MODEL_ID=aufklarer/VoxCPM2-MLX-bf16` 覆盖默认模型。
 
