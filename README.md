@@ -126,7 +126,6 @@ Measured through the 4-line demo on an Apple Silicon Mac (M-series, unified memo
 |---|---|---|---|---|
 | `aufklarer/VoxCPM2-MLX-int8`  | 2.75 GB | 3.1 GB | **5.4 GB** | ✅ |
 | `aufklarer/VoxCPM2-MLX-bf16`  | 4.6 GB  | 9.1 GB | 11.4 GB | |
-| `aufklarer/VoxCPM2-MLX-int4`  | 1.75 GB | (not benchmarked) | | |
 
 The MLX buffer cache is capped at 1 GB (`SONIQO_MLX_CACHE_MB` to override) — without that cap, peak grows to tens of GB on long sessions as varying-shape buffers accumulate. Override the default model with `SONIQO_VOXCPM2_MODEL_ID=aufklarer/VoxCPM2-MLX-bf16` if you want the higher-fidelity weights.
 
