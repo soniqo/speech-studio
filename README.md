@@ -32,6 +32,21 @@ The clone is local. The synth is local. No audio leaves your machine.
 - **A warm sidecar process** holds the speech engine resident so per-line synthesis is fast after the first warm-up. Tauri spawns it once and talks NDJSON over stdin/stdout. On macOS this is the **Swift sidecar** (`swift-sidecar/`, MLX); on Windows/Linux the **C++ sidecar** (`core-sidecar/`, LiteRT).
 - **VoxCPM2** is the default engine on every platform — via [`speech-swift`](https://github.com/soniqo/speech-swift) (MLX) on macOS and [`speech-core`](https://github.com/soniqo/speech-core) (LiteRT) on Windows/Linux. On macOS you can switch engines from the toolbar: **CosyVoice3**, **Qwen3-TTS**, and **Chatterbox** (multilingual cloning across 23 languages). Those MLX engines are macOS-only; Windows/Linux runs VoxCPM2.
 
+## Engines
+
+Switch engine from the toolbar dropdown (macOS only — Windows/Linux always use VoxCPM2, so the dropdown doesn't appear).
+
+| Engine | Platforms | Backend | Voice cloning | Emotion markers | Languages |
+|---|---|---|:---:|---|:---:|
+| **VoxCPM2** · default | macOS · Windows · Linux | MLX / LiteRT | ✅ | style instructions | 30 |
+| **CosyVoice 3** | macOS only | MLX | ✅ | style instructions | 9 |
+| **Qwen3-TTS** | macOS only | MLX | ✅ (ICL) | — | 10 |
+| **Chatterbox** | macOS only | MLX | ✅ | intensity only¹ | 23 |
+
+The MLX engines (CosyVoice 3, Qwen3-TTS, Chatterbox) are **macOS-only**; Windows/Linux run VoxCPM2 through speech-core's LiteRT backend.
+
+¹ Chatterbox has no free-text style input — emotion markers map to an expressiveness/intensity level (more vs. less expressive), not a specific emotion.
+
 ## Emotion markers
 
 Wrap a line in a parenthetical tag to steer the prosody:
@@ -43,7 +58,9 @@ Wrap a line in a parenthetical tag to steer the prosody:
 (intense) Then we end this together. Tonight.
 ```
 
-Supported tags include `soft`, `warm`, `whispering`, `intense`, `excited`, `happy`, `calm`, `serious`, `surprised`, `sad`, `angry`, `dramatic`, `laughs`. Each maps to a short natural-language style instruction that's passed to the model; custom tags (e.g. `(slow and dreamy)`) pass through verbatim.
+Supported tags include `soft`, `warm`, `whispering`, `intense`, `excited`, `happy`, `calm`, `serious`, `surprised`, `sad`, `angry`, `dramatic`, `laughs`.
+
+How a marker is applied depends on the engine: **VoxCPM2** and **CosyVoice 3** turn it into a short natural-language style instruction (custom tags like `(slow and dreamy)` pass through verbatim); **Chatterbox** maps it to an expressiveness/intensity level (it has no per-emotion control, only more vs. less expressive); **Qwen3-TTS** ignores markers (they're stripped from the text).
 
 ## Download
 
@@ -120,12 +137,14 @@ pnpm tauri dev
 
 ### Memory footprint
 
-Measured through the 4-line demo on an Apple Silicon Mac (M-series, unified memory). Numbers are MLX's own accounting; OS RSS adds ~500 MB of process overhead on top.
+Measured through the 4-line demo on an Apple Silicon Mac (M-series, unified memory). Numbers are MLX's own accounting; OS RSS adds ~500 MB of process overhead on top. The default **VoxCPM2** engine:
 
 | Variant | Disk | Active | Peak | Default |
 |---|---|---|---|---|
 | `aufklarer/VoxCPM2-MLX-int8`  | 2.75 GB | 3.1 GB | **5.4 GB** | ✅ |
 | `aufklarer/VoxCPM2-MLX-bf16`  | 4.6 GB  | 9.1 GB | 11.4 GB | |
+
+The other macOS engines load separately when you select them: **Chatterbox** ≈ 3.5 GB peak (1.3 GB on disk), **CosyVoice 3** is lighter, **Qwen3-TTS** (1.7B bf16) heavier. Only one engine is resident at a time — switching unloads the previous one.
 
 The MLX buffer cache is capped at 1 GB (`SONIQO_MLX_CACHE_MB` to override) — without that cap, peak grows to tens of GB on long sessions as varying-shape buffers accumulate. Override the default model with `SONIQO_VOXCPM2_MODEL_ID=aufklarer/VoxCPM2-MLX-bf16` if you want the higher-fidelity weights.
 
@@ -142,7 +161,7 @@ cd .. && pnpm tauri build             # produces .app + .dmg under src-tauri/tar
 
 ## Sibling repos
 
-- [`speech-swift`](https://github.com/soniqo/speech-swift) — Apple Silicon speech engines (VoxCPM2, CosyVoice3, Qwen3-TTS, Parakeet, Silero VAD).
+- [`speech-swift`](https://github.com/soniqo/speech-swift) — Apple Silicon speech engines (VoxCPM2, CosyVoice3, Qwen3-TTS, Chatterbox, Parakeet, Silero VAD).
 - [`speech-core`](https://github.com/soniqo/speech-core) — C++ engines (VoxCPM2 cloning on Windows/Linux, plus STT, VAD, denoise).
 
 ## Contributing
