@@ -137,14 +137,16 @@ pnpm tauri dev
 
 ### Memory footprint
 
-Measured through the 4-line demo on an Apple Silicon Mac (M-series, unified memory). Numbers are MLX's own accounting; OS RSS adds ~500 MB of process overhead on top. The default **VoxCPM2** engine:
+Measured on an Apple Silicon Mac (M-series, unified memory). The **resident** column is the real process footprint (Activity Monitor's "Memory" — `vmmap` physical footprint), which is the figure to check against your RAM. **MLX active/peak** is MLX's own accounting (peak is over a multi-line session). Note: plain `ps rss` under-reports by ~3× on Apple Silicon — Metal unified-memory buffers don't count as RSS, so use the resident figures below.
 
-| Variant | Disk | Active | Peak | Default |
-|---|---|---|---|---|
-| `aufklarer/VoxCPM2-MLX-int8`  | 2.75 GB | 3.1 GB | **5.4 GB** | ✅ |
-| `aufklarer/VoxCPM2-MLX-bf16`  | 4.6 GB  | 9.1 GB | 11.4 GB | |
+The default **VoxCPM2** engine:
 
-The other macOS engines load separately when you select them: **Chatterbox** ≈ 3.5 GB peak (1.3 GB on disk), **CosyVoice 3** is lighter, **Qwen3-TTS** (1.7B bf16) heavier. Only one engine is resident at a time — switching unloads the previous one.
+| Variant | Disk | MLX active | MLX peak | Resident (real) | Default |
+|---|---|---|---|---|---|
+| `aufklarer/VoxCPM2-MLX-int8`  | 2.75 GB | 3.1 GB | 5.4 GB | **~4–5 GB** | ✅ |
+| `aufklarer/VoxCPM2-MLX-bf16`  | 4.6 GB  | 9.1 GB | 11.4 GB | ~12 GB | |
+
+The other macOS engines load separately when you select them — only one is resident at a time (switching unloads the previous): **Chatterbox** ~4 GB resident (1.3 GB on disk), **CosyVoice 3** lighter, **Qwen3-TTS** (1.7B bf16) heavier.
 
 The MLX buffer cache is capped at 1 GB (`SONIQO_MLX_CACHE_MB` to override) — without that cap, peak grows to tens of GB on long sessions as varying-shape buffers accumulate. Override the default model with `SONIQO_VOXCPM2_MODEL_ID=aufklarer/VoxCPM2-MLX-bf16` if you want the higher-fidelity weights.
 
