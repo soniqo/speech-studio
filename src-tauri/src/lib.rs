@@ -267,6 +267,7 @@ enum TtsEngine {
     VoxCPM2,
     CosyVoice,
     Qwen3,
+    Chatterbox,
 }
 
 impl TtsEngine {
@@ -275,6 +276,7 @@ impl TtsEngine {
             Self::VoxCPM2 => "synthesize_voxcpm2",
             Self::CosyVoice => "synthesize_cosyvoice",
             Self::Qwen3 => "synthesize_icl",
+            Self::Chatterbox => "synthesize_chatterbox",
         }
     }
 
@@ -283,11 +285,19 @@ impl TtsEngine {
             Self::VoxCPM2 => "VoxCPM2",
             Self::CosyVoice => "CosyVoice 3",
             Self::Qwen3 => "Qwen3-TTS",
+            Self::Chatterbox => "Chatterbox",
         }
     }
 
     fn requires_reference_transcript(self) -> bool {
         matches!(self, Self::CosyVoice | Self::Qwen3)
+    }
+
+    /// Whether synthesis needs a caller-chosen language. Chatterbox prepends a
+    /// `[lang]` token, so the Studio shows a language picker for it; the other
+    /// engines infer language from the text.
+    fn requires_language(self) -> bool {
+        matches!(self, Self::Chatterbox)
     }
 }
 
@@ -296,6 +306,7 @@ fn engine_is_supported(engine: TtsEngine) -> bool {
         TtsEngine::VoxCPM2 => true,
         TtsEngine::CosyVoice => cfg!(target_os = "macos"),
         TtsEngine::Qwen3 => cfg!(target_os = "macos"),
+        TtsEngine::Chatterbox => cfg!(target_os = "macos"),
     }
 }
 
@@ -316,6 +327,8 @@ struct TtsEngineInfo {
     display_name: &'static str,
     #[serde(rename = "requiresReferenceTranscript")]
     requires_reference_transcript: bool,
+    #[serde(rename = "requiresLanguage")]
+    requires_language: bool,
 }
 
 fn tts_engine_info(engine: TtsEngine) -> TtsEngineInfo {
@@ -323,6 +336,7 @@ fn tts_engine_info(engine: TtsEngine) -> TtsEngineInfo {
         id: engine,
         display_name: engine.display_name(),
         requires_reference_transcript: engine.requires_reference_transcript(),
+        requires_language: engine.requires_language(),
     }
 }
 
@@ -332,6 +346,7 @@ async fn available_tts_engines() -> Vec<TtsEngineInfo> {
     if cfg!(target_os = "macos") {
         engines.push(tts_engine_info(TtsEngine::CosyVoice));
         engines.push(tts_engine_info(TtsEngine::Qwen3));
+        engines.push(tts_engine_info(TtsEngine::Chatterbox));
     }
     engines
 }
@@ -544,6 +559,10 @@ struct SynthesizeArgs {
     reference_audio_path: String,
     #[serde(rename = "referenceText")]
     reference_text: String,
+    /// Synthesis language id (Chatterbox `[lang]` token, e.g. "en"/"ar"/"hi").
+    /// Optional; engines that infer language from text ignore it.
+    #[serde(default)]
+    language: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -696,6 +715,7 @@ fn synth_one_line(
     reference_audio_path: &str,
     reference_text: &str,
     text: &str,
+    language: Option<&str>,
     invocation_salt: &str,
     part_idx: usize,
 ) -> Result<(String, f64), String> {
@@ -738,6 +758,7 @@ fn synth_one_line(
             "voiceId": voice_id,
             "referenceAudioPath": reference_audio_path,
             "referenceText": reference_text,
+            "language": language,
             "seed": seed,
             "cfgValue": cfg,
             "maxTokens": max_tokens,
@@ -1019,6 +1040,7 @@ async fn synthesize_clip(
             &args.reference_audio_path,
             &args.reference_text,
             &processed_text,
+            args.language.as_deref(),
             &invocation_salt,
             0,
         )?;
@@ -1043,6 +1065,7 @@ async fn synthesize_clip(
             &args.reference_audio_path,
             &args.reference_text,
             chunk,
+            args.language.as_deref(),
             &invocation_salt,
             i,
         )?;
@@ -2053,6 +2076,17 @@ mod tests {
     fn cosyvoice_requires_reference_transcript() {
         assert!(TtsEngine::CosyVoice.requires_reference_transcript());
         assert!(!TtsEngine::VoxCPM2.requires_reference_transcript());
+    }
+
+    #[test]
+    fn chatterbox_engine_wiring() {
+        let c: TtsEngine = serde_json::from_str("\"chatterbox\"").unwrap();
+        assert_eq!(c, TtsEngine::Chatterbox);
+        assert_eq!(c.sidecar_command(), "synthesize_chatterbox");
+        // Multilingual clone: needs a language, but no reference transcript.
+        assert!(c.requires_language());
+        assert!(!c.requires_reference_transcript());
+        assert!(!TtsEngine::VoxCPM2.requires_language());
     }
 
     #[test]

@@ -20,6 +20,8 @@ export type ModelStatus = "idle" | "loading" | "ready" | "error";
 
 interface ModelState {
   engine: TtsEngineId;
+  /** Synthesis language id for engines that need one (Chatterbox `[lang]`). */
+  language: string;
   engines: TtsEngineInfo[];
   status: ModelStatus;
   error?: string;
@@ -39,6 +41,7 @@ interface ProjectStore {
   model: ModelState;
   setModelStatus: (status: ModelStatus, error?: string) => void;
   setTtsEngine: (engine: TtsEngineId) => void;
+  setTtsLanguage: (language: string) => void;
   setAvailableTtsEngines: (engines: TtsEngineInfo[]) => void;
 
   demoProgress: DemoProgress | null;
@@ -115,6 +118,7 @@ export const useProjectStore = create<ProjectStore>((set) => ({
   transport: { playing: false, positionSec: 0, zoomPxPerSec: 100 },
   model: {
     engine: "voxcpm2",
+    language: "en",
     engines: [],
     status: "idle",
   },
@@ -122,6 +126,8 @@ export const useProjectStore = create<ProjectStore>((set) => ({
     set((s) => ({ model: { ...s.model, status, error } })),
   setTtsEngine: (engine) =>
     set((s) => ({ model: { ...s.model, engine, error: undefined } })),
+  setTtsLanguage: (language) =>
+    set((s) => ({ model: { ...s.model, language, error: undefined } })),
   setAvailableTtsEngines: (engines) =>
     set((s) => ({ model: { ...s.model, engines } })),
 

@@ -82,12 +82,25 @@ function ModelChip({
   );
 }
 
+/** Languages a per-language engine (Chatterbox) can synthesize today. */
+const TTS_LANGUAGES: { id: string; label: string }[] = [
+  { id: "en", label: "English" },
+  { id: "ar", label: "العربية" },
+  { id: "hi", label: "हिन्दी" },
+  { id: "de", label: "Deutsch" },
+  { id: "es", label: "Español" },
+  { id: "fr", label: "Français" },
+  { id: "it", label: "Italiano" },
+  { id: "pt", label: "Português" },
+];
+
 export function TopBar() {
   const project = useProjectStore((s) => s.project);
   const renameProject = useProjectStore((s) => s.renameProject);
   const model = useProjectStore((s) => s.model);
   const setModelStatus = useProjectStore((s) => s.setModelStatus);
   const setTtsEngine = useProjectStore((s) => s.setTtsEngine);
+  const setTtsLanguage = useProjectStore((s) => s.setTtsLanguage);
   const synthesisStatus = useProjectStore((s) => s.synthesisStatus);
   const synthesisProgress = useProjectStore((s) => s.synthesisProgress);
   const hasContent = project.tracks.length > 0;
@@ -217,6 +230,27 @@ export function TopBar() {
               {model.engines.map((engine) => (
                 <SelectItem key={engine.id} value={engine.id}>
                   {engine.displayName}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+        {engineInfo?.requiresLanguage && (
+          <Select
+            value={model.language}
+            onValueChange={(value) => setTtsLanguage(value)}
+            disabled={synthBusy}
+          >
+            <SelectTrigger
+              className="h-7 w-[120px] text-xs"
+              title="Synthesis language — Chatterbox prepends this as its language token"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {TTS_LANGUAGES.map((lang) => (
+                <SelectItem key={lang.id} value={lang.id}>
+                  {lang.label}
                 </SelectItem>
               ))}
             </SelectContent>

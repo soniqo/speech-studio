@@ -12,12 +12,15 @@ export function pingSidecar(): Promise<PingResult> {
   return invoke<PingResult>("ping_sidecar");
 }
 
-export type TtsEngineId = "voxcpm2" | "cosyvoice" | "qwen3";
+export type TtsEngineId = "voxcpm2" | "cosyvoice" | "qwen3" | "chatterbox";
 
 export interface TtsEngineInfo {
   id: TtsEngineId;
   displayName: string;
   requiresReferenceTranscript: boolean;
+  /** When true the engine needs a caller-chosen language (e.g. Chatterbox's
+   * `[lang]` token); the UI surfaces a language picker. */
+  requiresLanguage: boolean;
 }
 
 export function availableTtsEngines(): Promise<TtsEngineInfo[]> {
@@ -82,6 +85,8 @@ export interface SynthesizeClipArgs {
   voiceId: string;
   referenceAudioPath: string;
   referenceText: string;
+  /** Synthesis language id for engines that need one (Chatterbox `[lang]`). */
+  language?: string;
 }
 
 export interface SynthesizeClipResult {
