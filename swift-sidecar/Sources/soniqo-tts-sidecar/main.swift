@@ -495,7 +495,7 @@ let emotionInstructs: [String: String] = [
 /// emotion we return the full descriptive sentence as `instruct`; if it
 /// doesn't match a known emotion we pass the raw tag name through (so
 /// custom one-off descriptions like `(very calm)` still work).
-func extractFirstEmotionTag(_ s: String) -> (text: String, instruct: String?) {
+func extractFirstEmotionTag(_ s: String) -> (text: String, tag: String?, instruct: String?) {
     var firstTag: String? = nil
     var body = s
 
@@ -543,11 +543,24 @@ func extractFirstEmotionTag(_ s: String) -> (text: String, instruct: String?) {
     let trimmedBody = cleanBody.isEmpty ? body : cleanBody
 
     guard let tag = firstTag else {
-        return (trimmedBody, nil)
+        return (trimmedBody, nil, nil)
     }
     let instruct = emotionInstructs[tag] ?? tag  // fall back to raw tag
-    return (trimmedBody, instruct)
+    return (trimmedBody, tag, instruct)
 }
+
+/// Chatterbox has no free-text style input — its only emotion lever is a single
+/// `exaggeration` scalar (T3's emotion-advisor input; 0.5 ≈ neutral, higher =
+/// more emotionally intense/expressive, lower = flatter/calmer). It can't pick a
+/// *kind* of emotion, only intensity, so map each marker to an intensity here.
+/// Unknown / no marker → 0.5 (neutral).
+let emotionExaggeration: [String: Float] = [
+    "excited": 0.8, "dramatic": 0.85, "intense": 0.85, "surprised": 0.75,
+    "angry": 0.8, "happy": 0.65, "laughs": 0.7,
+    "warm": 0.55, "serious": 0.5,
+    "sad": 0.4, "calm": 0.3, "soft": 0.3,
+    "whisper": 0.25, "whispers": 0.25, "whispering": 0.25,
+]
 
 // MARK: - MLX memory
 
@@ -657,7 +670,7 @@ while let line = readLine(strippingNewline: true) {
             // Markers nested across the whole line are flattened; mid-sentence
             // tag changes aren't supported yet (CosyVoice's model only takes
             // one global instruct anyway).
-            let (cleanText, extractedInstruct) = extractFirstEmotionTag(targetText)
+            let (cleanText, _, extractedInstruct) = extractFirstEmotionTag(targetText)
             let finalInstruct = request.instruct?.isEmpty == false
                 ? request.instruct!
                 : extractedInstruct
@@ -744,7 +757,7 @@ while let line = readLine(strippingNewline: true) {
             // CosyVoice accepts one global instruction per clone render. The
             // speech-swift `instruct2` clone path keeps the Flow voice anchor
             // while applying this first inline emotion marker to the LLM.
-            let (cleanText, extractedInstruct) = extractFirstEmotionTag(targetText)
+            let (cleanText, _, extractedInstruct) = extractFirstEmotionTag(targetText)
             let finalInstruct = request.instruct?.isEmpty == false
                 ? request.instruct!
                 : extractedInstruct ?? "You are a helpful assistant."
@@ -844,11 +857,13 @@ while let line = readLine(strippingNewline: true) {
             let refSamples = try AudioFileLoader.load(
                 url: refURL, targetSampleRate: ChatterboxS3Gen.sampleRate)
 
-            // Chatterbox doesn't consume inline emotion markers; strip them so
-            // the literal "<excited>" text doesn't get spoken.
-            let (cleanText, _) = extractFirstEmotionTag(targetText)
+            // Strip the inline emotion marker from the spoken text, but keep the
+            // tag: Chatterbox can't take a free-text style instruction, so the
+            // marker maps to its `exaggeration` intensity scalar instead.
+            let (cleanText, emotionTag, _) = extractFirstEmotionTag(targetText)
+            let exaggeration = emotionTag.flatMap { emotionExaggeration[$0] } ?? 0.5
             let language = request.language?.isEmpty == false ? request.language! : "en"
-            logErr("[sidecar] cbx synth voice=\(request.voiceId ?? "?") lang=\(language) chars=\(cleanText.count) refSamples=\(refSamples.count)")
+            logErr("[sidecar] cbx synth voice=\(request.voiceId ?? "?") lang=\(language) tag=\(emotionTag ?? "(none)") exaggeration=\(exaggeration) chars=\(cleanText.count) refSamples=\(refSamples.count)")
 
             // Seed the noise so a given (voice, text, language) is reproducible;
             // the Rust retry ladder varies it across attempts.
@@ -861,6 +876,7 @@ while let line = readLine(strippingNewline: true) {
                 sampleRate: ChatterboxS3Gen.sampleRate,
                 text: cleanText,
                 languageId: language,
+                exaggeration: exaggeration,
                 temperature: 0.0,
                 cfgWeight: 0.5
             )
