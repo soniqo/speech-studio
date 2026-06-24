@@ -871,17 +871,23 @@ while let line = readLine(strippingNewline: true) {
             // request.exaggeration (0…2) overrides the marker map when supplied —
             // a direct intensity control for a future UI slider.
             let exaggeration = request.exaggeration ?? emotionTag.flatMap { emotionExaggeration[$0] } ?? 0.5
+            // Couple cfgWeight to exaggeration as Resemble's reference recommends:
+            // for more expressive speech, raise exaggeration AND lower cfg_weight
+            // toward ~0.3; neutral (≤0.5) stays at 0.5. This makes the emotion land
+            // stably instead of just scaling a flat conditioning. Ramp 0.5→0.3 over
+            // exaggeration 0.5→1.0, floored at 0.3.
+            let cfgWeight = max(0.3, min(0.5, 0.5 - (exaggeration - 0.5) * 0.4))
             let language = request.language?.isEmpty == false ? request.language! : "en"
-            logErr("[sidecar] cbx synth voice=\(request.voiceId ?? "?") lang=\(language) tag=\(emotionTag ?? "(none)") exaggeration=\(exaggeration) chars=\(cleanText.count) refSamples=\(refSamples.count)")
+            logErr("[sidecar] cbx synth voice=\(request.voiceId ?? "?") lang=\(language) tag=\(emotionTag ?? "(none)") exaggeration=\(exaggeration) cfg=\(cfgWeight) chars=\(cleanText.count) refSamples=\(refSamples.count)")
 
             // Seed the noise so a given (voice, text, language) is reproducible;
             // the Rust retry ladder varies it across attempts.
             let seed = request.seed ?? 1000
             MLX.seed(seed)
 
-            // Greedy (temperature 0) for determinism. cfgWeight fixed at 0.5 —
-            // the request's cfgValue is VoxCPM2's CFG ladder (2.0+) and must NOT
-            // be used as Chatterbox's classifier-free-guidance weight.
+            // Greedy (temperature 0) for determinism. cfgWeight is derived above —
+            // the request's cfgValue is VoxCPM2's CFG ladder (2.0+) and must NOT be
+            // used as Chatterbox's classifier-free-guidance weight.
             let audio = try model.clone(
                 referenceSamples: refSamples,
                 sampleRate: ChatterboxS3Gen.sampleRate,
@@ -889,7 +895,7 @@ while let line = readLine(strippingNewline: true) {
                 languageId: language,
                 exaggeration: exaggeration,
                 temperature: 0.0,
-                cfgWeight: 0.5
+                cfgWeight: cfgWeight
             )
 
             let sampleRate = ChatterboxS3Gen.sampleRate
