@@ -17,10 +17,12 @@ let package = Package(
                 //   CosyVoiceTTS — legacy fallback (kept for one release behind
                 //                  SONIQO_TTS_ENGINE=cosyvoice while voxcpm2 stabilises).
                 //   Qwen3TTS    — older ICL path, kept behind SONIQO_TTS_ENGINE=qwen3.
+                //   ChatterboxTTS — multilingual zero-shot cloning (per-call language).
                 //   AudioCommon — shared audio I/O helpers.
                 .product(name: "VoxCPM2TTS", package: "speech-swift"),
                 .product(name: "CosyVoiceTTS", package: "speech-swift"),
                 .product(name: "Qwen3TTS", package: "speech-swift"),
+                .product(name: "ChatterboxTTS", package: "speech-swift"),
                 .product(name: "AudioCommon", package: "speech-swift")
             ],
             path: "Sources/soniqo-tts-sidecar",

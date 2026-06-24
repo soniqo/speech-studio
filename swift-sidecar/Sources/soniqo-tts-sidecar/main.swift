@@ -1,6 +1,7 @@
 import Foundation
 import AudioCommon
 import MLX
+import ChatterboxTTS
 import CosyVoiceTTS
 import Qwen3TTS
 import VoxCPM2TTS
@@ -15,6 +16,7 @@ import VoxCPM2TTS
 //                           inactive one before it can retain Metal memory.
 //   synthesize_voxcpm2    — VoxCPM2 voice clone (48 kHz).
 //   synthesize_cosyvoice  — CosyVoice zero-shot voice clone (24 kHz).
+//   synthesize_chatterbox — Chatterbox multilingual voice clone (24 kHz).
 //   synthesize_icl        — Qwen3-TTS ICL voice clone; legacy fallback only.
 
 struct Request: Decodable {
@@ -41,6 +43,9 @@ struct Request: Decodable {
     let instruct: String?
     // VoxCPM2: classifier-free guidance scale (default 2.0).
     let cfgValue: Float?
+    // Chatterbox: BCP-47-ish language id for the `[lang]` token (e.g. "en",
+    // "ar", "hi"). Ignored by the other engines.
+    let language: String?
 }
 
 struct PingResult: Encodable {
@@ -325,11 +330,51 @@ final class VoxCPM2Holder: @unchecked Sendable {
 
 let voxHolder = VoxCPM2Holder()
 
+// MARK: - Chatterbox model state
+
+/// Lazily loaded Chatterbox multilingual TTS model. Cloning takes the reference
+/// clip + target text + a language id (the `[lang]` token the tokenizer
+/// prepends) — no reference transcript. The published bundle ships its conformer
+/// + S3 tokenizer weights, so the load is self-contained.
+final class ChatterboxHolder: @unchecked Sendable {
+    private var model: ChatterboxTTSModel?
+    private var loadedModelId: String?
+
+    /// `requestedId == nil` reuses the loaded model; a different id reloads (quant switch).
+    func load(modelId requestedId: String? = nil) async throws -> ChatterboxTTSModel {
+        if let m = model, requestedId == nil || requestedId == loadedModelId { return m }
+        if model != nil { unload() }
+        let modelId = requestedId
+            ?? ProcessInfo.processInfo.environment["SONIQO_CHATTERBOX_MODEL_ID"]
+            ?? ChatterboxTTSModel.defaultModelId
+        logErr("[sidecar] loading Chatterbox model \(modelId)…")
+        let m = try await ChatterboxTTSModel.fromPretrained(
+            modelId: modelId,
+            progressHandler: { progress, message in
+                logErr(String(format: "[sidecar] cbx %3d%% %@", Int(progress * 100), message))
+            }
+        )
+        model = m
+        loadedModelId = modelId
+        logErr("[sidecar] cbx ready")
+        return m
+    }
+
+    func unload() {
+        // ChatterboxTTSModel has no explicit teardown; drop the reference and let
+        // ARC + MLX.Memory.clearCache() (in unloadInactiveModels) reclaim Metal.
+        model = nil
+        loadedModelId = nil
+    }
+}
+
+let chatterboxHolder = ChatterboxHolder()
+
 // Engine selector. VoxCPM2 is the default. SONIQO_TTS_ENGINE remains a
 // process-level compatibility default, but Studio chooses the engine per
 // request so a user can switch without restarting the app.
 enum TTSEngine: String {
-    case voxcpm2, cosyvoice, qwen3
+    case voxcpm2, cosyvoice, qwen3, chatterbox
 }
 
 let defaultEngine: TTSEngine = {
@@ -356,12 +401,19 @@ func unloadInactiveModels(keeping engine: TTSEngine) {
     case .voxcpm2:
         cosyHolder.unload()
         holder.unload()
+        chatterboxHolder.unload()
     case .cosyvoice:
         voxHolder.unload()
         holder.unload()
+        chatterboxHolder.unload()
     case .qwen3:
         voxHolder.unload()
         cosyHolder.unload()
+        chatterboxHolder.unload()
+    case .chatterbox:
+        voxHolder.unload()
+        cosyHolder.unload()
+        holder.unload()
     }
     MLX.Memory.clearCache()
 }
@@ -559,6 +611,8 @@ while let line = readLine(strippingNewline: true) {
                 _ = try await cosyHolder.load()
             case .qwen3:
                 _ = try await holder.load()
+            case .chatterbox:
+                _ = try await chatterboxHolder.load()
             }
             emit(SuccessResponse(
                 id: request.id,
@@ -759,6 +813,74 @@ while let line = readLine(strippingNewline: true) {
             ))
         } catch {
             logErr("[sidecar] cosy synthesis failed: \(error)")
+            emit(ErrorResponse(id: request.id, ok: false, error: "\(error)"))
+        }
+
+    case "synthesize_chatterbox":
+        guard requestMatchesEngine(request, .chatterbox) else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "synthesize_chatterbox requires engine chatterbox"
+            ))
+            continue
+        }
+        guard let refPath = request.referenceAudioPath, !refPath.isEmpty,
+              let targetText = request.text, !targetText.isEmpty else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "synthesize_chatterbox requires referenceAudioPath and text"
+            ))
+            continue
+        }
+
+        do {
+            activateEngine(.chatterbox)
+            let model = try await chatterboxHolder.load()
+            let refURL = URL(fileURLWithPath: refPath)
+            // clone() resamples the reference to the rates it needs (24 kHz mel,
+            // 16 kHz tokenizer) internally, so load it once at the mel rate.
+            let refSamples = try AudioFileLoader.load(
+                url: refURL, targetSampleRate: ChatterboxS3Gen.sampleRate)
+
+            // Chatterbox doesn't consume inline emotion markers; strip them so
+            // the literal "<excited>" text doesn't get spoken.
+            let (cleanText, _) = extractFirstEmotionTag(targetText)
+            let language = request.language?.isEmpty == false ? request.language! : "en"
+            logErr("[sidecar] cbx synth voice=\(request.voiceId ?? "?") lang=\(language) chars=\(cleanText.count) refSamples=\(refSamples.count)")
+
+            // Seed the noise so a given (voice, text, language) is reproducible;
+            // the Rust retry ladder varies it across attempts.
+            let seed = request.seed ?? 1000
+            MLX.seed(seed)
+
+            // Greedy (temperature 0) for determinism; cfgWeight default 0.5.
+            let audio = try model.clone(
+                referenceSamples: refSamples,
+                sampleRate: ChatterboxS3Gen.sampleRate,
+                text: cleanText,
+                languageId: language,
+                temperature: 0.0,
+                cfgWeight: 0.5
+            )
+
+            let sampleRate = ChatterboxS3Gen.sampleRate
+            let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
+            try WAVWriter.write(samples: audio, sampleRate: sampleRate, to: outURL)
+            let durationSec = Double(audio.count) / Double(sampleRate)
+            logMemorySnapshot("post-cbx-synth")
+            emit(SuccessResponse(
+                id: request.id,
+                ok: true,
+                result: SynthResult(
+                    audioPath: outURL.path,
+                    sampleRate: sampleRate,
+                    durationSec: durationSec
+                )
+            ))
+        } catch {
+            logErr("[sidecar] cbx synthesis failed: \(error)")
             emit(ErrorResponse(id: request.id, ok: false, error: "\(error)"))
         }
 

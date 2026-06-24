@@ -52,6 +52,7 @@ export function useSynthesizeAll() {
       const initialState = useProjectStore.getState();
       const jobs = collectJobs(initialState, mode);
       const engine = initialState.model.engine;
+      const language = initialState.model.language;
       if (
         engine === "cosyvoice" &&
         jobs.some((job) => !job.voice.referenceText.trim())
@@ -84,6 +85,7 @@ export function useSynthesizeAll() {
             voiceId: job.voice.id,
             referenceAudioPath: job.voice.referenceAudioPath!,
             referenceText: job.voice.referenceText,
+            language,
           });
           const take = {
             id: crypto.randomUUID(),

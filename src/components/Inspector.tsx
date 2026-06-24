@@ -46,6 +46,7 @@ export function Inspector() {
   const assignVoiceToTrack = useProjectStore((s) => s.assignVoiceToTrack);
   const removeClip = useProjectStore((s) => s.removeClip);
   const engine = useProjectStore((s) => s.model.engine);
+  const language = useProjectStore((s) => s.model.language);
   const activeEngine = useProjectStore((s) =>
     s.model.engines.find((candidate) => candidate.id === s.model.engine),
   );
@@ -251,6 +252,7 @@ export function Inspector() {
         voiceId: effectiveVoice.id,
         referenceAudioPath: effectiveVoice.referenceAudioPath,
         referenceText: effectiveVoice.referenceText,
+        language,
       });
       const take = {
         id: crypto.randomUUID(),
