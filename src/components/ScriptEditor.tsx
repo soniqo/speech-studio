@@ -1,5 +1,6 @@
 import { useRef } from "react";
 import { EMOTION_TAGS, EmotionTag } from "../types/project";
+import { useProjectStore } from "../state/projectStore";
 import { Textarea } from "./ui/textarea";
 import { Button } from "./ui/button";
 
@@ -7,6 +8,14 @@ interface ScriptEditorProps {
   value: string;
   onChange: (value: string) => void;
 }
+
+/** Honest, per-engine note about how the selected engine applies markers. */
+const STYLE_HINTS: Record<string, string> = {
+  instruction: "Markers steer this line's tone.",
+  intensity:
+    "Chatterbox applies markers as intensity only — more vs. less expressive, not a specific emotion.",
+  none: "This engine ignores emotion markers.",
+};
 
 // Match `(tag)` or `<tag>...</tag>` wrappers at the start of a line so we can
 // swap them out cleanly. Permissive on tag character set to allow custom
@@ -29,6 +38,10 @@ function stripLeadingEmotionTag(text: string): string {
 
 export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
   const ref = useRef<HTMLTextAreaElement>(null);
+  const styleMode = useProjectStore(
+    (s) => s.model.engines.find((e) => e.id === s.model.engine)?.styleMode ?? "instruction",
+  );
+  const markersIgnored = styleMode === "none";
   const currentTag = (value.match(LEADING_PAREN_TAG)?.[1] || value.match(LEADING_XML_TAG)?.[1] || "")
     .trim()
     .toLowerCase();
@@ -56,7 +69,7 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
         placeholder="Write the line. Pick an emotion below to set the tone."
         className="min-h-[88px]"
       />
-      <div className="flex flex-wrap gap-1">
+      <div className={`flex flex-wrap gap-1 ${markersIgnored ? "opacity-50" : ""}`}>
         {EMOTION_TAGS.map((t) => {
           const active = currentTag === t;
           return (
@@ -77,6 +90,7 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
           );
         })}
       </div>
+      <div className="text-[11px] text-muted-foreground">{STYLE_HINTS[styleMode]}</div>
     </div>
   );
 }

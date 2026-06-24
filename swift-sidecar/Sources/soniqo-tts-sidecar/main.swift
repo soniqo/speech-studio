@@ -46,6 +46,9 @@ struct Request: Decodable {
     // Chatterbox: BCP-47-ish language id for the `[lang]` token (e.g. "en",
     // "ar", "hi"). Ignored by the other engines.
     let language: String?
+    // Chatterbox: direct exaggeration override (emotion intensity). When nil the
+    // handler maps the inline emotion marker to a value.
+    let exaggeration: Float?
 }
 
 struct PingResult: Encodable {
@@ -554,12 +557,16 @@ func extractFirstEmotionTag(_ s: String) -> (text: String, tag: String?, instruc
 /// more emotionally intense/expressive, lower = flatter/calmer). It can't pick a
 /// *kind* of emotion, only intensity, so map each marker to an intensity here.
 /// Unknown / no marker → 0.5 (neutral).
+/// Chatterbox's exaggeration response is flat between ~0.5 and ~1.0 and only
+/// becomes expressive above ~1.5 (measured: f0 mean 174→203 Hz, f0 std 18→52
+/// from 1.0→2.0). So high-emotion tags reach into 1.5–2.0 and calm tags sit at
+/// 0.3–0.5 — straddling the dead middle so the contrast is actually audible.
 let emotionExaggeration: [String: Float] = [
-    "excited": 0.8, "dramatic": 0.85, "intense": 0.85, "surprised": 0.75,
-    "angry": 0.8, "happy": 0.65, "laughs": 0.7,
-    "warm": 0.55, "serious": 0.5,
-    "sad": 0.4, "calm": 0.3, "soft": 0.3,
-    "whisper": 0.25, "whispers": 0.25, "whispering": 0.25,
+    "dramatic": 2.0, "intense": 1.8, "excited": 1.8, "angry": 1.7,
+    "surprised": 1.5, "laughs": 1.5, "happy": 1.3,
+    "warm": 0.5, "serious": 0.5,
+    "sad": 0.4, "calm": 0.35, "soft": 0.35,
+    "whisper": 0.3, "whispers": 0.3, "whispering": 0.3,
 ]
 
 // MARK: - MLX memory
@@ -861,7 +868,9 @@ while let line = readLine(strippingNewline: true) {
             // tag: Chatterbox can't take a free-text style instruction, so the
             // marker maps to its `exaggeration` intensity scalar instead.
             let (cleanText, emotionTag, _) = extractFirstEmotionTag(targetText)
-            let exaggeration = emotionTag.flatMap { emotionExaggeration[$0] } ?? 0.5
+            // request.exaggeration (0…2) overrides the marker map when supplied —
+            // a direct intensity control for a future UI slider.
+            let exaggeration = request.exaggeration ?? emotionTag.flatMap { emotionExaggeration[$0] } ?? 0.5
             let language = request.language?.isEmpty == false ? request.language! : "en"
             logErr("[sidecar] cbx synth voice=\(request.voiceId ?? "?") lang=\(language) tag=\(emotionTag ?? "(none)") exaggeration=\(exaggeration) chars=\(cleanText.count) refSamples=\(refSamples.count)")
 
@@ -870,7 +879,9 @@ while let line = readLine(strippingNewline: true) {
             let seed = request.seed ?? 1000
             MLX.seed(seed)
 
-            // Greedy (temperature 0) for determinism; cfgWeight default 0.5.
+            // Greedy (temperature 0) for determinism. cfgWeight fixed at 0.5 —
+            // the request's cfgValue is VoxCPM2's CFG ladder (2.0+) and must NOT
+            // be used as Chatterbox's classifier-free-guidance weight.
             let audio = try model.clone(
                 referenceSamples: refSamples,
                 sampleRate: ChatterboxS3Gen.sampleRate,
