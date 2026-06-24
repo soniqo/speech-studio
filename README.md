@@ -30,7 +30,7 @@ The clone is local. The synth is local. No audio leaves your machine.
 - **Tauri 2** shell (Rust + the OS-native WebView) so the shipped app is a small native binary, not a Chromium fork.
 - **React + Vite** frontend for the timeline, voice library, and script editor.
 - **A warm sidecar process** holds the speech engine resident so per-line synthesis is fast after the first warm-up. Tauri spawns it once and talks NDJSON over stdin/stdout. On macOS this is the **Swift sidecar** (`swift-sidecar/`, MLX); on Windows/Linux the **C++ sidecar** (`core-sidecar/`, LiteRT).
-- **VoxCPM2** is the speech engine on every platform — via [`speech-swift`](https://github.com/soniqo/speech-swift) (MLX) on macOS and [`speech-core`](https://github.com/soniqo/speech-core) (LiteRT) on Windows/Linux. On macOS, CosyVoice3 and Qwen3-TTS are kept as fallbacks behind `SONIQO_TTS_ENGINE=cosyvoice` / `qwen3`.
+- **VoxCPM2** is the default engine on every platform — via [`speech-swift`](https://github.com/soniqo/speech-swift) (MLX) on macOS and [`speech-core`](https://github.com/soniqo/speech-core) (LiteRT) on Windows/Linux. On macOS you can switch engines from the toolbar: **CosyVoice3**, **Qwen3-TTS**, and **Chatterbox** (multilingual cloning across 23 languages). Those MLX engines are macOS-only; Windows/Linux runs VoxCPM2.
 
 ## Emotion markers
 

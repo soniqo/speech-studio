@@ -30,7 +30,7 @@
 - **Tauri 2** 外壳（Rust + 操作系统原生 WebView），因此发布的应用是一个小巧的原生二进制，而非 Chromium 分支。
 - **React + Vite** 前端，负责时间轴、音色库与脚本编辑器。
 - **常驻的 sidecar 进程**让语音引擎保持加载状态，因此首次预热后逐行合成很快。Tauri 启动它一次，并通过 stdin/stdout 以 NDJSON 通信。在 macOS 上是 **Swift sidecar**（`swift-sidecar/`，MLX）；在 Windows/Linux 上是 **C++ sidecar**（`core-sidecar/`，LiteRT）。
-- **VoxCPM2** 是所有平台上的语音引擎——在 macOS 上经由 [`speech-swift`](https://github.com/soniqo/speech-swift)（MLX），在 Windows/Linux 上经由 [`speech-core`](https://github.com/soniqo/speech-core)（LiteRT）。在 macOS 上，CosyVoice3 与 Qwen3-TTS 作为后备保留，可通过 `SONIQO_TTS_ENGINE=cosyvoice` / `qwen3` 启用。
+- **VoxCPM2** 是所有平台上的默认引擎——在 macOS 上经由 [`speech-swift`](https://github.com/soniqo/speech-swift)（MLX），在 Windows/Linux 上经由 [`speech-core`](https://github.com/soniqo/speech-core)（LiteRT）。在 macOS 上可从工具栏切换引擎：**CosyVoice3**、**Qwen3-TTS** 以及 **Chatterbox**（支持 23 种语言的多语言克隆）。这些 MLX 引擎仅限 macOS；Windows/Linux 仅运行 VoxCPM2。
 
 ## 情感标记
 
