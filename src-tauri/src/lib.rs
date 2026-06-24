@@ -299,6 +299,19 @@ impl TtsEngine {
     fn requires_language(self) -> bool {
         matches!(self, Self::Chatterbox)
     }
+
+    /// How the engine applies inline emotion markers — drives the editor hint:
+    /// - `instruction`: marker → a natural-language style instruction (real tone).
+    /// - `intensity`: marker → an expressiveness level only (Chatterbox; not a
+    ///   specific emotion).
+    /// - `none`: markers are stripped and ignored.
+    fn style_mode(self) -> &'static str {
+        match self {
+            Self::VoxCPM2 | Self::CosyVoice => "instruction",
+            Self::Chatterbox => "intensity",
+            Self::Qwen3 => "none",
+        }
+    }
 }
 
 fn engine_is_supported(engine: TtsEngine) -> bool {
@@ -329,6 +342,8 @@ struct TtsEngineInfo {
     requires_reference_transcript: bool,
     #[serde(rename = "requiresLanguage")]
     requires_language: bool,
+    #[serde(rename = "styleMode")]
+    style_mode: &'static str,
 }
 
 fn tts_engine_info(engine: TtsEngine) -> TtsEngineInfo {
@@ -337,6 +352,7 @@ fn tts_engine_info(engine: TtsEngine) -> TtsEngineInfo {
         display_name: engine.display_name(),
         requires_reference_transcript: engine.requires_reference_transcript(),
         requires_language: engine.requires_language(),
+        style_mode: engine.style_mode(),
     }
 }
 
@@ -2087,6 +2103,10 @@ mod tests {
         assert!(c.requires_language());
         assert!(!c.requires_reference_transcript());
         assert!(!TtsEngine::VoxCPM2.requires_language());
+        // Style is intensity-only for Chatterbox; instruction for VoxCPM2/Cosy; none for Qwen3.
+        assert_eq!(c.style_mode(), "intensity");
+        assert_eq!(TtsEngine::VoxCPM2.style_mode(), "instruction");
+        assert_eq!(TtsEngine::Qwen3.style_mode(), "none");
     }
 
     #[test]

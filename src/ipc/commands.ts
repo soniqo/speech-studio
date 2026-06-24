@@ -21,6 +21,12 @@ export interface TtsEngineInfo {
   /** When true the engine needs a caller-chosen language (e.g. Chatterbox's
    * `[lang]` token); the UI surfaces a language picker. */
   requiresLanguage: boolean;
+  /** How inline emotion markers are applied, so the editor can set honest
+   * expectations:
+   * - `instruction`: marker → a natural-language style instruction (real tone).
+   * - `intensity`: marker → an expressiveness level only (not a specific emotion).
+   * - `none`: markers are ignored. */
+  styleMode: "instruction" | "intensity" | "none";
 }
 
 export function availableTtsEngines(): Promise<TtsEngineInfo[]> {
