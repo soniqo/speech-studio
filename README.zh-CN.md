@@ -32,6 +32,21 @@
 - **常驻的 sidecar 进程**让语音引擎保持加载状态，因此首次预热后逐行合成很快。Tauri 启动它一次，并通过 stdin/stdout 以 NDJSON 通信。在 macOS 上是 **Swift sidecar**（`swift-sidecar/`，MLX）；在 Windows/Linux 上是 **C++ sidecar**（`core-sidecar/`，LiteRT）。
 - **VoxCPM2** 是所有平台上的默认引擎——在 macOS 上经由 [`speech-swift`](https://github.com/soniqo/speech-swift)（MLX），在 Windows/Linux 上经由 [`speech-core`](https://github.com/soniqo/speech-core)（LiteRT）。在 macOS 上可从工具栏切换引擎：**CosyVoice3**、**Qwen3-TTS** 以及 **Chatterbox**（支持 23 种语言的多语言克隆）。这些 MLX 引擎仅限 macOS；Windows/Linux 仅运行 VoxCPM2。
 
+## 引擎
+
+从工具栏下拉框切换引擎（仅 macOS——Windows/Linux 始终使用 VoxCPM2，因此不显示下拉框）。
+
+| 引擎 | 平台 | 后端 | 语音克隆 | 情感标记 | 语言数 |
+|---|---|---|:---:|---|:---:|
+| **VoxCPM2** · 默认 | macOS · Windows · Linux | MLX / LiteRT | ✅ | 风格指令 | 30 |
+| **CosyVoice 3** | 仅 macOS | MLX | ✅ | 风格指令 | 9 |
+| **Qwen3-TTS** | 仅 macOS | MLX | ✅（ICL） | — | 10 |
+| **Chatterbox** | 仅 macOS | MLX | ✅ | 仅强度¹ | 23 |
+
+MLX 引擎（CosyVoice 3、Qwen3-TTS、Chatterbox）仅限 **macOS**；Windows/Linux 通过 speech-core 的 LiteRT 后端运行 VoxCPM2。
+
+¹ Chatterbox 没有自由文本风格输入——情感标记映射为表现力/强度级别（更强或更弱），而非具体某种情感。
+
 ## 情感标记
 
 用圆括号标记包裹一行来引导韵律：
@@ -43,7 +58,9 @@
 (intense) Then we end this together. Tonight.
 ```
 
-支持的标记包括 `soft`、`warm`、`whispering`、`intense`、`excited`、`happy`、`calm`、`serious`、`surprised`、`sad`、`angry`、`dramatic`、`laughs`。每个标记会映射为一句简短的自然语言风格指令传给模型；自定义标记（例如 `(slow and dreamy)`）则原样传入。
+支持的标记包括 `soft`、`warm`、`whispering`、`intense`、`excited`、`happy`、`calm`、`serious`、`surprised`、`sad`、`angry`、`dramatic`、`laughs`。
+
+标记的应用方式因引擎而异：**VoxCPM2** 与 **CosyVoice 3** 会将其转为一句简短的自然语言风格指令（自定义标记如 `(slow and dreamy)` 原样传入）；**Chatterbox** 将其映射为表现力/强度级别（没有具体情感控制，只有更强或更弱）；**Qwen3-TTS** 忽略标记（会从文本中剥离）。
 
 ## 下载
 
@@ -120,12 +137,16 @@ pnpm tauri dev
 
 ### 内存占用
 
-在一台 Apple Silicon Mac（M 系列，统一内存）上通过 4 行演示测得。数字为 MLX 自身的统计；操作系统 RSS 还会在此之上增加约 500 MB 的进程开销。
+在一台 Apple Silicon Mac（M 系列，统一内存）上测得。**驻留（真实）** 列是实际进程占用（活动监视器的“内存”——`vmmap` 物理足迹），这是你应与 RAM 对照的数字。**MLX 活跃/峰值** 是 MLX 自身的统计（峰值为多行会话期间）。注意：在 Apple Silicon 上 `ps rss` 会少报约 3 倍——Metal 统一内存缓冲不计入 RSS，请以下方驻留数字为准。
 
-| 变体 | 磁盘 | 活跃 | 峰值 | 默认 |
-|---|---|---|---|---|
-| `aufklarer/VoxCPM2-MLX-int8`  | 2.75 GB | 3.1 GB | **5.4 GB** | ✅ |
-| `aufklarer/VoxCPM2-MLX-bf16`  | 4.6 GB  | 9.1 GB | 11.4 GB | |
+默认的 **VoxCPM2** 引擎：
+
+| 变体 | 磁盘 | MLX 活跃 | MLX 峰值 | 驻留（真实） | 默认 |
+|---|---|---|---|---|---|
+| `aufklarer/VoxCPM2-MLX-int8`  | 2.75 GB | 3.1 GB | 5.4 GB | **约 4–5 GB** | ✅ |
+| `aufklarer/VoxCPM2-MLX-bf16`  | 4.6 GB  | 9.1 GB | 11.4 GB | 约 12 GB | |
+
+其他 macOS 引擎在被选中时单独加载——同一时刻只有一个驻留（切换会卸载上一个）：**Chatterbox** 驻留约 4 GB（磁盘 1.3 GB），**CosyVoice 3** 更轻，**Qwen3-TTS**（1.7B bf16）更重。
 
 MLX 缓冲缓存上限为 1 GB（可用 `SONIQO_MLX_CACHE_MB` 覆盖）——若没有该上限，长会话中峰值会随着不同形状的缓冲累积增长到数十 GB。如需更高保真度的权重，用 `SONIQO_VOXCPM2_MODEL_ID=aufklarer/VoxCPM2-MLX-bf16` 覆盖默认模型。
 
@@ -142,7 +163,7 @@ cd .. && pnpm tauri build             # 在 src-tauri/target/release/bundle/ 下
 
 ## 同级仓库
 
-- [`speech-swift`](https://github.com/soniqo/speech-swift) — Apple Silicon 语音引擎（VoxCPM2、CosyVoice3、Qwen3-TTS、Parakeet、Silero VAD）。
+- [`speech-swift`](https://github.com/soniqo/speech-swift) — Apple Silicon 语音引擎（VoxCPM2、CosyVoice3、Qwen3-TTS、Chatterbox、Parakeet、Silero VAD）。
 - [`speech-core`](https://github.com/soniqo/speech-core) — C++ 引擎（Windows/Linux 上的 VoxCPM2 克隆，以及 STT、VAD、降噪）。
 
 ## 贡献
