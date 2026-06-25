@@ -3,6 +3,7 @@ import AudioCommon
 import MLX
 import ChatterboxTTS
 import CosyVoiceTTS
+import OmniVoiceTTS
 import Qwen3TTS
 import VoxCPM2TTS
 
@@ -373,11 +374,48 @@ final class ChatterboxHolder: @unchecked Sendable {
 
 let chatterboxHolder = ChatterboxHolder()
 
+// MARK: - OmniVoice model state
+
+/// Lazily loaded OmniVoice model (NAR diffusion + Higgs codec). Cloning takes the
+/// reference clip + target text + a language id; a reference transcript is optional
+/// but improves prosody. The published int8 bundle is self-contained (backbone +
+/// codec + tokenizer).
+final class OmniVoiceHolder: @unchecked Sendable {
+    private var model: OmniVoiceTTSModel?
+    private var loadedModelId: String?
+
+    func load(modelId requestedId: String? = nil) async throws -> OmniVoiceTTSModel {
+        if let m = model, requestedId == nil || requestedId == loadedModelId { return m }
+        if model != nil { unload() }
+        let modelId = requestedId
+            ?? ProcessInfo.processInfo.environment["SONIQO_OMNIVOICE_MODEL_ID"]
+            ?? OmniVoiceTTSModel.defaultModelId
+        logErr("[sidecar] loading OmniVoice model \(modelId)…")
+        let m = try await OmniVoiceTTSModel.fromPretrained(
+            modelId: modelId,
+            progressHandler: { progress, message in
+                logErr(String(format: "[sidecar] omni %3d%% %@", Int(progress * 100), message))
+            }
+        )
+        model = m
+        loadedModelId = modelId
+        logErr("[sidecar] omni ready")
+        return m
+    }
+
+    func unload() {
+        model = nil
+        loadedModelId = nil
+    }
+}
+
+let omnivoiceHolder = OmniVoiceHolder()
+
 // Engine selector. VoxCPM2 is the default. SONIQO_TTS_ENGINE remains a
 // process-level compatibility default, but Studio chooses the engine per
 // request so a user can switch without restarting the app.
 enum TTSEngine: String {
-    case voxcpm2, cosyvoice, qwen3, chatterbox
+    case voxcpm2, cosyvoice, qwen3, chatterbox, omnivoice
 }
 
 let defaultEngine: TTSEngine = {
@@ -400,24 +438,12 @@ func requestMatchesEngine(_ request: Request, _ expected: TTSEngine) -> Bool {
 }
 
 func unloadInactiveModels(keeping engine: TTSEngine) {
-    switch engine {
-    case .voxcpm2:
-        cosyHolder.unload()
-        holder.unload()
-        chatterboxHolder.unload()
-    case .cosyvoice:
-        voxHolder.unload()
-        holder.unload()
-        chatterboxHolder.unload()
-    case .qwen3:
-        voxHolder.unload()
-        cosyHolder.unload()
-        chatterboxHolder.unload()
-    case .chatterbox:
-        voxHolder.unload()
-        cosyHolder.unload()
-        holder.unload()
-    }
+    // Keep exactly one large model resident; release every other engine.
+    if engine != .voxcpm2 { voxHolder.unload() }
+    if engine != .cosyvoice { cosyHolder.unload() }
+    if engine != .qwen3 { holder.unload() }
+    if engine != .chatterbox { chatterboxHolder.unload() }
+    if engine != .omnivoice { omnivoiceHolder.unload() }
     MLX.Memory.clearCache()
 }
 
@@ -485,6 +511,23 @@ let emotionInstructs: [String: String] = [
     "intense": "Speak with quiet intensity and resolute determination.",
     "dramatic": "Speak with theatrical weight, holding the listener's attention.",
     "laughs": "Add a light amused tone without reading laughter literally.",
+]
+
+/// OmniVoice's `instruct` is a RESTRICTED vocabulary, not free text: only
+/// accent / age / gender / pitch / `whisper` items are valid (e.g. "whisper",
+/// "high pitch", "low pitch"). An unrecognized free-text string tokenizes into
+/// garbage `<|instruct|>` tokens that corrupt generation (rushed pacing, repeated
+/// words, spurious leading words) and is otherwise ignored. So markers map to the
+/// closest valid item: `whisper` directly, and emotions approximated by pitch
+/// (heightened -> high pitch, subdued -> low pitch). Markers with no sensible item
+/// fall through to no instruct.
+let omniVoiceInstructs: [String: String] = [
+    "whisper": "whisper", "whispers": "whisper", "whispering": "whisper",
+    "excited": "high pitch", "happy": "high pitch", "surprised": "very high pitch",
+    "laughs": "high pitch", "angry": "high pitch", "intense": "high pitch",
+    "dramatic": "high pitch",
+    "sad": "low pitch", "calm": "low pitch", "serious": "low pitch",
+    "soft": "low pitch", "warm": "low pitch",
 ]
 
 /// Pull the first emotion marker out of a clip's text and return the cleaned
@@ -633,6 +676,8 @@ while let line = readLine(strippingNewline: true) {
                 _ = try await holder.load()
             case .chatterbox:
                 _ = try await chatterboxHolder.load()
+            case .omnivoice:
+                _ = try await omnivoiceHolder.load()
             }
             emit(SuccessResponse(
                 id: request.id,
@@ -914,6 +959,73 @@ while let line = readLine(strippingNewline: true) {
             ))
         } catch {
             logErr("[sidecar] cbx synthesis failed: \(error)")
+            emit(ErrorResponse(id: request.id, ok: false, error: "\(error)"))
+        }
+
+    case "synthesize_omnivoice":
+        guard requestMatchesEngine(request, .omnivoice) else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "synthesize_omnivoice requires engine omnivoice"
+            ))
+            continue
+        }
+        guard let refPath = request.referenceAudioPath, !refPath.isEmpty,
+              let targetText = request.text, !targetText.isEmpty else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "synthesize_omnivoice requires referenceAudioPath and text"
+            ))
+            continue
+        }
+
+        do {
+            activateEngine(.omnivoice)
+            let model = try await omnivoiceHolder.load()
+            // OmniVoice takes a restricted style instruction, so map the inline
+            // marker to the closest valid vocabulary item and route it to the
+            // model's instruct conditioning.
+            let (cleanText, emotionTag, _) = extractFirstEmotionTag(targetText)
+            // OmniVoice's instruct vocabulary is restricted (accent / age / gender
+            // / pitch / whisper). Only pass a mapped valid item; free-text
+            // instructions (the shared map or a request override) tokenize to
+            // garbage and corrupt generation, so they are deliberately dropped.
+            let finalInstruct = emotionTag.flatMap { omniVoiceInstructs[$0] }
+            let language = request.language?.isEmpty == false ? request.language! : "en"
+            // The diffusion decode is greedy/deterministic, but seed any MLX RNG so
+            // the Rust retry ladder can still vary attempts if that changes.
+            let seed = request.seed ?? 1000
+            MLX.seed(seed)
+            logErr("[sidecar] omni synth voice=\(request.voiceId ?? "?") lang=\(language) tag=\(emotionTag ?? "(none)") instruct=\(finalInstruct ?? "(none)") refText=\(request.referenceText != nil) chars=\(cleanText.count)")
+
+            let audio = try model.generate(
+                text: cleanText,
+                referenceAudio: URL(fileURLWithPath: refPath),
+                referenceText: request.referenceText,
+                language: language,
+                instruct: finalInstruct,
+                duration: nil,
+                numSteps: 16
+            )
+
+            let sampleRate = model.sampleRate
+            let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
+            try WAVWriter.write(samples: audio, sampleRate: sampleRate, to: outURL)
+            let durationSec = Double(audio.count) / Double(sampleRate)
+            logMemorySnapshot("post-omni-synth")
+            emit(SuccessResponse(
+                id: request.id,
+                ok: true,
+                result: SynthResult(
+                    audioPath: outURL.path,
+                    sampleRate: sampleRate,
+                    durationSec: durationSec
+                )
+            ))
+        } catch {
+            logErr("[sidecar] omni synthesis failed: \(error)")
             emit(ErrorResponse(id: request.id, ok: false, error: "\(error)"))
         }
 
