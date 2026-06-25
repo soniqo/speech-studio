@@ -304,17 +304,15 @@ impl TtsEngine {
     }
 
     /// How the engine applies inline emotion markers — drives the editor hint:
-    /// - `instruction`: marker → a natural-language style instruction (real tone).
+    /// - `instruction`: marker → an engine-specific style instruction.
     /// - `intensity`: marker → an expressiveness level only (Chatterbox; not a
     ///   specific emotion).
     /// - `none`: markers are stripped and ignored.
     fn style_mode(self) -> &'static str {
         match self {
-            Self::VoxCPM2 | Self::CosyVoice => "instruction",
+            Self::VoxCPM2 | Self::CosyVoice | Self::OmniVoice => "instruction",
             Self::Chatterbox => "intensity",
-            // OmniVoice can take a style instruction, but the sidecar strips inline
-            // markers for now — wire its instruct field to flip this to "instruction".
-            Self::Qwen3 | Self::OmniVoice => "none",
+            Self::Qwen3 => "none",
         }
     }
 }

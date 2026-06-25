@@ -513,6 +513,23 @@ let emotionInstructs: [String: String] = [
     "laughs": "Add a light amused tone without reading laughter literally.",
 ]
 
+/// OmniVoice's `instruct` is a RESTRICTED vocabulary, not free text: only
+/// accent / age / gender / pitch / `whisper` items are valid (e.g. "whisper",
+/// "high pitch", "low pitch"). An unrecognized free-text string tokenizes into
+/// garbage `<|instruct|>` tokens that corrupt generation (rushed pacing, repeated
+/// words, spurious leading words) and is otherwise ignored. So markers map to the
+/// closest valid item: `whisper` directly, and emotions approximated by pitch
+/// (heightened -> high pitch, subdued -> low pitch). Markers with no sensible item
+/// fall through to no instruct.
+let omniVoiceInstructs: [String: String] = [
+    "whisper": "whisper", "whispers": "whisper", "whispering": "whisper",
+    "excited": "high pitch", "happy": "high pitch", "surprised": "very high pitch",
+    "laughs": "high pitch", "angry": "high pitch", "intense": "high pitch",
+    "dramatic": "high pitch",
+    "sad": "low pitch", "calm": "low pitch", "serious": "low pitch",
+    "soft": "low pitch", "warm": "low pitch",
+]
+
 /// Pull the first emotion marker out of a clip's text and return the cleaned
 /// body alongside the descriptive instruct sentence. Two marker shapes are
 /// supported (only the first match is used):
@@ -967,22 +984,28 @@ while let line = readLine(strippingNewline: true) {
         do {
             activateEngine(.omnivoice)
             let model = try await omnivoiceHolder.load()
-            // OmniVoice doesn't consume inline <whisper>-style markers yet; strip
-            // them from the spoken text (a future change can route them to the
-            // model's instruct field for style control).
-            let cleanText = stripEmotionTags(targetText)
+            // OmniVoice takes a restricted style instruction, so map the inline
+            // marker to the closest valid vocabulary item and route it to the
+            // model's instruct conditioning.
+            let (cleanText, emotionTag, _) = extractFirstEmotionTag(targetText)
+            // OmniVoice's instruct vocabulary is restricted (accent / age / gender
+            // / pitch / whisper). Only pass a mapped valid item; free-text
+            // instructions (the shared map or a request override) tokenize to
+            // garbage and corrupt generation, so they are deliberately dropped.
+            let finalInstruct = emotionTag.flatMap { omniVoiceInstructs[$0] }
             let language = request.language?.isEmpty == false ? request.language! : "en"
             // The diffusion decode is greedy/deterministic, but seed any MLX RNG so
             // the Rust retry ladder can still vary attempts if that changes.
             let seed = request.seed ?? 1000
             MLX.seed(seed)
-            logErr("[sidecar] omni synth voice=\(request.voiceId ?? "?") lang=\(language) refText=\(request.referenceText != nil) chars=\(cleanText.count)")
+            logErr("[sidecar] omni synth voice=\(request.voiceId ?? "?") lang=\(language) tag=\(emotionTag ?? "(none)") instruct=\(finalInstruct ?? "(none)") refText=\(request.referenceText != nil) chars=\(cleanText.count)")
 
             let audio = try model.generate(
                 text: cleanText,
                 referenceAudio: URL(fileURLWithPath: refPath),
                 referenceText: request.referenceText,
                 language: language,
+                instruct: finalInstruct,
                 duration: nil,
                 numSteps: 16
             )
