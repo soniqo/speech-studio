@@ -30,7 +30,7 @@
 - **Tauri 2** 外壳（Rust + 操作系统原生 WebView），因此发布的应用是一个小巧的原生二进制，而非 Chromium 分支。
 - **React + Vite** 前端，负责时间轴、音色库与脚本编辑器。
 - **常驻的 sidecar 进程**让语音引擎保持加载状态，因此首次预热后逐行合成很快。Tauri 启动它一次，并通过 stdin/stdout 以 NDJSON 通信。在 macOS 上是 **Swift sidecar**（`swift-sidecar/`，MLX）；在 Windows/Linux 上是 **C++ sidecar**（`core-sidecar/`，LiteRT）。
-- **VoxCPM2** 是所有平台上的默认引擎——在 macOS 上经由 [`speech-swift`](https://github.com/soniqo/speech-swift)（MLX），在 Windows/Linux 上经由 [`speech-core`](https://github.com/soniqo/speech-core)（LiteRT）。在 macOS 上可从工具栏切换引擎：**CosyVoice3**、**Qwen3-TTS** 以及 **Chatterbox**（支持 23 种语言的多语言克隆）。这些 MLX 引擎仅限 macOS；Windows/Linux 仅运行 VoxCPM2。
+- **VoxCPM2** 是所有平台上的默认引擎——在 macOS 上经由 [`speech-swift`](https://github.com/soniqo/speech-swift)（MLX），在 Windows/Linux 上经由 [`speech-core`](https://github.com/soniqo/speech-core)（LiteRT）。在 macOS 上可从工具栏切换引擎：**CosyVoice3**、**Qwen3-TTS**、**Chatterbox**（支持 23 种语言的多语言克隆）以及 **OmniVoice**（600+ 语言克隆）。这些 MLX 引擎仅限 macOS；Windows/Linux 仅运行 VoxCPM2。
 
 ## 引擎
 
@@ -42,10 +42,13 @@
 | **CosyVoice 3** | 仅 macOS | MLX | ✅ | 风格指令 | 9 |
 | **Qwen3-TTS** | 仅 macOS | MLX | ✅（ICL） | — | 10 |
 | **Chatterbox** | 仅 macOS | MLX | ✅ | 仅强度¹ | 23 |
+| **OmniVoice** | 仅 macOS | MLX | ✅ | 受限指令² | 600+ |
 
-MLX 引擎（CosyVoice 3、Qwen3-TTS、Chatterbox）仅限 **macOS**；Windows/Linux 通过 speech-core 的 LiteRT 后端运行 VoxCPM2。
+MLX 引擎（CosyVoice 3、Qwen3-TTS、Chatterbox、OmniVoice）仅限 **macOS**；Windows/Linux 通过 speech-core 的 LiteRT 后端运行 VoxCPM2。
 
 ¹ Chatterbox 没有自由文本风格输入——情感标记映射为表现力/强度级别（更强或更弱），而非具体某种情感。
+
+² OmniVoice 支持口音、年龄、性别、音高、耳语等语音设计属性。Studio 只传入它合法的 `instruct` 词表项：`whisper` 会直接映射，其他情感标记会近似映射为音高提示（如 `high pitch`、`low pitch`）。强情感只是近似，不是真正的情绪表演控制。
 
 ## 情感标记
 
@@ -60,7 +63,19 @@ MLX 引擎（CosyVoice 3、Qwen3-TTS、Chatterbox）仅限 **macOS**；Windows/L
 
 支持的标记包括 `soft`、`warm`、`whispering`、`intense`、`excited`、`happy`、`calm`、`serious`、`surprised`、`sad`、`angry`、`dramatic`、`laughs`。
 
-标记的应用方式因引擎而异：**VoxCPM2** 与 **CosyVoice 3** 会将其转为一句简短的自然语言风格指令（自定义标记如 `(slow and dreamy)` 原样传入）；**Chatterbox** 将其映射为表现力/强度级别（没有具体情感控制，只有更强或更弱）；**Qwen3-TTS** 忽略标记（会从文本中剥离）。
+标记的应用方式因引擎而异：**VoxCPM2** 与 **CosyVoice 3** 会将其转为一句简短的自然语言风格指令（自定义标记如 `(slow and dreamy)` 原样传入）；**OmniVoice** 只会把已知标记映射到固定 `instruct` 词表（`whisper` 或音高提示），无法映射的标记会被丢弃；**Chatterbox** 将其映射为表现力/强度级别（没有具体情感控制，只有更强或更弱）；**Qwen3-TTS** 忽略标记（会从文本中剥离）。
+
+## 研究记录：强情感 Hindi 克隆
+
+面向 Hindi 语音克隆 + 更强情感控制，目前值得跟踪的本地开源候选：
+
+- **VoxCPM2** 仍是 Speech Studio 最适合产品化的基线：Apache-2.0、本地运行、支持 Hindi，并支持通过自然语言风格提示控制克隆语音。但在声称“强情绪表演”之前，还需要和下面的模型做 Hindi 情感样例对比。
+- **Fish Audio S2 Pro** 看起来情感控制最强：80+ 语言、短参考克隆，并支持 `[angry]`、`[sad]`、`[whisper]`、`[shouting]` 等行内自由文本情感/韵律标签。问题是模型较重（4B），公开权重许可证是研究/非商业用途，商业使用需单独授权，所以更适合作为研究评测基准，而不是当前默认随包引擎。
+- **Svara-TTS v1** 是最相关的 Indic 专用开源模型：Apache-2.0、19 种印度语言、支持 `<happy>`、`<sad>`、`<anger>`、`<fear>` 等标签，也提供零样本适配路径。它的精确说话人相似度不如 VoxCPM2/Fish 已被充分验证，但适合作为 Hindi 情绪微调方向。
+- **Chatterbox Multilingual Hindi** 是许可宽松的小模型备选：MIT、专用 Hindi checkpoint、支持零样本克隆。它的控制更偏表现力/强度，不是明确的 angry/sad/crying 式表演控制。
+- **OmniVoice** 更适合覆盖超多语言。它的指令空间固定为语音设计属性，因此 Studio 把 whisper 当作真实控制，其他标记只近似映射为音高。
+
+参考链接：[VoxCPM2](https://github.com/OpenBMB/VoxCPM)、[Fish Audio S2 Pro](https://huggingface.co/fishaudio/s2-pro)、[Svara-TTS v1](https://huggingface.co/kenpath/svara-tts-v1)、[Chatterbox Hindi](https://huggingface.co/ResembleAI/Chatterbox-Multilingual-hi)、[OmniVoice](https://huggingface.co/k2-fsa/OmniVoice)。
 
 ## 下载
 
@@ -146,7 +161,7 @@ pnpm tauri dev
 | `aufklarer/VoxCPM2-MLX-int8`  | 2.75 GB | 3.1 GB | 5.4 GB | **约 4–5 GB** | ✅ |
 | `aufklarer/VoxCPM2-MLX-bf16`  | 4.6 GB  | 9.1 GB | 11.4 GB | 约 12 GB | |
 
-其他 macOS 引擎在被选中时单独加载——同一时刻只有一个驻留（切换会卸载上一个）：**Chatterbox** 驻留约 4 GB（磁盘 1.3 GB），**CosyVoice 3** 更轻，**Qwen3-TTS**（1.7B bf16）更重。
+其他 macOS 引擎在被选中时单独加载——同一时刻只有一个驻留（切换会卸载上一个）：**Chatterbox** 驻留约 4 GB（磁盘 1.3 GB），**CosyVoice 3** 更轻，**Qwen3-TTS**（1.7B bf16）更重。OmniVoice 会在被选中时单独下载并加载。
 
 MLX 缓冲缓存上限为 1 GB（可用 `SONIQO_MLX_CACHE_MB` 覆盖）——若没有该上限，长会话中峰值会随着不同形状的缓冲累积增长到数十 GB。如需更高保真度的权重，用 `SONIQO_VOXCPM2_MODEL_ID=aufklarer/VoxCPM2-MLX-bf16` 覆盖默认模型。
 
@@ -163,7 +178,7 @@ cd .. && pnpm tauri build             # 在 src-tauri/target/release/bundle/ 下
 
 ## 同级仓库
 
-- [`speech-swift`](https://github.com/soniqo/speech-swift) — Apple Silicon 语音引擎（VoxCPM2、CosyVoice3、Qwen3-TTS、Chatterbox、Parakeet、Silero VAD）。
+- [`speech-swift`](https://github.com/soniqo/speech-swift) — Apple Silicon 语音引擎（VoxCPM2、CosyVoice3、Qwen3-TTS、Chatterbox、OmniVoice、Parakeet、Silero VAD）。
 - [`speech-core`](https://github.com/soniqo/speech-core) — C++ 引擎（Windows/Linux 上的 VoxCPM2 克隆，以及 STT、VAD、降噪）。
 
 ## 贡献
