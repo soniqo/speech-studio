@@ -23,6 +23,7 @@ let package = Package(
                 .product(name: "CosyVoiceTTS", package: "speech-swift"),
                 .product(name: "Qwen3TTS", package: "speech-swift"),
                 .product(name: "ChatterboxTTS", package: "speech-swift"),
+                .product(name: "OmniVoiceTTS", package: "speech-swift"),
                 .product(name: "AudioCommon", package: "speech-swift")
             ],
             path: "Sources/soniqo-tts-sidecar",

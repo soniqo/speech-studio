@@ -268,6 +268,7 @@ enum TtsEngine {
     CosyVoice,
     Qwen3,
     Chatterbox,
+    OmniVoice,
 }
 
 impl TtsEngine {
@@ -277,6 +278,7 @@ impl TtsEngine {
             Self::CosyVoice => "synthesize_cosyvoice",
             Self::Qwen3 => "synthesize_icl",
             Self::Chatterbox => "synthesize_chatterbox",
+            Self::OmniVoice => "synthesize_omnivoice",
         }
     }
 
@@ -286,6 +288,7 @@ impl TtsEngine {
             Self::CosyVoice => "CosyVoice 3",
             Self::Qwen3 => "Qwen3-TTS",
             Self::Chatterbox => "Chatterbox",
+            Self::OmniVoice => "OmniVoice",
         }
     }
 
@@ -297,7 +300,7 @@ impl TtsEngine {
     /// `[lang]` token, so the Studio shows a language picker for it; the other
     /// engines infer language from the text.
     fn requires_language(self) -> bool {
-        matches!(self, Self::Chatterbox)
+        matches!(self, Self::Chatterbox | Self::OmniVoice)
     }
 
     /// How the engine applies inline emotion markers — drives the editor hint:
@@ -309,7 +312,9 @@ impl TtsEngine {
         match self {
             Self::VoxCPM2 | Self::CosyVoice => "instruction",
             Self::Chatterbox => "intensity",
-            Self::Qwen3 => "none",
+            // OmniVoice can take a style instruction, but the sidecar strips inline
+            // markers for now — wire its instruct field to flip this to "instruction".
+            Self::Qwen3 | Self::OmniVoice => "none",
         }
     }
 }
@@ -320,6 +325,7 @@ fn engine_is_supported(engine: TtsEngine) -> bool {
         TtsEngine::CosyVoice => cfg!(target_os = "macos"),
         TtsEngine::Qwen3 => cfg!(target_os = "macos"),
         TtsEngine::Chatterbox => cfg!(target_os = "macos"),
+        TtsEngine::OmniVoice => cfg!(target_os = "macos"),
     }
 }
 
@@ -363,6 +369,7 @@ async fn available_tts_engines() -> Vec<TtsEngineInfo> {
         engines.push(tts_engine_info(TtsEngine::CosyVoice));
         engines.push(tts_engine_info(TtsEngine::Qwen3));
         engines.push(tts_engine_info(TtsEngine::Chatterbox));
+        engines.push(tts_engine_info(TtsEngine::OmniVoice));
     }
     engines
 }
