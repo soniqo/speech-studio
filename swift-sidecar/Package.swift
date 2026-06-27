@@ -18,12 +18,16 @@ let package = Package(
                 //                  SONIQO_TTS_ENGINE=cosyvoice while voxcpm2 stabilises).
                 //   Qwen3TTS    — older ICL path, kept behind SONIQO_TTS_ENGINE=qwen3.
                 //   ChatterboxTTS — multilingual zero-shot cloning (per-call language).
+                //   IndicMioTTS — Hindi/Indic emotion-marker synthesis.
+                //   FishAudioTTS — experimental Fish Audio S2 Pro clone + bracket markers.
                 //   AudioCommon — shared audio I/O helpers.
                 .product(name: "VoxCPM2TTS", package: "speech-swift"),
                 .product(name: "CosyVoiceTTS", package: "speech-swift"),
                 .product(name: "Qwen3TTS", package: "speech-swift"),
                 .product(name: "ChatterboxTTS", package: "speech-swift"),
                 .product(name: "OmniVoiceTTS", package: "speech-swift"),
+                .product(name: "IndicMioTTS", package: "speech-swift"),
+                .product(name: "FishAudioTTS", package: "speech-swift"),
                 .product(name: "AudioCommon", package: "speech-swift")
             ],
             path: "Sources/soniqo-tts-sidecar",

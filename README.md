@@ -30,7 +30,7 @@ The clone is local. The synth is local. No audio leaves your machine.
 - **Tauri 2** shell (Rust + the OS-native WebView) so the shipped app is a small native binary, not a Chromium fork.
 - **React + Vite** frontend for the timeline, voice library, and script editor.
 - **A warm sidecar process** holds the speech engine resident so per-line synthesis is fast after the first warm-up. Tauri spawns it once and talks NDJSON over stdin/stdout. On macOS this is the **Swift sidecar** (`swift-sidecar/`, MLX); on Windows/Linux the **C++ sidecar** (`core-sidecar/`, LiteRT).
-- **VoxCPM2** is the default engine on every platform — via [`speech-swift`](https://github.com/soniqo/speech-swift) (MLX) on macOS and [`speech-core`](https://github.com/soniqo/speech-core) (LiteRT) on Windows/Linux. On macOS you can switch engines from the toolbar: **CosyVoice3**, **Qwen3-TTS**, **Chatterbox** (multilingual cloning across 23 languages), and **OmniVoice** (600+ language cloning). Those MLX engines are macOS-only; Windows/Linux runs VoxCPM2.
+- **VoxCPM2** is the default engine on every platform — via [`speech-swift`](https://github.com/soniqo/speech-swift) (MLX) on macOS and [`speech-core`](https://github.com/soniqo/speech-core) (LiteRT) on Windows/Linux. On macOS you can switch engines from the toolbar: **CosyVoice3**, **Qwen3-TTS**, **Chatterbox** (multilingual cloning across 23 languages), **OmniVoice** (600+ language cloning), **Indic-Mio** (Hindi/Indic emotion tags), and **Fish Audio S2 Pro** (experimental clone + bracket markers). Those MLX engines are macOS-only; Windows/Linux runs VoxCPM2.
 
 ## Engines
 
@@ -43,12 +43,18 @@ Switch engine from the toolbar dropdown (macOS only — Windows/Linux always use
 | **Qwen3-TTS** | macOS only | MLX | ✅ (ICL) | — | 10 |
 | **Chatterbox** | macOS only | MLX | ✅ | intensity only¹ | 23 |
 | **OmniVoice** | macOS only | MLX | ✅ | restricted instruct² | 600+ |
+| **Indic-Mio** | macOS only | MLX | ✅³ | suffix tags | Indic |
+| **Fish Audio S2 Pro** | macOS only | MLX | ✅⁴ | bracket tags | 80+ |
 
-The MLX engines (CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice) are **macOS-only**; Windows/Linux run VoxCPM2 through speech-core's LiteRT backend.
+The MLX engines (CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice, Indic-Mio, Fish Audio S2 Pro) are **macOS-only**; Windows/Linux run VoxCPM2 through speech-core's LiteRT backend.
 
 ¹ Chatterbox has no free-text style input — emotion markers map to an expressiveness/intensity level (more vs. less expressive), not a specific emotion.
 
 ² OmniVoice supports broad voice-design attributes such as accent, age, gender, pitch, and whisper. Studio only passes valid `instruct` vocabulary items: `whisper` maps directly, while emotion markers map to pitch hints (`high pitch`, `low pitch`, etc.). Strong emotions are approximations, not true emotional acting.
+
+³ Indic-Mio is exposed as an experimental Hindi/Indic emotion-marker engine. It uses suffix tags such as `<happy>` / `<angry>` and clones from reference audio through WavLM → MioCodec global speaker embeddings. It does not need a reference transcript.
+
+⁴ Fish Audio S2 Pro uses bracket markers such as `[excited]`, `[angry]`, and `[whisper]`. It needs an accurate reference transcript for cloning, and the public weights are research/non-commercial unless separately licensed.
 
 ## Emotion markers
 
@@ -63,14 +69,14 @@ Wrap a line in a parenthetical tag to steer the prosody:
 
 Supported tags include `soft`, `warm`, `whispering`, `intense`, `excited`, `happy`, `calm`, `serious`, `surprised`, `sad`, `angry`, `dramatic`, `laughs`.
 
-How a marker is applied depends on the engine: **VoxCPM2** and **CosyVoice 3** turn it into a short natural-language style instruction (custom tags like `(slow and dreamy)` pass through verbatim); **OmniVoice** maps only known markers to its fixed `instruct` vocabulary (`whisper` or pitch hints) and drops anything unmappable; **Chatterbox** maps markers to an expressiveness/intensity level (it has no per-emotion control, only more vs. less expressive); **Qwen3-TTS** ignores markers (they're stripped from the text).
+How a marker is applied depends on the engine: **VoxCPM2** and **CosyVoice 3** turn it into a short natural-language style instruction (custom tags like `(slow and dreamy)` pass through verbatim); **OmniVoice** maps only known markers to its fixed `instruct` vocabulary (`whisper` or pitch hints) and drops anything unmappable; **Chatterbox** maps markers to an expressiveness/intensity level (it has no per-emotion control, only more vs. less expressive); **Indic-Mio** appends supported suffix tags like `<happy>`; **Fish Audio S2 Pro** appends bracket tags like `[excited]`; **Qwen3-TTS** ignores markers (they're stripped from the text).
 
 ## Research note: strong Hindi emotion cloning
 
 Current open-source/on-device candidates for Hindi voice cloning with stronger emotion control:
 
 - **VoxCPM2** remains the best product-fit baseline for Speech Studio: Apache-2.0, on-device, supports Hindi, and supports controllable voice cloning through natural-language style guidance. It still needs a Hindi emotion bake-off against the models below before we claim strong acting range.
-- **Fish Audio S2 Pro** looks strongest for expressive control: 80+ languages, short-reference voice cloning, and inline free-form emotion/prosody tags such as `[angry]`, `[sad]`, `[whisper]`, and `[shouting]`. It is heavy (4B) and its public model license is research/non-commercial unless separately licensed, so it is a research benchmark rather than a default shipping engine today.
+- **Fish Audio S2 Pro** looks strongest for expressive control: 80+ languages, short-reference voice cloning, and inline free-form emotion/prosody tags such as `[angry]`, `[sad]`, `[whisper]`, and `[shouting]`. It is now available as an experimental macOS engine, but its public model license is research/non-commercial unless separately licensed, so it remains outside the default path.
 - **Svara-TTS v1** is the most relevant Indic-specific open model: Apache-2.0, 19 Indian languages, tags such as `<happy>`, `<sad>`, `<anger>`, and `<fear>`, plus zero-shot adaptation paths. Exact speaker similarity is less proven than VoxCPM2/Fish, but it is a good candidate for Hindi emotion fine-tuning.
 - **Chatterbox Multilingual Hindi** is the permissive small fallback: MIT, a dedicated Hindi checkpoint, and zero-shot voice cloning. Its control is mainly exaggeration/intensity rather than explicit angry/sad/crying-style acting.
 - **OmniVoice** is best kept for broad language coverage. Its instruction space is fixed to voice-design attributes, so Studio treats whisper as real control and maps other markers only to pitch.
@@ -178,7 +184,7 @@ cd .. && pnpm tauri build             # produces .app + .dmg under src-tauri/tar
 
 ## Sibling repos
 
-- [`speech-swift`](https://github.com/soniqo/speech-swift) — Apple Silicon speech engines (VoxCPM2, CosyVoice3, Qwen3-TTS, Chatterbox, OmniVoice, Parakeet, Silero VAD).
+- [`speech-swift`](https://github.com/soniqo/speech-swift) — Apple Silicon speech engines (VoxCPM2, CosyVoice3, Qwen3-TTS, Chatterbox, OmniVoice, Indic-Mio, Fish Audio S2 Pro, Parakeet, Silero VAD).
 - [`speech-core`](https://github.com/soniqo/speech-core) — C++ engines (VoxCPM2 cloning on Windows/Linux, plus STT, VAD, denoise).
 
 ## Contributing

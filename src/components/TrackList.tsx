@@ -58,16 +58,28 @@ export function TrackList() {
           const voiceId = t.kind === "speaker" ? t.voiceId : undefined;
           const voiceName = project.voices.find((v) => v.id === voiceId)?.name;
           const selected = selection.kind === "track" && selection.id === t.id;
+          function selectTrack() {
+            select({ kind: "track", id: t.id });
+          }
+
           return (
-            <button
+            <div
               key={t.id}
+              role="button"
+              tabIndex={0}
               className={cn(
                 "group flex w-full items-center gap-2 rounded-md border border-transparent px-2 py-1.5 text-left transition-colors",
                 selected
                   ? "border-primary/40 bg-primary/10"
                   : "hover:border-border hover:bg-accent/30",
               )}
-              onClick={() => select({ kind: "track", id: t.id })}
+              onClick={selectTrack}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" && e.key !== " ") return;
+                if (e.target !== e.currentTarget) return;
+                e.preventDefault();
+                selectTrack();
+              }}
             >
               <TrackIcon track={t} />
               <div className="min-w-0 flex-1">
@@ -92,9 +104,9 @@ export function TrackList() {
                 aria-label="Delete track"
                 className="h-6 w-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
               >
-                <Trash2 className="h-3 w-3" />
-              </Button>
-            </button>
+                  <Trash2 className="h-3 w-3" />
+                </Button>
+            </div>
           );
         })}
       </div>

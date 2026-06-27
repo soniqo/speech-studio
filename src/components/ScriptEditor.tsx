@@ -14,8 +14,24 @@ const STYLE_HINTS: Record<string, string> = {
   instruction: "Markers steer this line's tone.",
   intensity:
     "Chatterbox applies markers as intensity only — more vs. less expressive, not a specific emotion.",
+  "suffix-tag": "Indic-Mio uses suffix tags like <happy> and clones from the reference audio.",
+  "bracket-tag": "Fish Audio uses bracket tags like [excited] and requires a reference transcript for cloning.",
   none: "This engine ignores emotion markers.",
 };
+
+const INDIC_MIO_TAGS = ["happy", "sad", "angry", "disgust", "fear", "surprise"] as const;
+const FISH_AUDIO_TAGS = [
+  "pause",
+  "emphasis",
+  "laughing",
+  "excited",
+  "angry",
+  "whisper",
+  "screaming",
+  "shouting",
+  "surprised",
+  "sad",
+] as const;
 
 // Match `(tag)` or `<tag>...</tag>` wrappers at the start of a line so we can
 // swap them out cleanly. Permissive on tag character set to allow custom
@@ -23,8 +39,10 @@ const STYLE_HINTS: Record<string, string> = {
 const LEADING_PAREN_TAG = /^\s*\(\s*([a-zA-Z][a-zA-Z\s/\-]*?)\s*\)\s*/;
 const LEADING_XML_TAG = /^\s*<\s*([a-zA-Z][a-zA-Z0-9_\-]*)\s*>/;
 const TRAILING_XML_CLOSE = /<\s*\/\s*[a-zA-Z][a-zA-Z0-9_\-]*\s*>\s*$/;
+const TRAILING_XML_SUFFIX = /\s*<\s*([a-zA-Z][a-zA-Z0-9_\-]*)\s*>\s*$/;
+const TRAILING_BRACKET_SUFFIX = /\s*\[\s*([a-zA-Z][a-zA-Z0-9_\-]*)\s*\]\s*$/;
 
-function stripLeadingEmotionTag(text: string): string {
+function stripEmotionTag(text: string): string {
   let out = text;
   const xmlOpen = out.match(LEADING_XML_TAG);
   if (xmlOpen) {
@@ -33,7 +51,7 @@ function stripLeadingEmotionTag(text: string): string {
   } else {
     out = out.replace(LEADING_PAREN_TAG, "");
   }
-  return out;
+  return out.replace(TRAILING_XML_SUFFIX, "").replace(TRAILING_BRACKET_SUFFIX, "");
 }
 
 export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
@@ -42,15 +60,27 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
     (s) => s.model.engines.find((e) => e.id === s.model.engine)?.styleMode ?? "instruction",
   );
   const markersIgnored = styleMode === "none";
-  const currentTag = (value.match(LEADING_PAREN_TAG)?.[1] || value.match(LEADING_XML_TAG)?.[1] || "")
-    .trim()
-    .toLowerCase();
+  const suffixMode = styleMode === "suffix-tag";
+  const bracketMode = styleMode === "bracket-tag";
+  const markerTags = suffixMode ? INDIC_MIO_TAGS : bracketMode ? FISH_AUDIO_TAGS : EMOTION_TAGS;
+  const rawCurrentTag = suffixMode
+    ? value.match(TRAILING_XML_SUFFIX)?.[1]
+    : bracketMode
+      ? value.match(TRAILING_BRACKET_SUFFIX)?.[1]
+    : value.match(LEADING_PAREN_TAG)?.[1] || value.match(LEADING_XML_TAG)?.[1];
+  const currentTag = (rawCurrentTag ?? "").trim().toLowerCase();
 
-  function applyTag(tag: EmotionTag) {
-    const body = stripLeadingEmotionTag(value).trimStart();
+  function applyTag(
+    tag: EmotionTag | (typeof INDIC_MIO_TAGS)[number] | (typeof FISH_AUDIO_TAGS)[number],
+  ) {
+    const body = stripEmotionTag(value).trim();
     if (currentTag === tag) {
       // Toggle off: clicking the active tag removes it.
       onChange(body);
+    } else if (suffixMode) {
+      onChange(`${body} <${tag}>`.trim());
+    } else if (bracketMode) {
+      onChange(`${body} [${tag}]`.trim());
     } else {
       onChange(`(${tag}) ${body}`);
     }
@@ -70,8 +100,9 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
         className="min-h-[88px]"
       />
       <div className={`flex flex-wrap gap-1 ${markersIgnored ? "opacity-50" : ""}`}>
-        {EMOTION_TAGS.map((t) => {
+        {markerTags.map((t) => {
           const active = currentTag === t;
+          const markerLabel = suffixMode ? `<${t}>` : bracketMode ? `[${t}]` : `(${t})`;
           return (
             <Button
               key={t}
@@ -80,8 +111,8 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
               onClick={() => applyTag(t)}
               title={
                 active
-                  ? `Remove (${t}) marker`
-                  : `Set this line's tone to (${t})`
+                  ? `Remove ${markerLabel} marker`
+                  : `Set this line's tone to ${markerLabel}`
               }
               className="h-6 px-2 text-[11px] font-normal"
             >

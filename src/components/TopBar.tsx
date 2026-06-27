@@ -12,6 +12,7 @@ import { Input } from "./ui/input";
 import { Badge } from "./ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { cn } from "@/lib/utils";
+import { clipAudioPath } from "../lib/clipAudio";
 
 /** Quiet until an update exists; one click downloads + relaunches. */
 function UpdateChip() {
@@ -160,8 +161,9 @@ export function TopBar() {
     for (const t of project.tracks) {
       if (t.kind !== "speaker") continue;
       for (const c of t.clips) {
-        if (!c.renderedAudioPath) continue;
-        clips.push({ startSec: c.startSec, audioPath: c.renderedAudioPath });
+        const audioPath = clipAudioPath(c);
+        if (!audioPath) continue;
+        clips.push({ startSec: c.startSec, audioPath });
       }
     }
     return clips;
@@ -221,7 +223,7 @@ export function TopBar() {
             disabled={modelStatus === "loading" || synthBusy}
           >
             <SelectTrigger
-              className="h-7 w-[132px] text-xs"
+              className="h-7 w-[158px] text-xs"
               title="Switches the loaded voice-cloning engine"
             >
               <SelectValue />
