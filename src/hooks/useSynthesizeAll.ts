@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import { synthesizeClip } from "../ipc/commands";
 import { useProjectStore } from "../state/projectStore";
 import type { Clip, SpeakerTrack, Voice } from "../types/project";
+import { clipAudioPath } from "../lib/clipAudio";
 
 interface PlannedJob {
   clip: Clip;
@@ -52,66 +53,73 @@ export function useSynthesizeAll() {
       const initialState = useProjectStore.getState();
       const jobs = collectJobs(initialState, mode);
       const engine = initialState.model.engine;
+      const engineInfo = initialState.model.engines.find((candidate) => candidate.id === engine);
+      const engineName = engineInfo?.displayName ?? engine;
       const language = initialState.model.language;
+      const fallbackRequiresReferenceTranscript =
+        engine === "cosyvoice" || engine === "qwen3" || engine === "fish-audio";
       if (
-        engine === "cosyvoice" &&
+        (engineInfo?.requiresReferenceTranscript ?? fallbackRequiresReferenceTranscript) &&
         jobs.some((job) => !job.voice.referenceText.trim())
       ) {
         throw new Error(
-          "CosyVoice needs an accurate reference transcript for every voice being synthesized",
+          `${engineName} needs an accurate reference transcript for every voice being synthesized`,
         );
       }
       if (jobs.length === 0) {
         return { total: 0, completed: 0, failed: 0 };
       }
 
-      setSynthesisStatus("running");
       let completed = 0;
       let failed = 0;
 
-      for (let i = 0; i < jobs.length; i++) {
-        const job = jobs[i];
-        const preview = job.clip.text.length > 28 ? `${job.clip.text.slice(0, 28)}…` : job.clip.text;
-        setSynthesisProgress({
-          current: i + 1,
-          total: jobs.length,
-          label: `${job.track.name}: ${preview}`,
-        });
-        try {
-          const out = await synthesizeClip({
-            clipId: job.clip.id,
-            engine,
-            text: job.clip.text,
-            voiceId: job.voice.id,
-            referenceAudioPath: job.voice.referenceAudioPath!,
-            referenceText: job.voice.referenceText,
-            language,
+      setSynthesisStatus("running");
+      try {
+        for (let i = 0; i < jobs.length; i++) {
+          const job = jobs[i];
+          const preview = job.clip.text.length > 28 ? `${job.clip.text.slice(0, 28)}…` : job.clip.text;
+          setSynthesisProgress({
+            current: i + 1,
+            total: jobs.length,
+            label: `${job.track.name}: ${preview}`,
           });
-          const take = {
-            id: crypto.randomUUID(),
-            audioPath: out.audioPath,
-            text: job.clip.text,
-            createdAt: new Date().toISOString(),
-            settings: { voiceId: job.voice.id },
-          };
-          updateClip(job.clip.id, {
-            renderedAudioPath: out.audioPath,
-            history: [take, ...job.clip.history],
-            // Generation is dynamic: the timeline slot follows the audio.
-            ...(out.durationSec > 0
-              ? { endSec: job.clip.startSec + out.durationSec }
-              : {}),
-          });
-          completed++;
-        } catch (e) {
-          console.error(`synthesize ${job.clip.id} failed`, e);
-          failed++;
+          try {
+            const out = await synthesizeClip({
+              clipId: job.clip.id,
+              engine,
+              text: job.clip.text,
+              voiceId: job.voice.id,
+              referenceAudioPath: job.voice.referenceAudioPath!,
+              referenceText: job.voice.referenceText,
+              language,
+            });
+            const take = {
+              id: crypto.randomUUID(),
+              audioPath: out.audioPath,
+              text: job.clip.text,
+              createdAt: new Date().toISOString(),
+              settings: { voiceId: job.voice.id },
+            };
+            updateClip(job.clip.id, {
+              renderedAudioPath: out.audioPath,
+              history: [take, ...job.clip.history],
+              // Generation is dynamic: the timeline slot follows the audio.
+              ...(out.durationSec > 0
+                ? { endSec: job.clip.startSec + out.durationSec }
+                : {}),
+            });
+            completed++;
+          } catch (e) {
+            console.error(`synthesize ${job.clip.id} failed`, e);
+            failed++;
+          }
         }
-      }
 
-      setSynthesisProgress(null);
-      setSynthesisStatus("idle");
-      return { total: jobs.length, completed, failed };
+        return { total: jobs.length, completed, failed };
+      } finally {
+        setSynthesisProgress(null);
+        setSynthesisStatus("idle");
+      }
     },
     [updateClip, setSynthesisStatus, setSynthesisProgress],
   );
@@ -146,7 +154,7 @@ export function useAnyClipRendered(): boolean {
     for (const t of s.project.tracks) {
       if (t.kind !== "speaker") continue;
       for (const c of t.clips) {
-        if (c.renderedAudioPath) return true;
+        if (clipAudioPath(c)) return true;
       }
     }
     return false;

@@ -97,9 +97,7 @@ fn colocate_metallib(sidecar_dir: &std::path::Path) {
         // the first Gatekeeper bypass. If both fail, swallow — the sidecar
         // will spawn and surface a clear MLX error to the frontend.
         if let Err(e2) = std::fs::copy(&src, &dest) {
-            eprintln!(
-                "[speech-studio] failed to colocate mlx.metallib: symlink={e}, copy={e2}"
-            );
+            eprintln!("[speech-studio] failed to colocate mlx.metallib: symlink={e}, copy={e2}");
         }
     }
 }
@@ -133,7 +131,10 @@ impl SidecarManager {
 // path: PATH on Windows, LD_LIBRARY_PATH on Linux. Not needed on macOS (the
 // Swift sidecar's MLX libs are linked / the metallib is handled separately).
 #[cfg(not(target_os = "macos"))]
-fn sidecar_lib_dirs(sidecar: &std::path::Path, resource_dir: Option<&std::path::Path>) -> Vec<PathBuf> {
+fn sidecar_lib_dirs(
+    sidecar: &std::path::Path,
+    resource_dir: Option<&std::path::Path>,
+) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(d) = sidecar.parent() {
         dirs.push(d.to_path_buf());
@@ -269,6 +270,10 @@ enum TtsEngine {
     Qwen3,
     Chatterbox,
     OmniVoice,
+    #[serde(rename = "indic-mio")]
+    IndicMio,
+    #[serde(rename = "fish-audio")]
+    FishAudio,
 }
 
 impl TtsEngine {
@@ -279,6 +284,8 @@ impl TtsEngine {
             Self::Qwen3 => "synthesize_icl",
             Self::Chatterbox => "synthesize_chatterbox",
             Self::OmniVoice => "synthesize_omnivoice",
+            Self::IndicMio => "synthesize_indic_mio",
+            Self::FishAudio => "synthesize_fish_audio",
         }
     }
 
@@ -289,11 +296,13 @@ impl TtsEngine {
             Self::Qwen3 => "Qwen3-TTS",
             Self::Chatterbox => "Chatterbox",
             Self::OmniVoice => "OmniVoice",
+            Self::IndicMio => "Indic-Mio",
+            Self::FishAudio => "Fish Audio S2 Pro",
         }
     }
 
     fn requires_reference_transcript(self) -> bool {
-        matches!(self, Self::CosyVoice | Self::Qwen3)
+        matches!(self, Self::CosyVoice | Self::Qwen3 | Self::FishAudio)
     }
 
     /// Whether synthesis needs a caller-chosen language. Chatterbox prepends a
@@ -307,11 +316,15 @@ impl TtsEngine {
     /// - `instruction`: marker → an engine-specific style instruction.
     /// - `intensity`: marker → an expressiveness level only (Chatterbox; not a
     ///   specific emotion).
+    /// - `suffix-tag`: marker is appended as an engine-specific suffix tag.
+    /// - `bracket-tag`: marker is appended as an engine-specific bracket tag.
     /// - `none`: markers are stripped and ignored.
     fn style_mode(self) -> &'static str {
         match self {
             Self::VoxCPM2 | Self::CosyVoice | Self::OmniVoice => "instruction",
             Self::Chatterbox => "intensity",
+            Self::IndicMio => "suffix-tag",
+            Self::FishAudio => "bracket-tag",
             Self::Qwen3 => "none",
         }
     }
@@ -324,6 +337,8 @@ fn engine_is_supported(engine: TtsEngine) -> bool {
         TtsEngine::Qwen3 => cfg!(target_os = "macos"),
         TtsEngine::Chatterbox => cfg!(target_os = "macos"),
         TtsEngine::OmniVoice => cfg!(target_os = "macos"),
+        TtsEngine::IndicMio => cfg!(target_os = "macos"),
+        TtsEngine::FishAudio => cfg!(target_os = "macos"),
     }
 }
 
@@ -368,6 +383,8 @@ async fn available_tts_engines() -> Vec<TtsEngineInfo> {
         engines.push(tts_engine_info(TtsEngine::Qwen3));
         engines.push(tts_engine_info(TtsEngine::Chatterbox));
         engines.push(tts_engine_info(TtsEngine::OmniVoice));
+        engines.push(tts_engine_info(TtsEngine::IndicMio));
+        engines.push(tts_engine_info(TtsEngine::FishAudio));
     }
     engines
 }
@@ -388,10 +405,7 @@ struct InitModelArgs {
 }
 
 #[tauri::command]
-async fn init_model(
-    manager: State<'_, SidecarManager>,
-    args: InitModelArgs,
-) -> Result<(), String> {
+async fn init_model(manager: State<'_, SidecarManager>, args: InitModelArgs) -> Result<(), String> {
     ensure_engine_supported(args.engine)?;
     let payload = serde_json::json!({
         "id": format!("init-{}", uuid::Uuid::new_v4()),
@@ -542,9 +556,15 @@ struct Voice {
     reference_text: String,
     #[serde(rename = "createdAt")]
     created_at: String,
-    #[serde(rename = "referenceDurationSec", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "referenceDurationSec",
+        skip_serializing_if = "Option::is_none"
+    )]
     reference_duration_sec: Option<f64>,
-    #[serde(rename = "referenceSampleRate", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "referenceSampleRate",
+        skip_serializing_if = "Option::is_none"
+    )]
     reference_sample_rate: Option<u32>,
     #[serde(rename = "referenceRms", skip_serializing_if = "Option::is_none")]
     reference_rms: Option<f64>,
@@ -613,12 +633,17 @@ fn resolve_grader() -> Grader {
         return Grader::SpeechCli;
     }
     if let Ok(dir) = std::env::var("SONIQO_STT_MODEL_DIR") {
-        if std::path::Path::new(&dir).join("omnilingual-ctc-300m.tflite").exists()
+        if std::path::Path::new(&dir)
+            .join("omnilingual-ctc-300m.tflite")
+            .exists()
             && std::path::Path::new(&dir).join("tokenizer.model").exists()
         {
             return Grader::Sidecar(dir);
         }
-        eprintln!("[synth] SONIQO_STT_MODEL_DIR set but model files missing: {}", dir);
+        eprintln!(
+            "[synth] SONIQO_STT_MODEL_DIR set but model files missing: {}",
+            dir
+        );
     }
     Grader::None
 }
@@ -746,7 +771,8 @@ fn synth_one_line(
     const CFG_LADDER: &[f32] = &[2.0, 2.5, 3.0];
 
     // Token budget: ~12 steps/word + headroom (each step ≈ 50 ms of audio).
-    let target_word_count = canon_tokens(text).len();
+    let grade_target = strip_style_markers_for_grading(text);
+    let target_word_count = canon_tokens(&grade_target).len();
     let max_tokens = (target_word_count.saturating_mul(12) + 40).clamp(60, 320);
     // Floor under the model's stop signal: VoxCPM2 fires its stop token
     // prematurely on long non-Latin-script lines (a 19-word Hindi sentence
@@ -764,7 +790,9 @@ fn synth_one_line(
     // Non-Latin targets get a stricter accept rule (see below): the babble
     // tail VoxCPM2 leaves on Hindi overshoots is short in ASR tokens (~2) but
     // seconds long audibly, so the Latin-tuned suffix allowance is too loose.
-    let target_is_non_latin = text.chars().any(|c| !c.is_ascii() && c.is_alphabetic());
+    let target_is_non_latin = grade_target
+        .chars()
+        .any(|c| !c.is_ascii() && c.is_alphabetic());
 
     let mut best: Option<(String, Grade, u64, f64)> = None;
     let mut last_error: Option<String> = None;
@@ -806,7 +834,11 @@ fn synth_one_line(
             last_error = Some(env.error.unwrap_or_else(|| "sidecar error".into()));
             eprintln!(
                 "[synth] clip {} part {} attempt {} (seed={}) failed: {}",
-                clip_id, part_idx, attempt_idx, seed, last_error.as_ref().unwrap()
+                clip_id,
+                part_idx,
+                attempt_idx,
+                seed,
+                last_error.as_ref().unwrap()
             );
             continue;
         }
@@ -815,13 +847,16 @@ fn synth_one_line(
             Some(p) => p.to_string(),
             None => continue,
         };
-        let duration = result.get("durationSec").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let duration = result
+            .get("durationSec")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
 
         // No ASR grader on this platform — accept the first successful take
         // rather than burning the whole seed ladder (each take is a full synth).
         let graded = match &grader {
-            Grader::SpeechCli => asr_grade(&audio_path, text),
-            Grader::Sidecar(dir) => asr_grade_sidecar(manager, &audio_path, text, dir),
+            Grader::SpeechCli => asr_grade(&audio_path, &grade_target),
+            Grader::Sidecar(dir) => asr_grade_sidecar(manager, &audio_path, &grade_target, dir),
             Grader::None => {
                 eprintln!(
                     "[synth] clip {} part {} accepted first take (seed={}, {:.2}s; grading unavailable on this platform)",
@@ -839,8 +874,15 @@ fn synth_one_line(
         });
         eprintln!(
             "[synth] clip {} part {} attempt {} (seed={}) {} cov={:.0}% pre={} suf={} rep={} ({:.2}s)",
-            clip_id, part_idx, attempt_idx, seed,
-            if grade.is_clean_for(target_is_non_latin) { "✓" } else { "✗" },
+            clip_id,
+            part_idx,
+            attempt_idx,
+            seed,
+            if grade.is_clean_for(target_is_non_latin) {
+                "✓"
+            } else {
+                "✗"
+            },
             grade.coverage * 100.0,
             grade.prefix_words,
             grade.suffix_words,
@@ -860,7 +902,11 @@ fn synth_one_line(
         if grade.is_clean_for(target_is_non_latin) {
             eprintln!(
                 "[synth] clip {} part {} accepted on attempt {} (seed={}, cov={:.0}%)",
-                clip_id, part_idx, attempt_idx, seed, grade.coverage * 100.0
+                clip_id,
+                part_idx,
+                attempt_idx,
+                seed,
+                grade.coverage * 100.0
             );
             return Ok((audio_path, duration));
         }
@@ -869,7 +915,11 @@ fn synth_one_line(
     if let Some((audio_path, grade, seed, duration)) = best {
         eprintln!(
             "[synth] clip {} part {} all attempts below threshold; returning best (seed={}, cov={:.0}%, score={:.2})",
-            clip_id, part_idx, seed, grade.coverage * 100.0, grade.score()
+            clip_id,
+            part_idx,
+            seed,
+            grade.coverage * 100.0,
+            grade.score()
         );
         return Ok((audio_path, duration));
     }
@@ -884,6 +934,10 @@ const MAX_CHUNK_WORDS: usize = 14;
 /// Silence inserted between concatenated chunks (sentence gap).
 const CHUNK_GAP_SEC: f64 = 0.28;
 
+fn trim_long_form_chunk_edges(engine: TtsEngine) -> bool {
+    !matches!(engine, TtsEngine::FishAudio)
+}
+
 /// Trim leading/trailing low-energy tails from a rendered chunk. The model
 /// often pads renders with silence (and the forced stop floor can leave a
 /// quiet tail); trimming keeps concatenated long-form output tight. Keeps a
@@ -891,7 +945,9 @@ const CHUNK_GAP_SEC: f64 = 0.28;
 fn trim_silence_edges(samples: &[f32], rate: u32) -> &[f32] {
     let win = (rate as usize / 20).max(1); // 50 ms
     let pad = (rate as usize) * 15 / 100; // 150 ms
-    let rms = |w: &[f32]| (w.iter().map(|s| (*s as f64) * (*s as f64)).sum::<f64>() / w.len() as f64).sqrt();
+    let rms = |w: &[f32]| {
+        (w.iter().map(|s| (*s as f64) * (*s as f64)).sum::<f64>() / w.len() as f64).sqrt()
+    };
     let gate = 0.004f64;
     // Segment-based edge trim. VoxCPM2 takes can end with seconds of dead
     // air containing a click and a short non-verbal burst (measured: speech
@@ -1029,7 +1085,10 @@ async fn synthesize_clip(
         return Err("reference audio path is required".into());
     }
     if args.engine.requires_reference_transcript() && args.reference_text.trim().is_empty() {
-        return Err("CosyVoice needs an accurate transcript for the reference audio".into());
+        return Err(format!(
+            "{} needs an accurate transcript for the reference audio",
+            args.engine.display_name()
+        ));
     }
 
     // Period→comma preprocessing was a CosyVoice-specific workaround for its
@@ -1051,8 +1110,18 @@ async fn synthesize_clip(
     // Long form: split into sentence groups and synthesize each with fresh
     // AR state, concatenating with a natural gap. A single short text takes
     // the direct path (identical to the previous behavior).
-    let chunks = chunk_text_for_synthesis(&processed_text, MAX_CHUNK_WORDS);
+    let (chunk_source, suffix_marker) = normalize_synthesis_text(args.engine, &processed_text);
+    let mut chunks = chunk_text_for_synthesis(&chunk_source, MAX_CHUNK_WORDS);
+    if let Some(marker) = suffix_marker.as_deref() {
+        for chunk in &mut chunks {
+            *chunk = format!("{} {}", chunk.trim_end(), marker);
+        }
+    }
     if chunks.len() <= 1 {
+        let single_text = chunks
+            .first()
+            .map(String::as_str)
+            .unwrap_or(processed_text.as_str());
         let (audio_path, duration_sec) = synth_one_line(
             &manager,
             args.engine,
@@ -1060,12 +1129,15 @@ async fn synthesize_clip(
             &args.voice_id,
             &args.reference_audio_path,
             &args.reference_text,
-            &processed_text,
+            single_text,
             args.language.as_deref(),
             &invocation_salt,
             0,
         )?;
-        return Ok(SynthesizeResult { audio_path, duration_sec });
+        return Ok(SynthesizeResult {
+            audio_path,
+            duration_sec,
+        });
     }
 
     eprintln!(
@@ -1100,7 +1172,12 @@ async fn synthesize_clip(
         } else if r != rate {
             return Err(format!("chunk {} sample rate {} != {}", i, r, rate));
         }
-        rendered.push(trim_silence_edges(&samples, rate).to_vec());
+        let chunk_samples = if trim_long_form_chunk_edges(args.engine) {
+            trim_silence_edges(&samples, rate).to_vec()
+        } else {
+            samples
+        };
+        rendered.push(chunk_samples);
         if first_path.is_none() {
             first_path = Some(pb);
         }
@@ -1119,12 +1196,17 @@ async fn synthesize_clip(
         .and_then(|p| p.parent())
         .ok_or("no chunk output dir")?
         .to_path_buf();
-    let out_path = dir.join(format!("synth-{}-full-{}.wav", args.clip_id, invocation_salt));
+    let out_path = dir.join(format!(
+        "synth-{}-full-{}.wav",
+        args.clip_id, invocation_salt
+    ));
     write_wav_pcm16_mono(&out_path, rate, &combined)?;
     let duration_sec = combined.len() as f64 / rate as f64;
     eprintln!(
         "[synth] clip {} long-form done: {:.2}s across {} chunks",
-        args.clip_id, duration_sec, chunks.len()
+        args.clip_id,
+        duration_sec,
+        chunks.len()
     );
     Ok(SynthesizeResult {
         audio_path: out_path.to_string_lossy().into_owned(),
@@ -1163,6 +1245,238 @@ fn preprocess_target(text: &str) -> String {
     let original_trailing = &text[trimmed_end.len()..];
     out.push_str(original_trailing);
     out
+}
+
+fn is_style_tag_name(tag: &str) -> bool {
+    let mut chars = tag.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn split_suffix_style_tag(text: &str) -> (String, Option<String>) {
+    let trimmed = text.trim_end();
+    let trailing = &text[trimmed.len()..];
+    if !trimmed.ends_with('>') {
+        return (text.to_string(), None);
+    }
+    let Some(start) = trimmed.rfind('<') else {
+        return (text.to_string(), None);
+    };
+    let tag = trimmed[start + 1..trimmed.len() - 1].trim();
+    if tag.starts_with('/') || !is_style_tag_name(tag) {
+        return (text.to_string(), None);
+    }
+    let body = trimmed[..start].trim_end();
+    (format!("{body}{trailing}"), Some(tag.to_ascii_lowercase()))
+}
+
+fn split_suffix_bracket_tag(text: &str) -> (String, Option<String>) {
+    let trimmed = text.trim_end();
+    let trailing = &text[trimmed.len()..];
+    if !trimmed.ends_with(']') {
+        return (text.to_string(), None);
+    }
+    let Some(start) = trimmed.rfind('[') else {
+        return (text.to_string(), None);
+    };
+    let tag = trimmed[start + 1..trimmed.len() - 1].trim();
+    if !is_style_tag_name(tag) {
+        return (text.to_string(), None);
+    }
+    let body = trimmed[..start].trim_end();
+    (format!("{body}{trailing}"), Some(tag.to_ascii_lowercase()))
+}
+
+fn split_wrapped_angle_tag(text: &str) -> (String, Option<String>) {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('<') {
+        return (text.to_string(), None);
+    }
+    let Some(open_end) = trimmed.find('>') else {
+        return (text.to_string(), None);
+    };
+    let tag = trimmed[1..open_end].trim();
+    if tag.starts_with('/') || !is_style_tag_name(tag) {
+        return (text.to_string(), None);
+    }
+    let close = format!("</{tag}>");
+    if !trimmed.ends_with(&close) {
+        return (text.to_string(), None);
+    }
+    let body = &trimmed[open_end + 1..trimmed.len() - close.len()];
+    (body.trim().to_string(), Some(tag.to_ascii_lowercase()))
+}
+
+fn split_leading_parenthetical_marker(text: &str) -> (String, Option<String>) {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('(') {
+        return (text.to_string(), None);
+    }
+    let Some(end) = trimmed.find(')') else {
+        return (text.to_string(), None);
+    };
+    let tag = trimmed[1..end].trim();
+    if tag.len() > 40
+        || tag.is_empty()
+        || !tag
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c == ' ' || c == '-' || c == '/')
+    {
+        return (text.to_string(), None);
+    }
+    (
+        trimmed[end + 1..].trim_start().to_string(),
+        Some(tag.to_ascii_lowercase()),
+    )
+}
+
+fn split_first_style_marker(text: &str) -> (String, Option<String>) {
+    for splitter in [
+        split_suffix_style_tag as fn(&str) -> (String, Option<String>),
+        split_suffix_bracket_tag,
+        split_wrapped_angle_tag,
+        split_leading_parenthetical_marker,
+    ] {
+        let (body, tag) = splitter(text);
+        if tag.is_some() {
+            return (body, tag);
+        }
+    }
+    (text.to_string(), None)
+}
+
+fn map_indic_mio_marker(tag: &str) -> Option<&'static str> {
+    let normalized = tag.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "happy" | "excited" | "warm" | "soft" | "calm" | "laughs" | "laughing" => {
+            Some("happy")
+        }
+        "sad" => Some("sad"),
+        "angry" | "intense" | "dramatic" => Some("angry"),
+        "disgust" | "disgusted" => Some("disgust"),
+        "fear" | "fearful" => Some("fear"),
+        "surprise" | "surprised" => Some("surprise"),
+        _ => None,
+    }
+}
+
+fn map_fish_audio_marker(tag: &str) -> Option<&'static str> {
+    let normalized = tag.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "pause" => Some("pause"),
+        "emphasis" => Some("emphasis"),
+        "laughs" | "laughing" => Some("laughing"),
+        "excited" | "happy" | "warm" => Some("excited"),
+        "angry" | "intense" => Some("angry"),
+        "whisper" | "whispering" | "soft" => Some("whisper"),
+        "screaming" => Some("screaming"),
+        "shouting" | "dramatic" => Some("shouting"),
+        "surprise" | "surprised" => Some("surprised"),
+        "sad" => Some("sad"),
+        _ => None,
+    }
+}
+
+fn normalize_synthesis_text(engine: TtsEngine, text: &str) -> (String, Option<String>) {
+    match engine {
+        TtsEngine::IndicMio => {
+            let (body, marker) = split_first_style_marker(text);
+            let clean = strip_style_markers_for_grading(&body);
+            let suffix = marker
+                .as_deref()
+                .and_then(map_indic_mio_marker)
+                .map(|tag| format!("<{tag}>"));
+            (clean, suffix)
+        }
+        TtsEngine::FishAudio => {
+            let (body, marker) = split_first_style_marker(text);
+            let clean = strip_style_markers_for_grading(&body);
+            let suffix = marker
+                .as_deref()
+                .and_then(map_fish_audio_marker)
+                .map(|tag| format!("[{tag}]"));
+            (clean, suffix)
+        }
+        // Qwen3 ignores style entirely. Strip stale Studio markers so they are
+        // not rendered literally after switching from a style-aware engine.
+        TtsEngine::Qwen3 => (strip_style_markers_for_grading(text), None),
+        _ => (text.to_string(), None),
+    }
+}
+
+fn strip_angle_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut inside = false;
+    for ch in text.chars() {
+        match ch {
+            '<' => inside = true,
+            '>' if inside => inside = false,
+            _ if !inside => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn strip_bracket_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut inside = false;
+    let mut tag = String::new();
+    for ch in text.chars() {
+        match ch {
+            '[' if !inside => {
+                inside = true;
+                tag.clear();
+            }
+            ']' if inside => {
+                if !is_style_tag_name(tag.trim()) {
+                    out.push('[');
+                    out.push_str(&tag);
+                    out.push(']');
+                }
+                inside = false;
+                tag.clear();
+            }
+            _ if inside => tag.push(ch),
+            _ => out.push(ch),
+        }
+    }
+    if inside {
+        out.push('[');
+        out.push_str(&tag);
+    }
+    out
+}
+
+fn strip_leading_parenthetical_marker(text: &str) -> &str {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('(') {
+        return text;
+    }
+    let Some(end) = trimmed.find(')') else {
+        return text;
+    };
+    let tag = trimmed[1..end].trim();
+    if tag.len() > 40
+        || tag.is_empty()
+        || !tag
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c == ' ' || c == '-' || c == '/')
+    {
+        return text;
+    }
+    trimmed[end + 1..].trim_start()
+}
+
+fn strip_style_markers_for_grading(text: &str) -> String {
+    let without_angle = strip_angle_tags(text);
+    let without_brackets = strip_bracket_tags(&without_angle);
+    strip_leading_parenthetical_marker(&without_brackets)
+        .trim()
+        .to_string()
 }
 
 /// Result of grading a synth take. Captures the four signals we use to decide
@@ -1210,8 +1524,7 @@ impl Grade {
     /// chunk), while real reference-echo prefixes are far longer (pre=31 on
     /// the one bad take in the same ladder).
     fn is_clean_for(&self, non_latin: bool) -> bool {
-        let (min_cov, max_prefix, max_suffix) =
-            if non_latin { (0.6, 2, 1) } else { (0.75, 1, 2) };
+        let (min_cov, max_prefix, max_suffix) = if non_latin { (0.6, 2, 1) } else { (0.75, 1, 2) };
         self.coverage >= min_cov
             && self.prefix_words <= max_prefix
             && self.suffix_words <= max_suffix
@@ -1282,7 +1595,11 @@ fn asr_grade_sidecar(
         return None;
     }
     let result = env.result.unwrap_or_default();
-    let transcript = result.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let transcript = result
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     Some(grade_transcript(&transcript, target))
 }
 
@@ -1417,7 +1734,11 @@ fn tokens_match(a: &str, b: &str) -> bool {
         return true;
     }
     let min_len = fa.len().min(fb.len());
-    let tol = if min_len >= 6 { 2 } else { usize::from(min_len >= 2) };
+    let tol = if min_len >= 6 {
+        2
+    } else {
+        usize::from(min_len >= 2)
+    };
     edit_distance(&fa, &fb) <= tol
 }
 
@@ -1525,7 +1846,11 @@ fn canon_tokens(s: &str) -> Vec<String> {
                 || ('\u{064B}'..='\u{065F}').contains(&c)
                 || c == '\u{0670}'
                 || ('\u{06D6}'..='\u{06ED}').contains(&c);
-            if c.is_alphanumeric() || c == '\'' || word_mark { c } else { ' ' }
+            if c.is_alphanumeric() || c == '\'' || word_mark {
+                c
+            } else {
+                ' '
+            }
         })
         .collect::<String>()
         .split_whitespace()
@@ -1621,7 +1946,13 @@ struct DemoProgress {
     message: String,
 }
 
-fn emit_progress(app: &tauri::AppHandle, phase: &'static str, current: usize, total: usize, message: impl Into<String>) {
+fn emit_progress(
+    app: &tauri::AppHandle,
+    phase: &'static str,
+    current: usize,
+    total: usize,
+    message: impl Into<String>,
+) {
     let _ = app.emit(
         "demo_progress",
         DemoProgress {
@@ -1669,13 +2000,19 @@ async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
         // changed across builds (e.g. when we swap the reference voice).
         std::fs::write(&path, bytes)
             .map_err(|e| format!("write {} failed: {}", path.display(), e))?;
-        eprintln!("[seed_demo] wrote bundled reference {} ({} bytes)", path.display(), bytes.len());
+        eprintln!(
+            "[seed_demo] wrote bundled reference {} ({} bytes)",
+            path.display(),
+            bytes.len()
+        );
         voices.push(DemoVoiceSeed {
             reference_audio_path: path.to_string_lossy().to_string(),
             reference_text: (*ref_text).to_string(),
         });
     }
-    eprintln!("[seed_demo] references ready, starting Qwen3-TTS synthesis (first call downloads model)");
+    eprintln!(
+        "[seed_demo] references ready, starting Qwen3-TTS synthesis (first call downloads model)"
+    );
 
     // Step 2 — demo lines, each wrapped in a VoxCPM2 style marker. The
     // sidecar's extractFirstEmotionTag pulls the tag name out and passes it
@@ -1699,12 +2036,7 @@ async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
     let cache_dir = clip_cache_dir();
     let mut clips = Vec::with_capacity(lines.len());
     for (idx, (speaker_idx, text)) in lines.iter().enumerate() {
-        let stable_id = format!(
-            "demo-s{}-l{}-{:x}",
-            speaker_idx,
-            idx,
-            short_hash(text)
-        );
+        let stable_id = format!("demo-s{}-l{}-{:x}", speaker_idx, idx, short_hash(text));
         let cached_path = cache_dir.join(format!("{}.wav", stable_id));
         let (audio_path, duration_sec) = if cached_path.exists() {
             let dur = wav_duration_sec(&cached_path).ok();
@@ -1797,8 +2129,12 @@ async fn list_projects(app: tauri::AppHandle) -> Result<Vec<ProjectMeta>, String
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
         let project = &v["project"];
         let (Some(id), Some(name)) = (project["id"].as_str(), project["name"].as_str()) else {
             continue; // unreadable/foreign file — skip, don't fail the listing
@@ -1842,8 +2178,11 @@ async fn save_project(app: tauri::AppHandle, args: SaveProjectArgs) -> Result<Pr
     let path = dir.join(format!("{id}.json"));
     // Write-then-rename so a crash mid-write can't corrupt an existing save.
     let tmp = dir.join(format!("{id}.json.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&envelope).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::write(
+        &tmp,
+        serde_json::to_vec_pretty(&envelope).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("rename to {}: {e}", path.display()))?;
 
     Ok(ProjectMeta { id, name, saved_at })
@@ -1856,11 +2195,16 @@ struct LoadProjectArgs {
 
 #[tauri::command]
 async fn load_project(app: tauri::AppHandle, args: LoadProjectArgs) -> Result<String, String> {
-    if !args.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !args
+        .id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
         return Err("invalid project id".into());
     }
     let path = projects_dir(&app)?.join(format!("{}.json", args.id));
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("parse: {e}"))?;
     let version = v["formatVersion"].as_u64().unwrap_or(0);
     if version > PROJECT_FORMAT_VERSION {
@@ -1873,7 +2217,11 @@ async fn load_project(app: tauri::AppHandle, args: LoadProjectArgs) -> Result<St
 
 #[tauri::command]
 async fn delete_project(app: tauri::AppHandle, args: LoadProjectArgs) -> Result<(), String> {
-    if !args.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !args
+        .id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
         return Err("invalid project id".into());
     }
     let path = projects_dir(&app)?.join(format!("{}.json", args.id));
@@ -1915,9 +2263,13 @@ async fn export_project(args: ExportArgs) -> Result<ExportResult, String> {
         // mix buffer is sized to project duration) but handle them safely.
         for (i, &s) in samples.iter().enumerate() {
             let frame = start_frame + i as isize;
-            if frame < 0 { continue; }
+            if frame < 0 {
+                continue;
+            }
             let frame = frame as usize;
-            if frame >= mix.len() { break; }
+            if frame >= mix.len() {
+                break;
+            }
             mix[frame] += s;
         }
     }
@@ -1926,14 +2278,20 @@ async fn export_project(args: ExportArgs) -> Result<ExportResult, String> {
     // past ±1.0. A hard clamp keeps the WAV writable without distortion at
     // the obvious cost of squashing transients past the threshold.
     for s in mix.iter_mut() {
-        if *s > 1.0 { *s = 1.0; }
-        else if *s < -1.0 { *s = -1.0; }
+        if *s > 1.0 {
+            *s = 1.0;
+        } else if *s < -1.0 {
+            *s = -1.0;
+        }
     }
 
     write_wav_pcm16_mono(std::path::Path::new(&args.out_path), sample_rate, &mix)?;
     eprintln!(
         "[export] wrote {} ({} frames @ {} Hz from {} clips)",
-        args.out_path, mix.len(), sample_rate, args.clips.len()
+        args.out_path,
+        mix.len(),
+        sample_rate,
+        args.clips.len()
     );
 
     Ok(ExportResult {
@@ -1949,8 +2307,7 @@ async fn export_project(args: ExportArgs) -> Result<ExportResult, String> {
 /// same shape speech-swift's WAVWriter emits.
 fn read_wav_header(path: &std::path::Path) -> Result<(u32, u16, u16), String> {
     use std::io::Read;
-    let mut f = std::fs::File::open(path)
-        .map_err(|e| format!("open {}: {}", path.display(), e))?;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("open {}: {}", path.display(), e))?;
     let mut header = [0u8; 44];
     f.read_exact(&mut header)
         .map_err(|e| format!("read header {}: {}", path.display(), e))?;
@@ -1964,8 +2321,7 @@ fn read_wav_header(path: &std::path::Path) -> Result<(u32, u16, u16), String> {
 /// Multi-channel sources are folded by averaging across channels.
 fn read_wav_pcm_mono(path: &std::path::Path) -> Result<(u32, u16, Vec<f32>), String> {
     use std::io::Read;
-    let mut f = std::fs::File::open(path)
-        .map_err(|e| format!("open {}: {}", path.display(), e))?;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("open {}: {}", path.display(), e))?;
     let mut header = [0u8; 44];
     f.read_exact(&mut header)
         .map_err(|e| format!("read header {}: {}", path.display(), e))?;
@@ -1973,7 +2329,11 @@ fn read_wav_pcm_mono(path: &std::path::Path) -> Result<(u32, u16, Vec<f32>), Str
     let sample_rate = u32::from_le_bytes([header[24], header[25], header[26], header[27]]);
     let bits = u16::from_le_bytes([header[34], header[35]]);
     if bits != 16 {
-        return Err(format!("{}: only 16-bit PCM supported (got {})", path.display(), bits));
+        return Err(format!(
+            "{}: only 16-bit PCM supported (got {})",
+            path.display(),
+            bits
+        ));
     }
     if channels == 0 {
         return Err(format!("{}: zero channels", path.display()));
@@ -2011,8 +2371,8 @@ fn write_wav_pcm16_mono(
                 .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
         }
     }
-    let mut f = std::fs::File::create(path)
-        .map_err(|e| format!("create {}: {}", path.display(), e))?;
+    let mut f =
+        std::fs::File::create(path).map_err(|e| format!("create {}: {}", path.display(), e))?;
     let bits_per_sample = 16u16;
     let channels = 1u16;
     let byte_rate = sample_rate * channels as u32 * (bits_per_sample as u32 / 8);
@@ -2022,23 +2382,38 @@ fn write_wav_pcm16_mono(
 
     // RIFF / fmt / data chunks. Standard canonical 44-byte PCM header.
     f.write_all(b"RIFF").map_err(|e| e.to_string())?;
-    f.write_all(&riff_size.to_le_bytes()).map_err(|e| e.to_string())?;
+    f.write_all(&riff_size.to_le_bytes())
+        .map_err(|e| e.to_string())?;
     f.write_all(b"WAVE").map_err(|e| e.to_string())?;
     f.write_all(b"fmt ").map_err(|e| e.to_string())?;
-    f.write_all(&16u32.to_le_bytes()).map_err(|e| e.to_string())?;       // fmt chunk size
-    f.write_all(&1u16.to_le_bytes()).map_err(|e| e.to_string())?;        // PCM
-    f.write_all(&channels.to_le_bytes()).map_err(|e| e.to_string())?;
-    f.write_all(&sample_rate.to_le_bytes()).map_err(|e| e.to_string())?;
-    f.write_all(&byte_rate.to_le_bytes()).map_err(|e| e.to_string())?;
-    f.write_all(&block_align.to_le_bytes()).map_err(|e| e.to_string())?;
-    f.write_all(&bits_per_sample.to_le_bytes()).map_err(|e| e.to_string())?;
+    f.write_all(&16u32.to_le_bytes())
+        .map_err(|e| e.to_string())?; // fmt chunk size
+    f.write_all(&1u16.to_le_bytes())
+        .map_err(|e| e.to_string())?; // PCM
+    f.write_all(&channels.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    f.write_all(&sample_rate.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    f.write_all(&byte_rate.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    f.write_all(&block_align.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    f.write_all(&bits_per_sample.to_le_bytes())
+        .map_err(|e| e.to_string())?;
     f.write_all(b"data").map_err(|e| e.to_string())?;
-    f.write_all(&data_bytes.to_le_bytes()).map_err(|e| e.to_string())?;
+    f.write_all(&data_bytes.to_le_bytes())
+        .map_err(|e| e.to_string())?;
 
     // Samples.
     let mut buf = Vec::with_capacity(samples.len() * 2);
     for &s in samples {
-        let clamped = if s > 1.0 { 1.0 } else if s < -1.0 { -1.0 } else { s };
+        let clamped = if s > 1.0 {
+            1.0
+        } else if s < -1.0 {
+            -1.0
+        } else {
+            s
+        };
         let v = (clamped * 32767.0).round() as i16;
         buf.extend_from_slice(&v.to_le_bytes());
     }
@@ -2089,13 +2464,33 @@ mod tests {
     fn tts_engine_protocol_names_are_stable() {
         let cosy: TtsEngine = serde_json::from_str("\"cosyvoice\"").unwrap();
         assert_eq!(cosy, TtsEngine::CosyVoice);
-        assert_eq!(serde_json::to_string(&TtsEngine::VoxCPM2).unwrap(), "\"voxcpm2\"");
+        assert_eq!(
+            serde_json::to_string(&TtsEngine::VoxCPM2).unwrap(),
+            "\"voxcpm2\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TtsEngine::IndicMio).unwrap(),
+            "\"indic-mio\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TtsEngine::FishAudio).unwrap(),
+            "\"fish-audio\""
+        );
         assert_eq!(cosy.sidecar_command(), "synthesize_cosyvoice");
+        assert_eq!(
+            TtsEngine::IndicMio.sidecar_command(),
+            "synthesize_indic_mio"
+        );
+        assert_eq!(
+            TtsEngine::FishAudio.sidecar_command(),
+            "synthesize_fish_audio"
+        );
     }
 
     #[test]
     fn cosyvoice_requires_reference_transcript() {
         assert!(TtsEngine::CosyVoice.requires_reference_transcript());
+        assert!(TtsEngine::FishAudio.requires_reference_transcript());
         assert!(!TtsEngine::VoxCPM2.requires_reference_transcript());
     }
 
@@ -2111,6 +2506,8 @@ mod tests {
         // Style is intensity-only for Chatterbox; instruction for VoxCPM2/Cosy; none for Qwen3.
         assert_eq!(c.style_mode(), "intensity");
         assert_eq!(TtsEngine::VoxCPM2.style_mode(), "instruction");
+        assert_eq!(TtsEngine::IndicMio.style_mode(), "suffix-tag");
+        assert_eq!(TtsEngine::FishAudio.style_mode(), "bracket-tag");
         assert_eq!(TtsEngine::Qwen3.style_mode(), "none");
     }
 
@@ -2127,7 +2524,11 @@ mod tests {
     #[test]
     fn clip_cache_dir_under_app_namespace() {
         let dir = clip_cache_dir();
-        assert!(dir.ends_with("clips"), "cache dir should end with clips: {:?}", dir);
+        assert!(
+            dir.ends_with("clips"),
+            "cache dir should end with clips: {:?}",
+            dir
+        );
         assert!(
             dir.to_string_lossy().contains("audio.soniqo.studio"),
             "cache dir should be under the app namespace: {:?}",
@@ -2144,10 +2545,13 @@ mod tests {
         let sidecar = std::path::Path::new("/app/bin/speech-core-tts-sidecar");
         let res = std::path::Path::new("/app/resources");
         let dirs = sidecar_lib_dirs(sidecar, Some(res));
-        assert_eq!(dirs, vec![
-            std::path::PathBuf::from("/app/bin"),
-            std::path::PathBuf::from("/app/resources"),
-        ]);
+        assert_eq!(
+            dirs,
+            vec![
+                std::path::PathBuf::from("/app/bin"),
+                std::path::PathBuf::from("/app/resources"),
+            ]
+        );
 
         // Dev layout (no resource dir resolved) still yields the sidecar's dir.
         let dirs = sidecar_lib_dirs(sidecar, None);
@@ -2178,6 +2582,75 @@ mod tests {
     }
 
     #[test]
+    fn strip_style_markers_for_grading_removes_prefix_and_suffix_markers() {
+        assert_eq!(
+            strip_style_markers_for_grading("(happy) नमस्ते आज मौसम अच्छा है।"),
+            "नमस्ते आज मौसम अच्छा है।"
+        );
+        assert_eq!(
+            strip_style_markers_for_grading("नमस्ते आज मौसम अच्छा है। <happy>"),
+            "नमस्ते आज मौसम अच्छा है।"
+        );
+        assert_eq!(
+            strip_style_markers_for_grading("नमस्ते आज मौसम अच्छा है। [excited]"),
+            "नमस्ते आज मौसम अच्छा है।"
+        );
+        assert_eq!(
+            strip_style_markers_for_grading("<sad>Hello there</sad>"),
+            "Hello there"
+        );
+    }
+
+    #[test]
+    fn suffix_style_tag_can_be_reapplied_after_chunking() {
+        let (body, tag) = split_suffix_style_tag("यह पहला वाक्य है। यह दूसरा वाक्य है। <angry>");
+        assert_eq!(tag.as_deref(), Some("angry"));
+        let mut chunks = chunk_text_for_synthesis(&body, 4);
+        for chunk in &mut chunks {
+            *chunk = format!("{} <{}>", chunk.trim_end(), tag.as_deref().unwrap());
+        }
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| chunk.ends_with("<angry>")));
+    }
+
+    #[test]
+    fn bracket_style_tag_can_be_reapplied_after_chunking() {
+        let (body, tag) = split_suffix_bracket_tag("यह पहला वाक्य है। यह दूसरा वाक्य है। [excited]");
+        assert_eq!(tag.as_deref(), Some("excited"));
+        let mut chunks = chunk_text_for_synthesis(&body, 4);
+        for chunk in &mut chunks {
+            *chunk = format!("{} [{}]", chunk.trim_end(), tag.as_deref().unwrap());
+        }
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| chunk.ends_with("[excited]")));
+    }
+
+    #[test]
+    fn indic_mio_normalization_does_not_render_stale_markers() {
+        let (body, marker) =
+            normalize_synthesis_text(TtsEngine::IndicMio, "(warm) नमस्ते आज मौसम अच्छा है।");
+        assert_eq!(body, "नमस्ते आज मौसम अच्छा है।");
+        assert_eq!(marker.as_deref(), Some("<happy>"));
+
+        let (body, marker) =
+            normalize_synthesis_text(TtsEngine::IndicMio, "नमस्ते आज मौसम अच्छा है। <angry>");
+        assert_eq!(body, "नमस्ते आज मौसम अच्छा है।");
+        assert_eq!(marker.as_deref(), Some("<angry>"));
+
+        let (body, marker) =
+            normalize_synthesis_text(TtsEngine::IndicMio, "(whispering) नमस्ते");
+        assert_eq!(body, "नमस्ते");
+        assert_eq!(marker, None);
+    }
+
+    #[test]
+    fn fish_audio_normalization_converts_stale_parenthetical_markers() {
+        let (body, marker) = normalize_synthesis_text(TtsEngine::FishAudio, "(whispering) hello");
+        assert_eq!(body, "hello");
+        assert_eq!(marker.as_deref(), Some("[whisper]"));
+    }
+
+    #[test]
     fn trim_sheds_far_short_tail_bursts() {
         // Shape measured on a real take: 3 s speech, 1.1 s dead air, a 0.1 s
         // click, 0.65 s dead air, a 0.25 s non-verbal burst at the very end.
@@ -2201,6 +2674,13 @@ mod tests {
     }
 
     #[test]
+    fn fish_audio_long_form_preserves_chunk_edges() {
+        assert!(!trim_long_form_chunk_edges(TtsEngine::FishAudio));
+        assert!(trim_long_form_chunk_edges(TtsEngine::VoxCPM2));
+        assert!(trim_long_form_chunk_edges(TtsEngine::IndicMio));
+    }
+
+    #[test]
     fn tokens_match_folds_devanagari_vs_urdu_script() {
         // Omnilingual decodes Hindustani in mixed script; the same spoken word
         // must align across spellings via the consonant skeleton.
@@ -2218,9 +2698,20 @@ mod tests {
         let target = "गेम अपने आप सेव नहीं होता कि ठीक बीच में एक हॉरिजॉन्टल लाइन जोड़े।";
         let transcript = "گیم اپنے سیو نہیں ہوتا کہ ٹھیک بیچ میں ایک ہاریجانٹل لائن جوڑے یان کھن";
         let g = grade_transcript(transcript, target);
-        assert!(g.coverage >= 0.6, "cross-script coverage too low: {}", g.coverage);
-        assert!(g.suffix_words >= 2, "babble tail not detected: suffix={}", g.suffix_words);
-        assert!(!g.is_clean_for(true), "babble take must be rejected for non-Latin targets");
+        assert!(
+            g.coverage >= 0.6,
+            "cross-script coverage too low: {}",
+            g.coverage
+        );
+        assert!(
+            g.suffix_words >= 2,
+            "babble tail not detected: suffix={}",
+            g.suffix_words
+        );
+        assert!(
+            !g.is_clean_for(true),
+            "babble take must be rejected for non-Latin targets"
+        );
     }
 
     #[test]
@@ -2244,8 +2735,16 @@ mod tests {
             "I never thought we'd make it this far.",
         );
         assert_eq!(g.coverage, 1.0); // all target words present
-        assert!(g.prefix_words >= 2, "expected prefix junk, got {}", g.prefix_words);
-        assert!(g.repeated_target_words >= 4, "expected repetition, got {}", g.repeated_target_words);
+        assert!(
+            g.prefix_words >= 2,
+            "expected prefix junk, got {}",
+            g.prefix_words
+        );
+        assert!(
+            g.repeated_target_words >= 4,
+            "expected repetition, got {}",
+            g.repeated_target_words
+        );
         assert!(!g.is_clean());
     }
 
@@ -2274,10 +2773,7 @@ mod tests {
     fn colocate_metallib_simulates_bundle_layout() {
         // Simulate `<App>.app/Contents/{MacOS,Resources}/` and verify the
         // helper links the bundled metallib next to the sidecar binary.
-        let root = std::env::temp_dir().join(format!(
-            "soniqo-colocate-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root = std::env::temp_dir().join(format!("soniqo-colocate-{}", uuid::Uuid::new_v4()));
         let macos = root.join("MacOS");
         let resources = root.join("Resources");
         std::fs::create_dir_all(&macos).unwrap();
@@ -2306,10 +2802,8 @@ mod tests {
     fn colocate_metallib_noop_when_source_absent() {
         // Dev/unbundled layout: no Resources/ sibling. Helper should do nothing
         // (sidecar is expected to find the metallib via the dev-path workflow).
-        let root = std::env::temp_dir().join(format!(
-            "soniqo-colocate-noop-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("soniqo-colocate-noop-{}", uuid::Uuid::new_v4()));
         let macos = root.join("MacOS");
         std::fs::create_dir_all(&macos).unwrap();
         colocate_metallib(&macos);
@@ -2347,10 +2841,7 @@ mod tests {
     fn score_prefers_clean_low_cov_over_leaked_high_cov() {
         // The whole point of the composite score: when ladder exhausts, prefer
         // a clean cov=75% take over a cov=100% leak.
-        let clean = grade_transcript(
-            "I knew you would make.",
-            "I knew you would make it.",
-        );
+        let clean = grade_transcript("I knew you would make.", "I knew you would make it.");
         let leaked = grade_transcript(
             "Capit ruttering quilt I knew you would make it",
             "I knew you would make it.",
@@ -2358,7 +2849,8 @@ mod tests {
         assert!(
             clean.score() > leaked.score(),
             "clean.score={} leaked.score={}",
-            clean.score(), leaked.score()
+            clean.score(),
+            leaked.score()
         );
     }
 }

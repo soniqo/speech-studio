@@ -3,6 +3,8 @@ import AudioCommon
 import MLX
 import ChatterboxTTS
 import CosyVoiceTTS
+import FishAudioTTS
+import IndicMioTTS
 import OmniVoiceTTS
 import Qwen3TTS
 import VoxCPM2TTS
@@ -18,6 +20,8 @@ import VoxCPM2TTS
 //   synthesize_voxcpm2    — VoxCPM2 voice clone (48 kHz).
 //   synthesize_cosyvoice  — CosyVoice zero-shot voice clone (24 kHz).
 //   synthesize_chatterbox — Chatterbox multilingual voice clone (24 kHz).
+//   synthesize_indic_mio  — Indic-Mio Hindi/Indic emotion synthesis (24 kHz).
+//   synthesize_fish_audio — Fish Audio S2 Pro clone + bracket markers (44.1 kHz).
 //   synthesize_icl        — Qwen3-TTS ICL voice clone; legacy fallback only.
 
 struct Request: Decodable {
@@ -35,6 +39,7 @@ struct Request: Decodable {
     let temperature: Float?
     let topK: Int?
     let maxTokens: Int?
+    let minStopSteps: Int?
     let repetitionPenalty: Float?
     // Optional seed for the CosyVoice / VoxCPM2 path. Defaults to 1000 when
     // omitted. Rust-side retry varies this across attempts.
@@ -411,11 +416,125 @@ final class OmniVoiceHolder: @unchecked Sendable {
 
 let omnivoiceHolder = OmniVoiceHolder()
 
+// MARK: - Indic-Mio model state
+
+/// Lazily loaded Indic-Mio model (Qwen3 speech-token LM + MioCodec decoder).
+///
+/// The model supports Hindi/Indic emotion tags such as `<happy>` and `<angry>`,
+/// plus reference-audio cloning through its WavLM → MioCodec global embedding
+/// path.
+final class IndicMioHolder: @unchecked Sendable {
+    private var model: IndicMioTTSModel?
+    private var loadedModelId: String?
+
+    func load(modelId requestedId: String? = nil) async throws -> IndicMioTTSModel {
+        if requestedId == nil,
+           let bundlePath = ProcessInfo.processInfo.environment["SONIQO_INDIC_MIO_BUNDLE_DIR"],
+           !bundlePath.isEmpty {
+            let cacheKey = "bundle:\(bundlePath)"
+            if let m = model, loadedModelId == cacheKey { return m }
+            if model != nil { unload() }
+            logErr("[sidecar] loading Indic-Mio bundle \(bundlePath)…")
+            let m = try await IndicMioTTSModel.fromBundle(
+                URL(fileURLWithPath: bundlePath, isDirectory: true),
+                progressHandler: { progress, message in
+                    logErr(String(format: "[sidecar] indic-mio %3d%% %@", Int(progress * 100), message))
+                }
+            )
+            model = m
+            loadedModelId = cacheKey
+            logErr("[sidecar] indic-mio ready")
+            return m
+        }
+
+        let modelId = requestedId
+            ?? ProcessInfo.processInfo.environment["SONIQO_INDIC_MIO_MODEL_ID"]
+            ?? IndicMioTTSModel.defaultModelId
+        if let m = model, loadedModelId == modelId { return m }
+        if model != nil { unload() }
+        logErr("[sidecar] loading Indic-Mio model \(modelId)…")
+        let m = try await IndicMioTTSModel.fromPretrained(
+            modelId: modelId,
+            progressHandler: { progress, message in
+                logErr(String(format: "[sidecar] indic-mio %3d%% %@", Int(progress * 100), message))
+            }
+        )
+        model = m
+        loadedModelId = modelId
+        logErr("[sidecar] indic-mio ready")
+        return m
+    }
+
+    func unload() {
+        model = nil
+        loadedModelId = nil
+    }
+}
+
+let indicMioHolder = IndicMioHolder()
+
+// MARK: - Fish Audio model state
+
+/// Lazily loaded Fish Audio S2 Pro runtime. It supports raw reference-audio
+/// cloning when the caller also supplies the reference transcript, and explicit
+/// inline bracket markers such as `[excited]`, `[angry]`, and `[whisper]`.
+final class FishAudioHolder: @unchecked Sendable {
+    private var model: FishAudioTTSModel?
+    private var loadedModelId: String?
+
+    func load(modelId requestedId: String? = nil) async throws -> FishAudioTTSModel {
+        if requestedId == nil,
+           let bundlePath = ProcessInfo.processInfo.environment["SONIQO_FISH_AUDIO_BUNDLE_DIR"],
+           !bundlePath.isEmpty {
+            let cacheKey = "bundle:\(bundlePath)"
+            if let m = model, loadedModelId == cacheKey { return m }
+            if model != nil { unload() }
+            logErr("[sidecar] loading Fish Audio bundle \(bundlePath)…")
+            let m = try await FishAudioTTSModel.fromBundle(
+                URL(fileURLWithPath: bundlePath, isDirectory: true),
+                progressHandler: { progress, message in
+                    logErr(String(format: "[sidecar] fish-audio %3d%% %@", Int(progress * 100), message))
+                }
+            )
+            model = m
+            loadedModelId = cacheKey
+            logErr("[sidecar] fish-audio ready")
+            return m
+        }
+
+        let modelId = requestedId
+            ?? ProcessInfo.processInfo.environment["SONIQO_FISH_AUDIO_MODEL_ID"]
+            ?? FishAudioTTSModel.defaultModelId
+        if let m = model, loadedModelId == modelId { return m }
+        if model != nil { unload() }
+        logErr("[sidecar] loading Fish Audio model \(modelId)…")
+        let m = try await FishAudioTTSModel.fromPretrained(
+            modelId: modelId,
+            progressHandler: { progress, message in
+                logErr(String(format: "[sidecar] fish-audio %3d%% %@", Int(progress * 100), message))
+            }
+        )
+        model = m
+        loadedModelId = modelId
+        logErr("[sidecar] fish-audio ready")
+        return m
+    }
+
+    func unload() {
+        model = nil
+        loadedModelId = nil
+    }
+}
+
+let fishAudioHolder = FishAudioHolder()
+
 // Engine selector. VoxCPM2 is the default. SONIQO_TTS_ENGINE remains a
 // process-level compatibility default, but Studio chooses the engine per
 // request so a user can switch without restarting the app.
 enum TTSEngine: String {
     case voxcpm2, cosyvoice, qwen3, chatterbox, omnivoice
+    case indicMio = "indic-mio"
+    case fishAudio = "fish-audio"
 }
 
 let defaultEngine: TTSEngine = {
@@ -444,6 +563,8 @@ func unloadInactiveModels(keeping engine: TTSEngine) {
     if engine != .qwen3 { holder.unload() }
     if engine != .chatterbox { chatterboxHolder.unload() }
     if engine != .omnivoice { omnivoiceHolder.unload() }
+    if engine != .indicMio { indicMioHolder.unload() }
+    if engine != .fishAudio { fishAudioHolder.unload() }
     MLX.Memory.clearCache()
 }
 
@@ -469,6 +590,19 @@ func clipsCacheDir() -> URL {
         .appendingPathComponent("clips", isDirectory: true)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir
+}
+
+func padAudioEdges(_ samples: [Float], sampleRate: Int, leadInMs: Int, postRollMs: Int) -> [Float] {
+    let lead = max(0, sampleRate * leadInMs / 1000)
+    let tail = max(0, sampleRate * postRollMs / 1000)
+    guard lead > 0 || tail > 0 else { return samples }
+
+    var out = [Float]()
+    out.reserveCapacity(lead + samples.count + tail)
+    out.append(contentsOf: repeatElement(0.0, count: lead))
+    out.append(contentsOf: samples)
+    out.append(contentsOf: repeatElement(0.0, count: tail))
+    return out
 }
 
 func safeFilename(_ s: String) -> String {
@@ -678,6 +812,10 @@ while let line = readLine(strippingNewline: true) {
                 _ = try await chatterboxHolder.load()
             case .omnivoice:
                 _ = try await omnivoiceHolder.load()
+            case .indicMio:
+                _ = try await indicMioHolder.load()
+            case .fishAudio:
+                _ = try await fishAudioHolder.load()
             }
             emit(SuccessResponse(
                 id: request.id,
@@ -1026,6 +1164,147 @@ while let line = readLine(strippingNewline: true) {
             ))
         } catch {
             logErr("[sidecar] omni synthesis failed: \(error)")
+            emit(ErrorResponse(id: request.id, ok: false, error: "\(error)"))
+        }
+
+    case "synthesize_indic_mio":
+        guard requestMatchesEngine(request, .indicMio) else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "synthesize_indic_mio requires engine indic-mio"
+            ))
+            continue
+        }
+        guard let targetText = request.text, !targetText.isEmpty else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "synthesize_indic_mio requires text"
+            ))
+            continue
+        }
+
+        do {
+            activateEngine(.indicMio)
+            let model = try await indicMioHolder.load()
+            let language = request.language ?? "hindi"
+            let sampling = IndicMioSamplingConfig(
+                maxNewTokens: request.maxTokens ?? 500,
+                temperature: request.temperature ?? 0.3,
+                topK: request.topK ?? 50,
+                topP: 0.9,
+                repetitionPenalty: request.repetitionPenalty ?? 1.0
+            )
+            logErr("[sidecar] indic-mio synth voice=\(request.voiceId ?? "?") lang=\(language) chars=\(targetText.count)")
+            let audio: [Float]
+            if let refPath = request.referenceAudioPath, !refPath.isEmpty {
+                let refURL = URL(fileURLWithPath: refPath)
+                let refSamples = try AudioFileLoader.load(url: refURL, targetSampleRate: model.sampleRate)
+                logErr("[sidecar] indic-mio reference=\(refPath) samples=\(refSamples.count) @ \(model.sampleRate) Hz")
+                audio = try await model.generate(
+                    text: targetText,
+                    language: language,
+                    referenceAudio: refSamples,
+                    referenceSampleRate: model.sampleRate,
+                    sampling: sampling
+                )
+            } else {
+                audio = try await model.generate(
+                    text: targetText,
+                    language: language,
+                    sampling: sampling
+                )
+            }
+            let sampleRate = model.sampleRate
+            let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
+            try WAVWriter.write(samples: audio, sampleRate: sampleRate, to: outURL)
+            let durationSec = Double(audio.count) / Double(sampleRate)
+            logErr(String(format: "[sidecar] indic-mio wrote %.2fs → %@", durationSec, outURL.path))
+
+            emit(SuccessResponse(
+                id: request.id,
+                ok: true,
+                result: SynthResult(
+                    audioPath: outURL.path,
+                    sampleRate: sampleRate,
+                    durationSec: durationSec
+                )
+            ))
+        } catch {
+            logErr("[sidecar] indic-mio synthesis failed: \(error)")
+            emit(ErrorResponse(id: request.id, ok: false, error: "\(error)"))
+        }
+
+    case "synthesize_fish_audio":
+        guard requestMatchesEngine(request, .fishAudio) else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "synthesize_fish_audio requires engine fish-audio"
+            ))
+            continue
+        }
+        guard let refPath = request.referenceAudioPath, !refPath.isEmpty,
+              let refText = request.referenceText, !refText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let targetText = request.text, !targetText.isEmpty else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "synthesize_fish_audio requires referenceAudioPath, referenceText, and text"
+            ))
+            continue
+        }
+
+        do {
+            activateEngine(.fishAudio)
+            let model = try await fishAudioHolder.load()
+            let seed = request.seed ?? 1000
+            MLX.seed(seed)
+            let maxTokens = request.maxTokens ?? 256
+            let minTokens = min(
+                request.minStopSteps ?? min(48, maxTokens),
+                max(0, maxTokens - 1)
+            )
+            let sampling = FishAudioSamplingConfig(
+                maxNewTokens: maxTokens,
+                temperature: request.temperature ?? 1.0,
+                topK: request.topK ?? 30,
+                topP: 0.9,
+                repetitionPenalty: request.repetitionPenalty ?? 1.0,
+                minNewTokens: minTokens
+            )
+            logErr("[sidecar] fish-audio synth voice=\(request.voiceId ?? "?") seed=\(seed) chars=\(targetText.count) refTextChars=\(refText.count)")
+            let generatedAudio = try await model.generate(
+                text: targetText,
+                referenceAudioURL: URL(fileURLWithPath: refPath),
+                referenceText: refText,
+                sampling: sampling
+            )
+            let sampleRate = model.sampleRate
+            let audio = padAudioEdges(
+                generatedAudio,
+                sampleRate: sampleRate,
+                leadInMs: 120,
+                postRollMs: 220
+            )
+            let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
+            try WAVWriter.write(samples: audio, sampleRate: sampleRate, to: outURL)
+            let durationSec = Double(audio.count) / Double(sampleRate)
+            logErr(String(format: "[sidecar] fish-audio wrote %.2fs → %@", durationSec, outURL.path))
+            logMemorySnapshot("post-fish-audio-synth")
+
+            emit(SuccessResponse(
+                id: request.id,
+                ok: true,
+                result: SynthResult(
+                    audioPath: outURL.path,
+                    sampleRate: sampleRate,
+                    durationSec: durationSec
+                )
+            ))
+        } catch {
+            logErr("[sidecar] fish-audio synthesis failed: \(error)")
             emit(ErrorResponse(id: request.id, ok: false, error: "\(error)"))
         }
 

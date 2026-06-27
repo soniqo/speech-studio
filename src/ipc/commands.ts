@@ -12,7 +12,14 @@ export function pingSidecar(): Promise<PingResult> {
   return invoke<PingResult>("ping_sidecar");
 }
 
-export type TtsEngineId = "voxcpm2" | "cosyvoice" | "qwen3" | "chatterbox" | "omnivoice";
+export type TtsEngineId =
+  | "voxcpm2"
+  | "cosyvoice"
+  | "qwen3"
+  | "chatterbox"
+  | "omnivoice"
+  | "indic-mio"
+  | "fish-audio";
 
 export interface TtsEngineInfo {
   id: TtsEngineId;
@@ -25,8 +32,10 @@ export interface TtsEngineInfo {
    * expectations:
    * - `instruction`: marker → a natural-language style instruction (real tone).
    * - `intensity`: marker → an expressiveness level only (not a specific emotion).
+   * - `suffix-tag`: marker → an engine-specific suffix tag such as `<happy>`.
+   * - `bracket-tag`: marker → an engine-specific suffix tag such as `[excited]`.
    * - `none`: markers are ignored. */
-  styleMode: "instruction" | "intensity" | "none";
+  styleMode: "instruction" | "intensity" | "suffix-tag" | "bracket-tag" | "none";
 }
 
 export function availableTtsEngines(): Promise<TtsEngineInfo[]> {

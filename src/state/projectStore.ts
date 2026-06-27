@@ -125,7 +125,14 @@ export const useProjectStore = create<ProjectStore>((set) => ({
   setModelStatus: (status, error) =>
     set((s) => ({ model: { ...s.model, status, error } })),
   setTtsEngine: (engine) =>
-    set((s) => ({ model: { ...s.model, engine, error: undefined } })),
+    set((s) => ({
+      model: {
+        ...s.model,
+        engine,
+        language: engine === "indic-mio" ? "hi" : s.model.language,
+        error: undefined,
+      },
+    })),
   setTtsLanguage: (language) =>
     set((s) => ({ model: { ...s.model, language, error: undefined } })),
   setAvailableTtsEngines: (engines) =>

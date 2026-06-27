@@ -206,7 +206,7 @@ export function Inspector() {
                   },
                 }))
               }
-              placeholder="Required by CosyVoice to anchor a clone. VoxCPM2 clones from the reference audio alone."
+              placeholder="Required by CosyVoice, Qwen3-TTS, and Fish Audio to anchor a clone. VoxCPM2 clones from audio alone."
               className="min-h-[88px]"
             />
           </Section>
@@ -232,7 +232,10 @@ export function Inspector() {
   const effectiveVoiceId = clip.voiceOverrideId ?? trackVoiceId;
   const effectiveVoice = project.voices.find((v) => v.id === effectiveVoiceId);
   const current = clip;
-  const needsReferenceTranscript = activeEngine?.requiresReferenceTranscript ?? engine === "cosyvoice";
+  const needsReferenceTranscript =
+    activeEngine?.requiresReferenceTranscript ??
+    (engine === "cosyvoice" || engine === "qwen3" || engine === "fish-audio");
+  const transcriptEngineName = activeEngine?.displayName ?? "Selected engine";
   const canRegenerate =
     !isRegenerating &&
     !!effectiveVoice &&
@@ -279,7 +282,7 @@ export function Inspector() {
     if (!effectiveVoice) return "Assign a voice first";
     if (!effectiveVoice.referenceAudioPath) return "Voice is missing a reference clip";
     if (needsReferenceTranscript && !effectiveVoice.referenceText.trim()) {
-      return "CosyVoice needs the reference transcript";
+      return `${transcriptEngineName} needs the reference transcript`;
     }
     if (current.text.trim().length === 0) return "Write something first";
     return "Generate audio";
