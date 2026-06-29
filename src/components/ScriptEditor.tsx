@@ -37,6 +37,7 @@ const FISH_AUDIO_TAGS = [
 // swap them out cleanly. Permissive on tag character set to allow custom
 // emotion descriptors like `(slow and dreamy)`.
 const LEADING_PAREN_TAG = /^\s*\(\s*([a-zA-Z][a-zA-Z\s/\-]*?)\s*\)\s*/;
+const LEADING_BRACKET_TAG = /^\s*\[\s*([a-zA-Z][a-zA-Z0-9_\-]*)\s*\]\s*/;
 const LEADING_XML_TAG = /^\s*<\s*([a-zA-Z][a-zA-Z0-9_\-]*)\s*>/;
 const TRAILING_XML_CLOSE = /<\s*\/\s*[a-zA-Z][a-zA-Z0-9_\-]*\s*>\s*$/;
 const TRAILING_XML_SUFFIX = /\s*<\s*([a-zA-Z][a-zA-Z0-9_\-]*)\s*>\s*$/;
@@ -49,7 +50,7 @@ function stripEmotionTag(text: string): string {
     out = out.slice(xmlOpen[0].length);
     out = out.replace(TRAILING_XML_CLOSE, "");
   } else {
-    out = out.replace(LEADING_PAREN_TAG, "");
+    out = out.replace(LEADING_BRACKET_TAG, "").replace(LEADING_PAREN_TAG, "");
   }
   return out.replace(TRAILING_XML_SUFFIX, "").replace(TRAILING_BRACKET_SUFFIX, "");
 }
@@ -66,7 +67,7 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
   const rawCurrentTag = suffixMode
     ? value.match(TRAILING_XML_SUFFIX)?.[1]
     : bracketMode
-      ? value.match(TRAILING_BRACKET_SUFFIX)?.[1]
+      ? value.match(LEADING_BRACKET_TAG)?.[1] || value.match(TRAILING_BRACKET_SUFFIX)?.[1]
     : value.match(LEADING_PAREN_TAG)?.[1] || value.match(LEADING_XML_TAG)?.[1];
   const currentTag = (rawCurrentTag ?? "").trim().toLowerCase();
 
@@ -80,7 +81,7 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
     } else if (suffixMode) {
       onChange(`${body} <${tag}>`.trim());
     } else if (bracketMode) {
-      onChange(`${body} [${tag}]`.trim());
+      onChange(`[${tag}] ${body}`.trim());
     } else {
       onChange(`(${tag}) ${body}`);
     }

@@ -1504,7 +1504,11 @@ async fn synthesize_clip(
     let mut chunks = chunk_text_for_synthesis(&chunk_source, MAX_CHUNK_WORDS);
     if let Some(marker) = suffix_marker.as_deref() {
         for chunk in &mut chunks {
-            *chunk = format!("{} {}", chunk.trim_end(), marker);
+            if args.engine == TtsEngine::FishAudio {
+                *chunk = format!("{} {}", marker, chunk.trim_start());
+            } else {
+                *chunk = format!("{} {}", chunk.trim_end(), marker);
+            }
         }
     }
     if chunks.len() <= 1 {
@@ -1683,6 +1687,24 @@ fn split_suffix_bracket_tag(text: &str) -> (String, Option<String>) {
     (format!("{body}{trailing}"), Some(tag.to_ascii_lowercase()))
 }
 
+fn split_leading_bracket_tag(text: &str) -> (String, Option<String>) {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('[') {
+        return (text.to_string(), None);
+    }
+    let Some(end) = trimmed.find(']') else {
+        return (text.to_string(), None);
+    };
+    let tag = trimmed[1..end].trim();
+    if !is_style_tag_name(tag) {
+        return (text.to_string(), None);
+    }
+    (
+        trimmed[end + 1..].trim_start().to_string(),
+        Some(tag.to_ascii_lowercase()),
+    )
+}
+
 fn split_wrapped_angle_tag(text: &str) -> (String, Option<String>) {
     let trimmed = text.trim();
     if !trimmed.starts_with('<') {
@@ -1729,6 +1751,7 @@ fn split_leading_parenthetical_marker(text: &str) -> (String, Option<String>) {
 fn split_first_style_marker(text: &str) -> (String, Option<String>) {
     for splitter in [
         split_suffix_style_tag as fn(&str) -> (String, Option<String>),
+        split_leading_bracket_tag,
         split_suffix_bracket_tag,
         split_wrapped_angle_tag,
         split_leading_parenthetical_marker,
@@ -3074,14 +3097,14 @@ mod tests {
 
     #[test]
     fn bracket_style_tag_can_be_reapplied_after_chunking() {
-        let (body, tag) = split_suffix_bracket_tag("यह पहला वाक्य है। यह दूसरा वाक्य है। [excited]");
+        let (body, tag) = split_first_style_marker("[excited] यह पहला वाक्य है। यह दूसरा वाक्य है।");
         assert_eq!(tag.as_deref(), Some("excited"));
         let mut chunks = chunk_text_for_synthesis(&body, 4);
         for chunk in &mut chunks {
-            *chunk = format!("{} [{}]", chunk.trim_end(), tag.as_deref().unwrap());
+            *chunk = format!("[{}] {}", tag.as_deref().unwrap(), chunk.trim_start());
         }
         assert!(chunks.len() > 1);
-        assert!(chunks.iter().all(|chunk| chunk.ends_with("[excited]")));
+        assert!(chunks.iter().all(|chunk| chunk.starts_with("[excited]")));
     }
 
     #[test]
@@ -3106,6 +3129,10 @@ mod tests {
         let (body, marker) = normalize_synthesis_text(TtsEngine::FishAudio, "(whispering) hello");
         assert_eq!(body, "hello");
         assert_eq!(marker.as_deref(), Some("[whisper]"));
+
+        let (body, marker) = normalize_synthesis_text(TtsEngine::FishAudio, "[sad] hello");
+        assert_eq!(body, "hello");
+        assert_eq!(marker.as_deref(), Some("[sad]"));
     }
 
     #[test]
