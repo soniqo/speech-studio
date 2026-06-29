@@ -85,7 +85,7 @@ function ModelChip({
   const variant =
     status === "ready" ? "success" : status === "error" ? "destructive" : "muted";
   const readySuffix =
-    status === "ready" && lastLoadDurationSec != null
+    status === "ready" && lastLoadDurationSec != null && lastLoadDurationSec >= 1
       ? ` (${formatElapsed(lastLoadDurationSec)})`
       : "";
   const label =
