@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Mutex,
+};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
@@ -17,6 +20,9 @@ const SIDECAR_BIN: &str = "soniqo-tts-sidecar";
 const SIDECAR_BIN: &str = "speech-core-tts-sidecar.exe";
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 const SIDECAR_BIN: &str = "speech-core-tts-sidecar";
+
+const FISH_AUDIO_BUNDLE_DIR_ENV: &str = "SONIQO_FISH_AUDIO_BUNDLE_DIR";
+const FISH_AUDIO_BUNDLE_NAME: &str = "Fish-Audio-S2-Pro-MLX-fp16";
 
 fn sidecar_path() -> PathBuf {
     // In a Tauri release bundle the sidecar lives next to the main binary
@@ -65,6 +71,30 @@ fn sidecar_path() -> PathBuf {
     }
 }
 
+fn local_fish_audio_export_bundle() -> Option<PathBuf> {
+    if std::env::var_os(FISH_AUDIO_BUNDLE_DIR_ENV).is_some() {
+        return None;
+    }
+    let dir = dirs::cache_dir()?
+        .join("soniqo")
+        .join("hindi-emotion-tts-exports")
+        .join(FISH_AUDIO_BUNDLE_NAME);
+    let required = [
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "model.safetensors.index.json",
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+        "codec.safetensors",
+    ];
+    if required.iter().all(|file| dir.join(file).is_file()) {
+        Some(dir)
+    } else {
+        None
+    }
+}
+
 // MLX-Swift looks for `mlx.metallib` via `dladdr` on its own code — which in
 // our bundle resolves to the sidecar binary's directory (`Contents/MacOS/`).
 // Tauri's `resources` config places the file at `Contents/Resources/`, one
@@ -110,19 +140,63 @@ struct SidecarProcess {
 
 pub struct SidecarManager {
     inner: Mutex<Option<SidecarProcess>>,
+    child_pid: AtomicU32,
     // Bundled resource dir (Tauri ships libLiteRt here on Windows/Linux). Added
     // to the spawned sidecar's library search path so it can load libLiteRt in
     // an installed bundle, where the runtime lives apart from the binary.
     resource_dir: Option<PathBuf>,
+    app: tauri::AppHandle,
 }
 
 impl SidecarManager {
-    fn new(resource_dir: Option<PathBuf>) -> Self {
+    fn new(resource_dir: Option<PathBuf>, app: tauri::AppHandle) -> Self {
         Self {
             inner: Mutex::new(None),
+            child_pid: AtomicU32::new(0),
             resource_dir,
+            app,
         }
     }
+}
+
+#[derive(Serialize, Clone)]
+struct ModelProgressEvent {
+    progress: f64,
+    percent: f64,
+    message: String,
+}
+
+fn parse_sidecar_progress(line: &str) -> Option<ModelProgressEvent> {
+    let rest = line.split_once("[sidecar]")?.1.trim();
+    let percent_idx = rest.find('%')?;
+    let before_percent = &rest[..percent_idx];
+    let number_start = before_percent
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !(ch.is_ascii_digit() || *ch == '.'))
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .unwrap_or(0);
+    let percent_text = before_percent[number_start..].trim();
+    if percent_text.is_empty() {
+        return None;
+    }
+    let percent: f64 = percent_text.parse().ok()?;
+    if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+        return None;
+    }
+    let stage = before_percent[..number_start].trim();
+    let detail = rest[percent_idx + 1..].trim();
+    let message = match (stage.is_empty(), detail.is_empty()) {
+        (true, true) => "Loading model".to_string(),
+        (true, false) => detail.to_string(),
+        (false, true) => stage.to_string(),
+        (false, false) => format!("{stage}: {detail}"),
+    };
+    Some(ModelProgressEvent {
+        progress: percent / 100.0,
+        percent,
+        message,
+    })
 }
 
 // Directories the spawned sidecar must be able to load libLiteRt from: its own
@@ -156,11 +230,23 @@ impl Drop for SidecarManager {
                 let _ = proc.child.wait();
             }
         }
+        self.child_pid.store(0, Ordering::SeqCst);
     }
 }
 
 impl SidecarManager {
-    fn spawn(resource_dir: Option<&std::path::Path>) -> Result<SidecarProcess, String> {
+    fn interrupt(&self) -> Result<(), String> {
+        let pid = self.child_pid.swap(0, Ordering::SeqCst);
+        if pid == 0 {
+            return Ok(());
+        }
+        kill_process(pid)
+    }
+
+    fn spawn(
+        resource_dir: Option<&std::path::Path>,
+        app: &tauri::AppHandle,
+    ) -> Result<SidecarProcess, String> {
         let path = sidecar_path();
         #[cfg(target_os = "macos")]
         {
@@ -173,7 +259,14 @@ impl SidecarManager {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::piped());
+        if let Some(bundle) = local_fish_audio_export_bundle() {
+            eprintln!(
+                "[speech-studio] using local Fish Audio export bundle: {}",
+                bundle.display()
+            );
+            command.env(FISH_AUDIO_BUNDLE_DIR_ENV, bundle);
+        }
         // The sidecar is a console-subsystem binary. Spawning it from a GUI
         // (windows-subsystem) app would otherwise flash a console window on
         // every launch. CREATE_NO_WINDOW suppresses it; stdio is still piped,
@@ -209,6 +302,18 @@ impl SidecarManager {
             .map_err(|e| format!("spawn {} failed: {}", path.display(), e))?;
         let stdin = child.stdin.take().ok_or("sidecar stdin missing")?;
         let stdout = child.stdout.take().ok_or("sidecar stdout missing")?;
+        if let Some(stderr) = child.stderr.take() {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().map_while(Result::ok) {
+                    eprintln!("{line}");
+                    if let Some(event) = parse_sidecar_progress(&line) {
+                        let _ = app.emit("model_progress", event);
+                    }
+                }
+            });
+        }
         Ok(SidecarProcess {
             child,
             stdin,
@@ -225,24 +330,59 @@ impl SidecarManager {
             Some(p) => matches!(p.child.try_wait(), Ok(Some(_)) | Err(_)),
         };
         if needs_spawn {
-            *guard = Some(Self::spawn(self.resource_dir.as_deref())?);
+            if let Some(mut stale) = guard.take() {
+                let _ = stale.child.kill();
+                let _ = stale.child.wait();
+            }
+            let proc = Self::spawn(self.resource_dir.as_deref(), &self.app)?;
+            self.child_pid.store(proc.child.id(), Ordering::SeqCst);
+            *guard = Some(proc);
         }
 
-        let proc = guard.as_mut().expect("just spawned");
         let line = serde_json::to_string(payload).map_err(|e| e.to_string())?;
-        writeln!(proc.stdin, "{}", line).map_err(|e| e.to_string())?;
-        proc.stdin.flush().map_err(|e| e.to_string())?;
-
         let mut response = String::new();
-        proc.stdout
-            .read_line(&mut response)
-            .map_err(|e| e.to_string())?;
+        let read_result = {
+            let proc = guard.as_mut().expect("just spawned");
+            writeln!(proc.stdin, "{}", line).map_err(|e| e.to_string())?;
+            proc.stdin.flush().map_err(|e| e.to_string())?;
+            proc.stdout.read_line(&mut response)
+        };
+        if let Err(e) = read_result {
+            self.child_pid.store(0, Ordering::SeqCst);
+            if let Some(mut proc) = guard.take() {
+                let _ = proc.child.wait();
+            }
+            return Err(e.to_string());
+        }
         if response.trim().is_empty() {
+            self.child_pid.store(0, Ordering::SeqCst);
+            if let Some(mut proc) = guard.take() {
+                let _ = proc.child.wait();
+            }
             return Err("sidecar closed connection".into());
         }
         serde_json::from_str(&response)
             .map_err(|e| format!("parse sidecar response: {} (raw: {})", e, response.trim()))
     }
+}
+
+fn kill_process(pid: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    let status = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status()
+        .map_err(|e| format!("failed to interrupt sidecar process {pid}: {e}"))?;
+
+    #[cfg(not(windows))]
+    let status = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status()
+        .map_err(|e| format!("failed to interrupt sidecar process {pid}: {e}"))?;
+
+    if !status.success() {
+        eprintln!("[speech-studio] sidecar process {pid} was already gone or could not be killed");
+    }
+    Ok(())
 }
 
 // ---------- sidecar response envelope ----------
@@ -330,6 +470,21 @@ impl TtsEngine {
     }
 }
 
+fn normalize_sidecar_language(engine: TtsEngine, language: Option<&str>) -> Option<String> {
+    let trimmed = language.map(str::trim).filter(|value| !value.is_empty());
+    match engine {
+        // The UI keeps BCP-47-ish ids because Chatterbox expects `[hi]`, but
+        // OmniVoice gives cleaner Hindi output with the spelled language item.
+        TtsEngine::OmniVoice | TtsEngine::IndicMio => trimmed.map(|value| {
+            match value.to_ascii_lowercase().as_str() {
+                "hi" | "hin" => "hindi".to_string(),
+                _ => value.to_string(),
+            }
+        }),
+        _ => trimmed.map(str::to_string),
+    }
+}
+
 fn engine_is_supported(engine: TtsEngine) -> bool {
     match engine {
         TtsEngine::VoxCPM2 => true,
@@ -350,6 +505,30 @@ fn ensure_engine_supported(engine: TtsEngine) -> Result<(), String> {
         "{} is currently available only on macOS (Apple Silicon)",
         engine.display_name()
     ))
+}
+
+fn humanize_sidecar_error(engine: TtsEngine, error: String) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("failedtodownload")
+        || lower.contains("failed to download")
+        || lower.contains("invalid username or password")
+        || lower.contains("file not found: main")
+    {
+        let access_hint = if lower.contains("invalid username or password")
+            || lower.contains("file not found: main")
+        {
+            " The Hugging Face repo may be private, gated, or unavailable to this app without credentials."
+        } else {
+            ""
+        };
+        return format!(
+            "Could not download {} model.{} Original error: {}",
+            engine.display_name(),
+            access_hint,
+            error
+        );
+    }
+    error
 }
 
 #[derive(Serialize)]
@@ -415,9 +594,15 @@ async fn init_model(manager: State<'_, SidecarManager>, args: InitModelArgs) -> 
     let raw = manager.request(&payload)?;
     let env: SidecarResponse = serde_json::from_value(raw).map_err(|e| e.to_string())?;
     if !env.ok {
-        return Err(env.error.unwrap_or_else(|| "init_model failed".into()));
+        let error = env.error.unwrap_or_else(|| "init_model failed".into());
+        return Err(humanize_sidecar_error(args.engine, error));
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn interrupt_model_load(manager: State<'_, SidecarManager>) -> Result<(), String> {
+    manager.interrupt()
 }
 
 #[derive(Serialize)]
@@ -475,6 +660,159 @@ async fn pick_audio(app: tauri::AppHandle) -> Result<Option<PickedAudio>, String
     }))
 }
 
+fn reference_cache_dir() -> PathBuf {
+    let dir = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("audio.soniqo.studio")
+        .join("references");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn sanitize_filename_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len().min(80));
+    for ch in input.chars().take(80) {
+        if ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() {
+        "reference".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn reference_access_error(action: &str, path: &Path, err: &std::io::Error) -> String {
+    let hint = match err.kind() {
+        std::io::ErrorKind::PermissionDenied => {
+            "Speech Studio does not have permission to read this file. Copy or export it to a normal local folder, then add it again."
+        }
+        std::io::ErrorKind::NotFound => {
+            "The file is no longer at that path. Re-add the reference from its current location."
+        }
+        _ => {
+            "Copy or export the reference audio to a normal local folder, then add it again."
+        }
+    };
+    format!(
+        "Cannot {action} reference audio \"{}\": {err}. {hint}",
+        path.display()
+    )
+}
+
+fn ensure_readable_reference(path: &Path) -> Result<(), String> {
+    let f = std::fs::File::open(path).map_err(|e| reference_access_error("read", path, &e))?;
+    let meta = f
+        .metadata()
+        .map_err(|e| reference_access_error("inspect", path, &e))?;
+    if !meta.is_file() {
+        return Err(format!(
+            "Reference audio \"{}\" is not a file",
+            path.display()
+        ));
+    }
+    if meta.len() == 0 {
+        return Err(format!("Reference audio \"{}\" is empty", path.display()));
+    }
+    Ok(())
+}
+
+fn import_reference_audio_path(source: &str) -> Result<PathBuf, String> {
+    let source_path = PathBuf::from(source);
+    if source_path.as_os_str().is_empty() {
+        return Err("reference audio path is empty".into());
+    }
+
+    let cache_dir = reference_cache_dir();
+    if source_path.starts_with(&cache_dir) {
+        ensure_readable_reference(&source_path)?;
+        return Ok(source_path);
+    }
+
+    let mut input = std::fs::File::open(&source_path)
+        .map_err(|e| reference_access_error("read", &source_path, &e))?;
+    let meta = input
+        .metadata()
+        .map_err(|e| reference_access_error("inspect", &source_path, &e))?;
+    if !meta.is_file() {
+        return Err(format!(
+            "Reference audio \"{}\" is not a file",
+            source_path.display()
+        ));
+    }
+    if meta.len() == 0 {
+        return Err(format!(
+            "Reference audio \"{}\" is empty",
+            source_path.display()
+        ));
+    }
+
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("create reference cache {}: {e}", cache_dir.display()))?;
+    let stem = source_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(sanitize_filename_component)
+        .unwrap_or_else(|| "reference".to_string());
+    let ext = source_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(sanitize_filename_component)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "audio".to_string());
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let stable_key = format!(
+        "{}:{}:{}",
+        source_path.to_string_lossy(),
+        meta.len(),
+        modified
+    );
+    let dest = cache_dir.join(format!("{}-{:08x}.{}", stem, short_hash(&stable_key), ext));
+    if dest.exists() {
+        ensure_readable_reference(&dest)?;
+        return Ok(dest);
+    }
+    let mut output = std::fs::File::create(&dest)
+        .map_err(|e| format!("create imported reference {}: {e}", dest.display()))?;
+    std::io::copy(&mut input, &mut output).map_err(|e| {
+        format!(
+            "copy reference audio \"{}\" to \"{}\": {e}",
+            source_path.display(),
+            dest.display()
+        )
+    })?;
+    Ok(dest)
+}
+
+#[derive(Deserialize)]
+struct ImportReferenceAudioArgs {
+    path: String,
+}
+
+#[derive(Serialize)]
+struct ImportedReferenceAudio {
+    path: String,
+}
+
+#[tauri::command]
+async fn import_reference_audio(
+    args: ImportReferenceAudioArgs,
+) -> Result<ImportedReferenceAudio, String> {
+    let imported = import_reference_audio_path(&args.path)?;
+    Ok(ImportedReferenceAudio {
+        path: imported.to_string_lossy().into_owned(),
+    })
+}
+
 #[derive(Deserialize)]
 struct ProbeReferenceArgs {
     path: String,
@@ -501,6 +839,7 @@ async fn probe_reference(
     manager: State<'_, SidecarManager>,
     args: ProbeReferenceArgs,
 ) -> Result<Option<ReferenceProbe>, String> {
+    ensure_readable_reference(Path::new(&args.path))?;
     let payload = serde_json::json!({
         "id": format!("probe-{}", uuid::Uuid::new_v4().simple()),
         "command": "probe_reference",
@@ -572,6 +911,7 @@ struct Voice {
 
 #[tauri::command]
 async fn clone_voice(args: CloneVoiceArgs) -> Result<Voice, String> {
+    let reference_path = import_reference_audio_path(&args.reference_path)?;
     // Qwen3-TTS is pure ICL: there's no separate "clone" step. A Voice is
     // metadata pointing at a reference clip + transcript that synthesis pulls
     // in at every call. No sidecar round-trip needed here.
@@ -579,7 +919,7 @@ async fn clone_voice(args: CloneVoiceArgs) -> Result<Voice, String> {
         id: uuid::Uuid::new_v4().to_string(),
         name: args.name,
         source_kind: "library",
-        reference_audio_path: args.reference_path,
+        reference_audio_path: reference_path.to_string_lossy().into_owned(),
         reference_text: args.reference_text,
         created_at: chrono::Utc::now().to_rfc3339(),
         reference_duration_sec: args.reference_duration_sec,
@@ -614,6 +954,10 @@ struct SynthesizeResult {
     /// clip's timeline slot to this (generation is always "dynamic").
     #[serde(rename = "durationSec")]
     duration_sec: f64,
+    /// Wall-clock time spent in synthesis, including model warmup/download if
+    /// the selected engine was not loaded yet.
+    #[serde(rename = "elapsedSec")]
+    elapsed_sec: f64,
 }
 
 /// How ASR-graded retry runs on this platform. macOS shells out to the
@@ -793,6 +1137,7 @@ fn synth_one_line(
     let target_is_non_latin = grade_target
         .chars()
         .any(|c| !c.is_ascii() && c.is_alphabetic());
+    let sidecar_language = normalize_sidecar_language(engine, language);
 
     let mut best: Option<(String, Grade, u64, f64)> = None;
     let mut last_error: Option<String> = None;
@@ -807,7 +1152,7 @@ fn synth_one_line(
             "voiceId": voice_id,
             "referenceAudioPath": reference_audio_path,
             "referenceText": reference_text,
-            "language": language,
+            "language": sidecar_language.as_deref(),
             "seed": seed,
             "cfgValue": cfg,
             "maxTokens": max_tokens,
@@ -831,7 +1176,10 @@ fn synth_one_line(
             }
         };
         if !env.ok {
-            last_error = Some(env.error.unwrap_or_else(|| "sidecar error".into()));
+            last_error = Some(humanize_sidecar_error(
+                engine,
+                env.error.unwrap_or_else(|| "sidecar error".into()),
+            ));
             eprintln!(
                 "[synth] clip {} part {} attempt {} (seed={}) failed: {}",
                 clip_id,
@@ -851,6 +1199,18 @@ fn synth_one_line(
             .get("durationSec")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
+        if let Err(e) = validate_synth_audio(&audio_path) {
+            last_error = Some(format!("attempt {} (seed={}): {}", attempt_idx, seed, e));
+            eprintln!(
+                "[synth] clip {} part {} attempt {} (seed={}) rejected: {}",
+                clip_id,
+                part_idx,
+                attempt_idx,
+                seed,
+                last_error.as_ref().unwrap()
+            );
+            continue;
+        }
 
         // No ASR grader on this platform — accept the first successful take
         // rather than burning the whole seed ladder (each take is a full synth).
@@ -1038,6 +1398,32 @@ fn voiced_rms(samples: &[f32], rate: u32) -> f64 {
     (acc / n as f64).sqrt()
 }
 
+fn audio_rms_peak(samples: &[f32]) -> (f64, f64) {
+    if samples.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut energy = 0.0f64;
+    let mut peak = 0.0f64;
+    for sample in samples {
+        let s = *sample as f64;
+        energy += s * s;
+        peak = peak.max(s.abs());
+    }
+    ((energy / samples.len() as f64).sqrt(), peak)
+}
+
+fn validate_synth_audio(path: &str) -> Result<(), String> {
+    let (_rate, _channels, samples) = read_wav_pcm_mono(std::path::Path::new(path))?;
+    let (rms, peak) = audio_rms_peak(&samples);
+    if samples.is_empty() || rms < 0.0005 || peak < 0.006 {
+        return Err(format!(
+            "rendered audio is effectively silent (rms={:.6}, peak={:.6})",
+            rms, peak
+        ));
+    }
+    Ok(())
+}
+
 /// Scale each rendered chunk to the median voiced RMS of the set. VoxCPM2's
 /// output level wanders between independent AR runs — measured ~8 dB sag from
 /// the first to the last chunk of a 3-chunk Hindi render, heard as "quality
@@ -1077,6 +1463,7 @@ async fn synthesize_clip(
     manager: State<'_, SidecarManager>,
     args: SynthesizeArgs,
 ) -> Result<SynthesizeResult, String> {
+    let synth_started = std::time::Instant::now();
     ensure_engine_supported(args.engine)?;
     if args.text.trim().is_empty() {
         return Err("clip text is empty".into());
@@ -1090,6 +1477,9 @@ async fn synthesize_clip(
             args.engine.display_name()
         ));
     }
+    let reference_audio_path = import_reference_audio_path(&args.reference_audio_path)?
+        .to_string_lossy()
+        .into_owned();
 
     // Period→comma preprocessing was a CosyVoice-specific workaround for its
     // EOS attractor on inline periods. VoxCPM2 doesn't share that quirk, but
@@ -1127,7 +1517,7 @@ async fn synthesize_clip(
             args.engine,
             &args.clip_id,
             &args.voice_id,
-            &args.reference_audio_path,
+            &reference_audio_path,
             &args.reference_text,
             single_text,
             args.language.as_deref(),
@@ -1137,6 +1527,7 @@ async fn synthesize_clip(
         return Ok(SynthesizeResult {
             audio_path,
             duration_sec,
+            elapsed_sec: synth_started.elapsed().as_secs_f64(),
         });
     }
 
@@ -1155,7 +1546,7 @@ async fn synthesize_clip(
             args.engine,
             &args.clip_id,
             &args.voice_id,
-            &args.reference_audio_path,
+            &reference_audio_path,
             &args.reference_text,
             chunk,
             args.language.as_deref(),
@@ -1203,14 +1594,16 @@ async fn synthesize_clip(
     write_wav_pcm16_mono(&out_path, rate, &combined)?;
     let duration_sec = combined.len() as f64 / rate as f64;
     eprintln!(
-        "[synth] clip {} long-form done: {:.2}s across {} chunks",
+        "[synth] clip {} long-form done: {:.2}s audio across {} chunks in {:.2}s wall",
         args.clip_id,
         duration_sec,
-        chunks.len()
+        chunks.len(),
+        synth_started.elapsed().as_secs_f64()
     );
     Ok(SynthesizeResult {
         audio_path: out_path.to_string_lossy().into_owned(),
         duration_sec,
+        elapsed_sec: synth_started.elapsed().as_secs_f64(),
     })
 }
 
@@ -1351,9 +1744,7 @@ fn split_first_style_marker(text: &str) -> (String, Option<String>) {
 fn map_indic_mio_marker(tag: &str) -> Option<&'static str> {
     let normalized = tag.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "happy" | "excited" | "warm" | "soft" | "calm" | "laughs" | "laughing" => {
-            Some("happy")
-        }
+        "happy" | "excited" | "warm" | "soft" | "calm" | "laughs" | "laughing" => Some("happy"),
         "sad" => Some("sad"),
         "angry" | "intense" | "dramatic" => Some("angry"),
         "disgust" | "disgusted" => Some("disgust"),
@@ -2433,15 +2824,17 @@ pub fn run() {
             // libLiteRt on Windows/Linux). None in some dev layouts — that's
             // fine, the sidecar's own dir covers dev.
             let resource_dir = app.path().resource_dir().ok();
-            app.manage(SidecarManager::new(resource_dir));
+            app.manage(SidecarManager::new(resource_dir, app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             ping_sidecar,
             available_tts_engines,
             init_model,
+            interrupt_model_load,
             pick_video,
             pick_audio,
+            import_reference_audio,
             probe_reference,
             clone_voice,
             synthesize_clip,
@@ -2488,6 +2881,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_sidecar_model_progress_lines() {
+        let ev = parse_sidecar_progress("[sidecar] fish-audio  42% Downloading weights")
+            .expect("progress event");
+        assert_eq!(ev.percent, 42.0);
+        assert!((ev.progress - 0.42).abs() < f64::EPSILON);
+        assert_eq!(ev.message, "fish-audio: Downloading weights");
+
+        let ev = parse_sidecar_progress(
+            "[sidecar] fish-audio 0.7% Downloading Fish Audio S2 Pro 72 MB / 10225 MB",
+        )
+        .expect("decimal progress event");
+        assert_eq!(ev.percent, 0.7);
+        assert!((ev.progress - 0.007).abs() < f64::EPSILON);
+        assert_eq!(
+            ev.message,
+            "fish-audio: Downloading Fish Audio S2 Pro 72 MB / 10225 MB"
+        );
+    }
+
+    #[test]
+    fn ignores_non_progress_sidecar_lines() {
+        assert!(parse_sidecar_progress("[sidecar] loading Fish Audio model").is_none());
+        assert!(parse_sidecar_progress("fish-audio 42% Downloading").is_none());
+        assert!(parse_sidecar_progress("[sidecar] fish-audio 120% nope").is_none());
+    }
+
+    #[test]
     fn cosyvoice_requires_reference_transcript() {
         assert!(TtsEngine::CosyVoice.requires_reference_transcript());
         assert!(TtsEngine::FishAudio.requires_reference_transcript());
@@ -2509,6 +2929,45 @@ mod tests {
         assert_eq!(TtsEngine::IndicMio.style_mode(), "suffix-tag");
         assert_eq!(TtsEngine::FishAudio.style_mode(), "bracket-tag");
         assert_eq!(TtsEngine::Qwen3.style_mode(), "none");
+    }
+
+    #[test]
+    fn sidecar_language_normalization_preserves_chatterbox_hi() {
+        assert_eq!(
+            normalize_sidecar_language(TtsEngine::Chatterbox, Some("hi")).as_deref(),
+            Some("hi")
+        );
+        assert_eq!(
+            normalize_sidecar_language(TtsEngine::OmniVoice, Some("hi")).as_deref(),
+            Some("hindi")
+        );
+        assert_eq!(
+            normalize_sidecar_language(TtsEngine::IndicMio, Some("hin")).as_deref(),
+            Some("hindi")
+        );
+    }
+
+    #[test]
+    fn audio_rms_peak_detects_silent_render() {
+        let silent = vec![0.0001f32; 1000];
+        let voiced = vec![0.02f32, -0.02, 0.01, -0.01];
+        let (silent_rms, silent_peak) = audio_rms_peak(&silent);
+        let (voiced_rms, voiced_peak) = audio_rms_peak(&voiced);
+        assert!(silent_rms < 0.0005);
+        assert!(silent_peak < 0.006);
+        assert!(voiced_rms > 0.0005);
+        assert!(voiced_peak > 0.006);
+    }
+
+    #[test]
+    fn download_errors_include_model_access_hint() {
+        let message = humanize_sidecar_error(
+            TtsEngine::FishAudio,
+            "failedToDownload(\"aufklarer/Fish-Audio-S2-Pro-MLX-fp16: File not found: main\")"
+                .to_string(),
+        );
+        assert!(message.contains("Could not download Fish Audio S2 Pro model"));
+        assert!(message.contains("private, gated, or unavailable"));
     }
 
     #[test]
@@ -2637,8 +3096,7 @@ mod tests {
         assert_eq!(body, "नमस्ते आज मौसम अच्छा है।");
         assert_eq!(marker.as_deref(), Some("<angry>"));
 
-        let (body, marker) =
-            normalize_synthesis_text(TtsEngine::IndicMio, "(whispering) नमस्ते");
+        let (body, marker) = normalize_synthesis_text(TtsEngine::IndicMio, "(whispering) नमस्ते");
         assert_eq!(body, "नमस्ते");
         assert_eq!(marker, None);
     }

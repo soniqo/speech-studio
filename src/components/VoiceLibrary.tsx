@@ -2,7 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { Plus, Pause, Play, AudioLines, TriangleAlert, Trash2 } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useProjectStore } from "../state/projectStore";
-import { cloneVoice, pickAudio, probeReference, type ReferenceProbe } from "../ipc/commands";
+import {
+  cloneVoice,
+  importReferenceAudio,
+  pickAudio,
+  probeReference,
+  type ReferenceProbe,
+} from "../ipc/commands";
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
 
@@ -32,6 +38,7 @@ export function VoiceLibrary() {
     name: string;
     probe: ReferenceProbe;
   } | null>(null);
+  const [referenceError, setReferenceError] = useState<string | null>(null);
 
   async function createVoice(path: string, name: string, probe: ReferenceProbe | null) {
     const voice = await cloneVoice({
@@ -47,10 +54,12 @@ export function VoiceLibrary() {
   }
 
   async function addByReference() {
+    setReferenceError(null);
     try {
       const picked = await pickAudio();
       if (!picked) return;
       const name = picked.path.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "Voice";
+      const imported = await importReferenceAudio(picked.path);
 
       // Measure the clip before accepting it as a voice. A nearly-silent
       // reference clones inaudibly (the engine tracks reference amplitude);
@@ -59,19 +68,21 @@ export function VoiceLibrary() {
       // sidecar has no probe support; skip validation in that case.
       let probe: ReferenceProbe | null = null;
       try {
-        probe = await probeReference(picked.path);
+        probe = await probeReference(imported.path);
       } catch (e) {
         // Decode failure: the file can't work as a reference at all.
         console.error("probe_reference failed", e);
+        setReferenceError(`Reference audio cannot be decoded: ${e}`);
         return;
       }
       if (probe && probe.rms < NEAR_SILENT_RMS) {
-        setPendingQuietRef({ path: picked.path, name, probe });
+        setPendingQuietRef({ path: imported.path, name, probe });
         return; // resolved by the confirm dialog below
       }
-      await createVoice(picked.path, name, probe);
+      await createVoice(imported.path, name, probe);
     } catch (e) {
       console.error("clone_voice failed", e);
+      setReferenceError(String(e));
     }
   }
 
@@ -95,6 +106,11 @@ export function VoiceLibrary() {
       {voices.length === 0 && (
         <div className="rounded-md border border-dashed border-border/60 bg-background/40 px-3 py-3 text-xs text-muted-foreground">
           No cloned voices yet. Add a short reference clip to start.
+        </div>
+      )}
+      {referenceError && (
+        <div className="mb-2 rounded-md border border-destructive/40 bg-destructive/10 px-2.5 py-2 text-xs text-destructive">
+          {referenceError}
         </div>
       )}
       <div className="space-y-1.5">
@@ -136,9 +152,10 @@ export function VoiceLibrary() {
                 onClick={() => {
                   const p = pendingQuietRef;
                   setPendingQuietRef(null);
-                  void createVoice(p.path, p.name, p.probe).catch((e) =>
-                    console.error("clone_voice failed", e),
-                  );
+                  void createVoice(p.path, p.name, p.probe).catch((e) => {
+                    console.error("clone_voice failed", e);
+                    setReferenceError(String(e));
+                  });
                 }}
               >
                 Use anyway
@@ -223,13 +240,21 @@ function VoiceCard({
     a.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
   }
 
+  function onCardKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    onSelect();
+  }
+
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onSelect}
+      onKeyDown={onCardKeyDown}
       data-voice-id={voiceId}
       className={cn(
-        "flex w-full items-center gap-2.5 rounded-md border px-2 py-2 text-left transition-colors",
+        "flex w-full cursor-pointer items-center gap-2.5 rounded-md border px-2 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         selected
           ? "border-primary/40 bg-primary/10"
           : "border-border/60 bg-background/40 hover:border-border hover:bg-accent/30",
@@ -289,6 +314,6 @@ function VoiceCard({
       >
         <Trash2 className="h-3.5 w-3.5" />
       </Button>
-    </button>
+    </div>
   );
 }

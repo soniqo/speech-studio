@@ -1,24 +1,40 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { AppShell } from "./components/AppShell";
-import { availableTtsEngines, initModel } from "./ipc/commands";
+import { availableTtsEngines, initModel, type TtsEngineId } from "./ipc/commands";
 import { useProjectStore } from "./state/projectStore";
 import "./index.css";
 
+interface ModelProgressEvent {
+  progress: number;
+  percent: number;
+  message: string;
+}
+
 export default function App() {
   const setModelStatus = useProjectStore((s) => s.setModelStatus);
+  const setModelProgress = useProjectStore((s) => s.setModelProgress);
   const setAvailableTtsEngines = useProjectStore((s) => s.setAvailableTtsEngines);
   const setTtsEngine = useProjectStore((s) => s.setTtsEngine);
-  const firedRef = useRef(false);
 
   useEffect(() => {
-    // React 19 strict-mode runs effects twice in dev; guard so init_model
-    // is only fired once per mount. Load happens in the background; the UI
-    // is fully interactive while the model warms up.
-    if (firedRef.current) return;
-    firedRef.current = true;
-    setModelStatus("loading");
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    let requestedEngine: TtsEngineId = useProjectStore.getState().model.engine;
     void (async () => {
       try {
+        const stopListening = await listen<ModelProgressEvent>("model_progress", (event) => {
+          setModelProgress(event.payload);
+        });
+        if (cancelled) {
+          stopListening();
+          return;
+        }
+        unlisten = stopListening;
+
+        // Register the progress listener before init_model so first-run
+        // download events are not missed.
+        setModelStatus("loading");
         const engines = await availableTtsEngines();
         setAvailableTtsEngines(engines);
         let engine = useProjectStore.getState().model.engine;
@@ -26,13 +42,23 @@ export default function App() {
           engine = engines[0]?.id ?? "voxcpm2";
           setTtsEngine(engine);
         }
+        requestedEngine = engine;
         await initModel(engine);
-        setModelStatus("ready");
+        if (!cancelled && useProjectStore.getState().model.engine === engine) {
+          setModelStatus("ready");
+        }
       } catch (e) {
-        setModelStatus("error", String(e));
+        if (!cancelled && useProjectStore.getState().model.engine === requestedEngine) {
+          setModelStatus("error", String(e));
+        }
       }
     })();
-  }, [setAvailableTtsEngines, setModelStatus, setTtsEngine]);
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [setAvailableTtsEngines, setModelProgress, setModelStatus, setTtsEngine]);
 
   return <AppShell />;
 }

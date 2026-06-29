@@ -1,18 +1,39 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { AlertCircle, ArrowDownToLine, Loader2 } from "lucide-react";
-import { useProjectStore, type ModelStatus } from "../state/projectStore";
+import { useProjectStore, type ModelLoadProgress, type ModelStatus } from "../state/projectStore";
 import { DevPing } from "./DevPing";
 import { ProjectsMenu } from "./ProjectsMenu";
 import { useSynthesizeAll, useUnsynthesizedCount } from "../hooks/useSynthesizeAll";
 import { useUpdater } from "../hooks/useUpdater";
-import { exportProject, initModel, type ExportClip, type TtsEngineId } from "../ipc/commands";
+import { exportProject, initModel, interruptModelLoad, type ExportClip, type TtsEngineId } from "../ipc/commands";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Badge } from "./ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { cn } from "@/lib/utils";
 import { clipAudioPath } from "../lib/clipAudio";
+import { clampPercent, formatPercent } from "../lib/formatPercent";
+
+function formatElapsed(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0s";
+  const whole = Math.floor(seconds);
+  if (whole < 60) return `${whole}s`;
+  const minutes = Math.floor(whole / 60);
+  const rest = whole % 60;
+  return `${minutes}m ${rest.toString().padStart(2, "0")}s`;
+}
+
+function useElapsedSeconds(startedAt?: number): number | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!startedAt) return;
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [startedAt]);
+  return startedAt ? Math.max(0, (now - startedAt) / 1000) : null;
+}
 
 /** Quiet until an update exists; one click downloads + relaunches. */
 function UpdateChip() {
@@ -52,23 +73,55 @@ function ModelChip({
   status,
   error,
   engineName,
+  lastLoadDurationSec,
+  progress,
 }: {
   status: ModelStatus;
   error?: string;
   engineName: string;
+  lastLoadDurationSec?: number;
+  progress?: ModelLoadProgress;
 }) {
   const variant =
     status === "ready" ? "success" : status === "error" ? "destructive" : "muted";
+  const readySuffix =
+    status === "ready" && lastLoadDurationSec != null
+      ? ` (${formatElapsed(lastLoadDurationSec)})`
+      : "";
   const label =
     status === "ready"
-      ? `${engineName} ready`
+      ? `${engineName} ready${readySuffix}`
       : status === "loading"
-        ? `${engineName} loading…`
+        ? progress
+          ? `${engineName} ${formatPercent(progress.percent)}`
+          : `${engineName} loading…`
         : status === "error"
           ? `${engineName} error`
           : `${engineName} idle`;
+  const title =
+    error ??
+    (status === "loading"
+      ? progress
+        ? `${progress.message} — ${formatPercent(progress.percent)}.`
+        : `Loading ${engineName}. First run may download several GB.`
+      : `Model status: ${status}`);
   return (
-    <Badge variant={variant} title={error ?? `Model status: ${status}`}>
+    <Badge
+      variant={variant}
+      title={title}
+      className={cn("relative overflow-hidden", status === "loading" && "pr-2.5")}
+    >
+      {status === "loading" && (
+        <span className="absolute inset-x-0 bottom-0 h-0.5 overflow-hidden bg-muted-foreground/15">
+          <span
+            className={cn(
+              "absolute bottom-0 left-0 h-full bg-muted-foreground/60",
+              !progress && "w-1/2 animate-pulse",
+            )}
+            style={progress ? { width: `${clampPercent(progress.percent)}%` } : undefined}
+          />
+        </span>
+      )}
       <span
         className={cn(
           "h-1.5 w-1.5 rounded-full",
@@ -110,14 +163,18 @@ export function TopBar() {
   const [actionError, setActionError] = useState<string | null>(null);
 
   const synthBusy = synthesisStatus === "running";
+  const synthElapsed = useElapsedSeconds(
+    synthBusy ? synthesisProgress?.startedAt : undefined,
+  );
   const modelStatus = model.status;
   const engineInfo = model.engines.find((candidate) => candidate.id === model.engine);
   const engineName = engineInfo?.displayName ?? "VoxCPM2";
   const synthDisabled = synthBusy || modelStatus !== "ready" || !hasContent;
+  const engineSwitchDisabled = synthBusy;
   const synthMode: "missing" | "all" = missingCount > 0 ? "missing" : "all";
   const synthLabel = synthBusy
     ? synthesisProgress
-      ? `Synth ${synthesisProgress.current}/${synthesisProgress.total} — ${synthesisProgress.label}`
+      ? `Synth ${synthesisProgress.current}/${synthesisProgress.total} ${synthElapsed == null ? "" : formatElapsed(synthElapsed)} — ${synthesisProgress.label}`
       : "Synthesizing…"
     : missingCount > 0
       ? `Synthesize (${missingCount})`
@@ -143,13 +200,21 @@ export function TopBar() {
   async function onEngineChange(next: TtsEngineId) {
     if (next === model.engine || synthBusy) return;
     setActionError(null);
+    const wasLoading = useProjectStore.getState().model.status === "loading";
     setTtsEngine(next);
     setModelStatus("loading");
     try {
+      if (wasLoading) {
+        await interruptModelLoad();
+      }
       await initModel(next);
-      setModelStatus("ready");
+      if (useProjectStore.getState().model.engine === next) {
+        setModelStatus("ready");
+      }
     } catch (e) {
-      setModelStatus("error", String(e));
+      if (useProjectStore.getState().model.engine === next) {
+        setModelStatus("error", String(e));
+      }
     }
   }
 
@@ -220,11 +285,15 @@ export function TopBar() {
           <Select
             value={model.engine}
             onValueChange={(value) => void onEngineChange(value as TtsEngineId)}
-            disabled={modelStatus === "loading" || synthBusy}
+            disabled={engineSwitchDisabled}
           >
             <SelectTrigger
               className="h-7 w-[158px] text-xs"
-              title="Switches the loaded voice-cloning engine"
+              title={
+                modelStatus === "loading"
+                  ? `Switch engine and interrupt ${engineName} loading`
+                  : "Switches the loaded voice-cloning engine"
+              }
             >
               <SelectValue />
             </SelectTrigger>
@@ -245,7 +314,7 @@ export function TopBar() {
           >
             <SelectTrigger
               className="h-7 w-[120px] text-xs"
-              title="Synthesis language — Chatterbox prepends this as its language token"
+              title="Synthesis language for multilingual engines"
             >
               <SelectValue />
             </SelectTrigger>
@@ -258,7 +327,13 @@ export function TopBar() {
             </SelectContent>
           </Select>
         )}
-        <ModelChip status={modelStatus} error={model.error} engineName={engineName} />
+        <ModelChip
+          status={modelStatus}
+          error={model.error}
+          engineName={engineName}
+          lastLoadDurationSec={model.lastLoadDurationSec}
+          progress={model.progress}
+        />
         <DevPing />
         <ProjectsMenu />
         {actionError && (
