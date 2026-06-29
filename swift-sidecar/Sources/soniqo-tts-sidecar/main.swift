@@ -441,25 +441,6 @@ final class IndicMioHolder: @unchecked Sendable {
     private var loadedModelId: String?
 
     func load(modelId requestedId: String? = nil) async throws -> IndicMioTTSModel {
-        if requestedId == nil,
-           let bundlePath = ProcessInfo.processInfo.environment["SONIQO_INDIC_MIO_BUNDLE_DIR"],
-           !bundlePath.isEmpty {
-            let cacheKey = "bundle:\(bundlePath)"
-            if let m = model, loadedModelId == cacheKey { return m }
-            if model != nil { unload() }
-            logErr("[sidecar] loading Indic-Mio bundle \(bundlePath)…")
-            let m = try await IndicMioTTSModel.fromBundle(
-                URL(fileURLWithPath: bundlePath, isDirectory: true),
-                progressHandler: { progress, message in
-                    logErr(String(format: "[sidecar] indic-mio %3d%% %@", Int(progress * 100), message))
-                }
-            )
-            model = m
-            loadedModelId = cacheKey
-            logErr("[sidecar] indic-mio ready")
-            return m
-        }
-
         let modelId = requestedId
             ?? ProcessInfo.processInfo.environment["SONIQO_INDIC_MIO_MODEL_ID"]
             ?? IndicMioTTSModel.defaultModelId
@@ -496,25 +477,6 @@ final class FishAudioHolder: @unchecked Sendable {
     private var loadedModelId: String?
 
     func load(modelId requestedId: String? = nil) async throws -> FishAudioTTSModel {
-        if requestedId == nil,
-           let bundlePath = ProcessInfo.processInfo.environment["SONIQO_FISH_AUDIO_BUNDLE_DIR"],
-           !bundlePath.isEmpty {
-            let cacheKey = "bundle:\(bundlePath)"
-            if let m = model, loadedModelId == cacheKey { return m }
-            if model != nil { unload() }
-            logErr("[sidecar] loading Fish Audio bundle \(bundlePath)…")
-            let m = try await FishAudioTTSModel.fromBundle(
-                URL(fileURLWithPath: bundlePath, isDirectory: true),
-                progressHandler: { progress, message in
-                    logProgress("fish-audio", progress, message)
-                }
-            )
-            model = m
-            loadedModelId = cacheKey
-            logErr("[sidecar] fish-audio ready")
-            return m
-        }
-
         let modelId = requestedId
             ?? ProcessInfo.processInfo.environment["SONIQO_FISH_AUDIO_MODEL_ID"]
             ?? FishAudioTTSModel.defaultModelId

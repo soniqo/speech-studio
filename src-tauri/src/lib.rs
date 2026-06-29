@@ -21,9 +21,6 @@ const SIDECAR_BIN: &str = "speech-core-tts-sidecar.exe";
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 const SIDECAR_BIN: &str = "speech-core-tts-sidecar";
 
-const FISH_AUDIO_BUNDLE_DIR_ENV: &str = "SONIQO_FISH_AUDIO_BUNDLE_DIR";
-const FISH_AUDIO_BUNDLE_NAME: &str = "Fish-Audio-S2-Pro-MLX-fp16";
-
 fn sidecar_path() -> PathBuf {
     // In a Tauri release bundle the sidecar lives next to the main binary
     // (e.g. `<App>.app/Contents/MacOS/` on macOS, alongside the .exe on
@@ -68,30 +65,6 @@ fn sidecar_path() -> PathBuf {
             .join("core-sidecar")
             .join("build")
             .join(SIDECAR_BIN)
-    }
-}
-
-fn local_fish_audio_export_bundle() -> Option<PathBuf> {
-    if std::env::var_os(FISH_AUDIO_BUNDLE_DIR_ENV).is_some() {
-        return None;
-    }
-    let dir = dirs::cache_dir()?
-        .join("soniqo")
-        .join("hindi-emotion-tts-exports")
-        .join(FISH_AUDIO_BUNDLE_NAME);
-    let required = [
-        "config.json",
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "model.safetensors.index.json",
-        "model-00001-of-00002.safetensors",
-        "model-00002-of-00002.safetensors",
-        "codec.safetensors",
-    ];
-    if required.iter().all(|file| dir.join(file).is_file()) {
-        Some(dir)
-    } else {
-        None
     }
 }
 
@@ -260,13 +233,6 @@ impl SidecarManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(bundle) = local_fish_audio_export_bundle() {
-            eprintln!(
-                "[speech-studio] using local Fish Audio export bundle: {}",
-                bundle.display()
-            );
-            command.env(FISH_AUDIO_BUNDLE_DIR_ENV, bundle);
-        }
         // The sidecar is a console-subsystem binary. Spawning it from a GUI
         // (windows-subsystem) app would otherwise flash a console window on
         // every launch. CREATE_NO_WINDOW suppresses it; stdio is still piped,
