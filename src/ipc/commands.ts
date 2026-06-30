@@ -46,6 +46,10 @@ export function initModel(engine: TtsEngineId): Promise<void> {
   return invoke<void>("init_model", { args: { engine } });
 }
 
+export function interruptModelLoad(): Promise<void> {
+  return invoke<void>("interrupt_model_load");
+}
+
 export interface PickedVideo {
   path: string;
   durationSec: number;
@@ -61,6 +65,14 @@ export interface PickedAudio {
 
 export function pickAudio(): Promise<PickedAudio | null> {
   return invoke<PickedAudio | null>("pick_audio");
+}
+
+export interface ImportedReferenceAudio {
+  path: string;
+}
+
+export function importReferenceAudio(path: string): Promise<ImportedReferenceAudio> {
+  return invoke<ImportedReferenceAudio>("import_reference_audio", { args: { path } });
 }
 
 export interface ReferenceProbe {
@@ -108,6 +120,8 @@ export interface SynthesizeClipResult {
   audioPath: string;
   /** Real rendered duration — clips auto-fit their timeline slot to this. */
   durationSec: number;
+  /** Wall-clock seconds spent generating this clip. */
+  elapsedSec: number;
 }
 
 export function synthesizeClip(args: SynthesizeClipArgs): Promise<SynthesizeClipResult> {

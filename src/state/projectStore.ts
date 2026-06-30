@@ -18,6 +18,13 @@ interface TransportState {
 
 export type ModelStatus = "idle" | "loading" | "ready" | "error";
 
+export interface ModelLoadProgress {
+  progress: number;
+  percent: number;
+  message: string;
+  updatedAt: number;
+}
+
 interface ModelState {
   engine: TtsEngineId;
   /** Synthesis language id for engines that need one (Chatterbox `[lang]`). */
@@ -25,6 +32,9 @@ interface ModelState {
   engines: TtsEngineInfo[];
   status: ModelStatus;
   error?: string;
+  loadingStartedAt?: number;
+  lastLoadDurationSec?: number;
+  progress?: ModelLoadProgress;
 }
 
 export interface DemoProgress {
@@ -34,12 +44,21 @@ export interface DemoProgress {
   message: string;
 }
 
+export interface SynthesisProgress {
+  current: number;
+  total: number;
+  label: string;
+  startedAt: number;
+  lastElapsedSec?: number;
+}
+
 interface ProjectStore {
   project: Project;
   selection: Selection;
   transport: TransportState;
   model: ModelState;
   setModelStatus: (status: ModelStatus, error?: string) => void;
+  setModelProgress: (progress: Omit<ModelLoadProgress, "updatedAt">) => void;
   setTtsEngine: (engine: TtsEngineId) => void;
   setTtsLanguage: (language: string) => void;
   setAvailableTtsEngines: (engines: TtsEngineInfo[]) => void;
@@ -48,9 +67,9 @@ interface ProjectStore {
   setDemoProgress: (p: DemoProgress | null) => void;
 
   synthesisStatus: "idle" | "running";
-  synthesisProgress: { current: number; total: number; label: string } | null;
+  synthesisProgress: SynthesisProgress | null;
   setSynthesisStatus: (s: "idle" | "running") => void;
-  setSynthesisProgress: (p: { current: number; total: number; label: string } | null) => void;
+  setSynthesisProgress: (p: SynthesisProgress | null) => void;
 
   setProject: (project: Project) => void;
   renameProject: (name: string) => void;
@@ -123,7 +142,46 @@ export const useProjectStore = create<ProjectStore>((set) => ({
     status: "idle",
   },
   setModelStatus: (status, error) =>
-    set((s) => ({ model: { ...s.model, status, error } })),
+    set((s) => {
+      const now = Date.now();
+      const loadingStartedAt =
+        status === "loading" ? now : s.model.loadingStartedAt;
+      const lastLoadDurationSec =
+        status === "ready" || status === "error"
+          ? s.model.loadingStartedAt
+            ? (now - s.model.loadingStartedAt) / 1000
+            : s.model.lastLoadDurationSec
+          : s.model.lastLoadDurationSec;
+      return {
+        model: {
+          ...s.model,
+          status,
+          error,
+          loadingStartedAt: status === "loading" ? loadingStartedAt : undefined,
+          lastLoadDurationSec,
+          progress:
+            status === "loading"
+              ? {
+                  progress: 0,
+                  percent: 0,
+                  message: "Preparing model download",
+                  updatedAt: now,
+                }
+              : undefined,
+        },
+      };
+    }),
+  setModelProgress: (progress) =>
+    set((s) =>
+      s.model.status === "loading"
+        ? {
+            model: {
+              ...s.model,
+              progress: { ...progress, updatedAt: Date.now() },
+            },
+          }
+        : s,
+    ),
   setTtsEngine: (engine) =>
     set((s) => ({
       model: {

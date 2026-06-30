@@ -56,6 +56,7 @@ export function Inspector() {
   // different selection, the hook count changes and React unmounts the tree.
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [regenError, setRegenError] = useState<string | null>(null);
+  const [regenTiming, setRegenTiming] = useState<string | null>(null);
 
   if (selection.kind === "none") {
     const clipExtent = project.tracks.reduce((max, t) => {
@@ -247,6 +248,7 @@ export function Inspector() {
     if (!effectiveVoice || !effectiveVoice.referenceAudioPath) return;
     setIsRegenerating(true);
     setRegenError(null);
+    setRegenTiming(null);
     try {
       const out = await synthesizeClip({
         clipId: current.id,
@@ -269,6 +271,9 @@ export function Inspector() {
         history: [take, ...current.history],
         ...(out.durationSec > 0 ? { endSec: current.startSec + out.durationSec } : {}),
       });
+      setRegenTiming(
+        `Generated ${out.durationSec.toFixed(1)}s audio in ${out.elapsedSec.toFixed(1)}s`,
+      );
     } catch (e) {
       console.error("synthesize_clip failed", e);
       setRegenError(String(e));
@@ -352,6 +357,11 @@ export function Inspector() {
         {regenError && (
           <div className="rounded-md border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
             {regenError}
+          </div>
+        )}
+        {regenTiming && !regenError && (
+          <div className="rounded-md border border-border/60 bg-background/50 px-2.5 py-1.5 text-xs text-muted-foreground">
+            {regenTiming}
           </div>
         )}
 

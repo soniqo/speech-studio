@@ -75,13 +75,17 @@ export function useSynthesizeAll() {
 
       setSynthesisStatus("running");
       try {
+        let lastElapsedSec: number | undefined;
         for (let i = 0; i < jobs.length; i++) {
           const job = jobs[i];
           const preview = job.clip.text.length > 28 ? `${job.clip.text.slice(0, 28)}…` : job.clip.text;
+          const startedAt = Date.now();
           setSynthesisProgress({
             current: i + 1,
             total: jobs.length,
             label: `${job.track.name}: ${preview}`,
+            startedAt,
+            lastElapsedSec,
           });
           try {
             const out = await synthesizeClip({
@@ -108,6 +112,10 @@ export function useSynthesizeAll() {
                 ? { endSec: job.clip.startSec + out.durationSec }
                 : {}),
             });
+            lastElapsedSec = out.elapsedSec;
+            console.log(
+              `[synth] ${job.clip.id} rendered ${out.durationSec.toFixed(2)}s audio in ${out.elapsedSec.toFixed(2)}s`,
+            );
             completed++;
           } catch (e) {
             console.error(`synthesize ${job.clip.id} failed`, e);
@@ -130,6 +138,12 @@ export function useSynthesizeAll() {
 /** Convenience: number of un-synthesized non-locked clips the user could synthesize right now. */
 export function useUnsynthesizedCount(): number {
   return useProjectStore((s) => {
+    const engine = s.model.engine;
+    const engineInfo = s.model.engines.find((candidate) => candidate.id === engine);
+    const fallbackRequiresReferenceTranscript =
+      engine === "cosyvoice" || engine === "qwen3" || engine === "fish-audio";
+    const needsReferenceTranscript =
+      engineInfo?.requiresReferenceTranscript ?? fallbackRequiresReferenceTranscript;
     let n = 0;
     for (const t of s.project.tracks) {
       if (t.kind !== "speaker") continue;
@@ -140,7 +154,8 @@ export function useUnsynthesizedCount(): number {
         const voiceId = c.voiceOverrideId ?? t.voiceId;
         if (!voiceId) continue;
         const v = s.project.voices.find((x) => x.id === voiceId);
-        if (!v || !v.referenceAudioPath || !v.referenceText.trim()) continue;
+        if (!v || !v.referenceAudioPath) continue;
+        if (needsReferenceTranscript && !v.referenceText.trim()) continue;
         n++;
       }
     }

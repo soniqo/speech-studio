@@ -90,8 +90,8 @@ describe("ScriptEditor", () => {
       },
     });
     const onChange = vi.fn();
-    render(<ScriptEditor value="नमस्ते [sad]" onChange={onChange} />);
+    render(<ScriptEditor value="[sad] नमस्ते" onChange={onChange} />);
     fireEvent.click(screen.getByRole("button", { name: "excited" }));
-    expect(onChange).toHaveBeenCalledWith("नमस्ते [excited]");
+    expect(onChange).toHaveBeenCalledWith("[excited] नमस्ते");
   });
 });

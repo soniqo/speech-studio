@@ -101,6 +101,19 @@ func logErr(_ message: String) {
     stderrHandle.write(Data((message + "\n").utf8))
 }
 
+func logProgress(_ stage: String, _ progress: Double, _ message: String) {
+    let clamped = min(100.0, max(0.0, progress * 100.0))
+    let percent: String
+    if clamped > 0.0, clamped < 1.0 {
+        percent = String(format: "%.2f", clamped)
+    } else if clamped < 10.0 {
+        percent = String(format: "%.1f", clamped)
+    } else {
+        percent = String(format: "%.0f", clamped)
+    }
+    logErr("[sidecar] \(stage) \(percent)% \(message)")
+}
+
 // MARK: - model state
 
 // The model is not thread-safe (per Qwen3TTS docs) but this sidecar reads from
@@ -428,25 +441,6 @@ final class IndicMioHolder: @unchecked Sendable {
     private var loadedModelId: String?
 
     func load(modelId requestedId: String? = nil) async throws -> IndicMioTTSModel {
-        if requestedId == nil,
-           let bundlePath = ProcessInfo.processInfo.environment["SONIQO_INDIC_MIO_BUNDLE_DIR"],
-           !bundlePath.isEmpty {
-            let cacheKey = "bundle:\(bundlePath)"
-            if let m = model, loadedModelId == cacheKey { return m }
-            if model != nil { unload() }
-            logErr("[sidecar] loading Indic-Mio bundle \(bundlePath)…")
-            let m = try await IndicMioTTSModel.fromBundle(
-                URL(fileURLWithPath: bundlePath, isDirectory: true),
-                progressHandler: { progress, message in
-                    logErr(String(format: "[sidecar] indic-mio %3d%% %@", Int(progress * 100), message))
-                }
-            )
-            model = m
-            loadedModelId = cacheKey
-            logErr("[sidecar] indic-mio ready")
-            return m
-        }
-
         let modelId = requestedId
             ?? ProcessInfo.processInfo.environment["SONIQO_INDIC_MIO_MODEL_ID"]
             ?? IndicMioTTSModel.defaultModelId
@@ -483,25 +477,6 @@ final class FishAudioHolder: @unchecked Sendable {
     private var loadedModelId: String?
 
     func load(modelId requestedId: String? = nil) async throws -> FishAudioTTSModel {
-        if requestedId == nil,
-           let bundlePath = ProcessInfo.processInfo.environment["SONIQO_FISH_AUDIO_BUNDLE_DIR"],
-           !bundlePath.isEmpty {
-            let cacheKey = "bundle:\(bundlePath)"
-            if let m = model, loadedModelId == cacheKey { return m }
-            if model != nil { unload() }
-            logErr("[sidecar] loading Fish Audio bundle \(bundlePath)…")
-            let m = try await FishAudioTTSModel.fromBundle(
-                URL(fileURLWithPath: bundlePath, isDirectory: true),
-                progressHandler: { progress, message in
-                    logErr(String(format: "[sidecar] fish-audio %3d%% %@", Int(progress * 100), message))
-                }
-            )
-            model = m
-            loadedModelId = cacheKey
-            logErr("[sidecar] fish-audio ready")
-            return m
-        }
-
         let modelId = requestedId
             ?? ProcessInfo.processInfo.environment["SONIQO_FISH_AUDIO_MODEL_ID"]
             ?? FishAudioTTSModel.defaultModelId
@@ -511,7 +486,7 @@ final class FishAudioHolder: @unchecked Sendable {
         let m = try await FishAudioTTSModel.fromPretrained(
             modelId: modelId,
             progressHandler: { progress, message in
-                logErr(String(format: "[sidecar] fish-audio %3d%% %@", Int(progress * 100), message))
+                logProgress("fish-audio", progress, message)
             }
         )
         model = m
