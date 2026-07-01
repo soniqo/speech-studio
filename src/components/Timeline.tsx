@@ -4,6 +4,8 @@ import type { SpeakerTrack, Track } from "../types/project";
 import { Clip } from "./Clip";
 import { EmptyState } from "./EmptyState";
 import { cn } from "@/lib/utils";
+import { useI18n } from "../i18n/useI18n";
+import type { Messages } from "../i18n/messages";
 
 const TRACK_HEADER_W = 180;
 
@@ -28,7 +30,14 @@ function laneTint(track: Track): string {
   return "bg-[#1d1814]/40";
 }
 
+function trackKindLabel(track: Track, messages: Messages): string {
+  if (track.kind === "video") return messages.tracks.kindVideo;
+  if (track.kind === "speaker") return messages.tracks.kindSpeaker;
+  return messages.tracks.kindAudio;
+}
+
 export function Timeline() {
+  const { messages: m } = useI18n();
   const project = useProjectStore((s) => s.project);
   const transport = useProjectStore((s) => s.transport);
   const setZoom = useProjectStore((s) => s.setZoom);
@@ -67,7 +76,7 @@ export function Timeline() {
   return (
     <section className="flex min-w-0 flex-1 flex-col">
       <div className="flex h-9 items-center gap-2 border-b border-border bg-card/30 px-3 text-xs text-muted-foreground">
-        <span>Zoom</span>
+        <span>{m.timeline.zoom}</span>
         <input
           type="range"
           min={20}
@@ -78,7 +87,7 @@ export function Timeline() {
           className="w-32 accent-primary"
         />
         <span className="font-mono tabular-nums">{transport.zoomPxPerSec} px/s</span>
-        <span className="ml-auto">Duration {formatTime(visibleDuration)}</span>
+        <span className="ml-auto">{m.timeline.duration(formatTime(visibleDuration))}</span>
       </div>
       <div className="relative min-h-0 flex-1 overflow-auto" ref={scrollRef}>
         <div className="relative min-h-full">
@@ -88,7 +97,7 @@ export function Timeline() {
               className="relative cursor-pointer text-[11px] text-muted-foreground"
               style={{ width: lanePxWidth }}
               onClick={handleRulerClick}
-              title="Click to seek"
+              title={m.timeline.clickToSeek}
             >
               {ticks.map((t) => (
                 <div
@@ -118,13 +127,15 @@ export function Timeline() {
                   onClick={() => select({ kind: "track", id: t.id })}
                 >
                   <div className="truncate text-sm font-medium">{t.name}</div>
-                  <div className="text-[11px] text-muted-foreground">{t.kind}</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {trackKindLabel(t, m)}
+                  </div>
                 </button>
                 <div
                   className={cn("relative h-16", laneTint(t))}
                   style={{ width: lanePxWidth }}
                   onDoubleClick={(e) => handleLaneDoubleClick(t, e)}
-                  title={t.kind === "speaker" ? "Double-click to add clip" : ""}
+                  title={t.kind === "speaker" ? m.timeline.doubleClickAddClip : ""}
                 >
                   {t.kind === "speaker" &&
                     (t as SpeakerTrack).clips.map((c) => (

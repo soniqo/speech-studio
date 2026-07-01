@@ -3,6 +3,7 @@ import { synthesizeClip } from "../ipc/commands";
 import { useProjectStore } from "../state/projectStore";
 import type { Clip, SpeakerTrack, Voice } from "../types/project";
 import { clipAudioPath } from "../lib/clipAudio";
+import { messages } from "../i18n/messages";
 
 interface PlannedJob {
   clip: Clip;
@@ -51,6 +52,7 @@ export function useSynthesizeAll() {
   const run = useCallback(
     async (mode: "missing" | "all"): Promise<SynthesizeAllResult> => {
       const initialState = useProjectStore.getState();
+      const t = messages[initialState.locale];
       const jobs = collectJobs(initialState, mode);
       const engine = initialState.model.engine;
       const engineInfo = initialState.model.engines.find((candidate) => candidate.id === engine);
@@ -62,9 +64,7 @@ export function useSynthesizeAll() {
         (engineInfo?.requiresReferenceTranscript ?? fallbackRequiresReferenceTranscript) &&
         jobs.some((job) => !job.voice.referenceText.trim())
       ) {
-        throw new Error(
-          `${engineName} needs an accurate reference transcript for every voice being synthesized`,
-        );
+        throw new Error(t.synth.referenceTranscriptRequired(engineName));
       }
       if (jobs.length === 0) {
         return { total: 0, completed: 0, failed: 0 };

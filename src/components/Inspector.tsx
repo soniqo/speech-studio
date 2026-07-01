@@ -15,6 +15,8 @@ import {
   SelectValue,
 } from "./ui/select";
 import { cn } from "@/lib/utils";
+import { dateLocale, type Messages } from "../i18n/messages";
+import { useI18n } from "../i18n/useI18n";
 
 function Section({ children }: { children: React.ReactNode }) {
   return <div className="space-y-1.5">{children}</div>;
@@ -38,7 +40,22 @@ function Value({
   );
 }
 
+function trackKindLabel(kind: string, messages: Messages): string {
+  if (kind === "video") return messages.tracks.kindVideo;
+  if (kind === "speaker") return messages.tracks.kindSpeaker;
+  if (kind === "audio") return messages.tracks.kindAudio;
+  return kind;
+}
+
+function voiceSourceLabel(sourceKind: string, messages: Messages): string {
+  if (sourceKind === "library") return messages.voices.sourceKind.library;
+  if (sourceKind === "clip-clone") return messages.voices.sourceKind.clipClone;
+  if (sourceKind === "track-clone") return messages.voices.sourceKind.trackClone;
+  return sourceKind;
+}
+
 export function Inspector() {
+  const { locale, messages: t } = useI18n();
   const selection = useProjectStore((s) => s.selection);
   const project = useProjectStore((s) => s.project);
   const setProject = useProjectStore((s) => s.setProject);
@@ -66,12 +83,12 @@ export function Inspector() {
     return (
       <aside className="flex w-[320px] flex-col border-l border-border bg-card/40">
         <header className="flex items-center justify-between border-b border-border px-3.5 py-2">
-          <span className="text-sm font-medium">Project</span>
+          <span className="text-sm font-medium">{t.inspector.project}</span>
           <span className="text-xs text-muted-foreground truncate">{project.name}</span>
         </header>
         <div className="flex-1 space-y-4 px-3.5 py-3">
           <Section>
-            <Label>Length (sec)</Label>
+            <Label>{t.inspector.lengthSec}</Label>
             <div className="flex items-center gap-2">
               <Input
                 type="number"
@@ -87,21 +104,21 @@ export function Inspector() {
               />
               {clipExtent > project.durationSec && (
                 <span className="text-xs text-destructive">
-                  clips extend to {clipExtent.toFixed(1)}s
+                  {t.inspector.clipsExtendTo(clipExtent.toFixed(1))}
                 </span>
               )}
             </div>
           </Section>
           <Section>
-            <Label>Tracks</Label>
+            <Label>{t.inspector.tracks}</Label>
             <Value>{project.tracks.length}</Value>
           </Section>
           <Section>
-            <Label>Voices</Label>
+            <Label>{t.inspector.voices}</Label>
             <Value>{project.voices.length}</Value>
           </Section>
           <div className="rounded-md border border-dashed border-border/60 bg-background/40 px-3 py-2 text-xs text-muted-foreground">
-            Select a clip, track, or voice for more options.
+            {t.inspector.emptyHint}
           </div>
         </div>
       </aside>
@@ -114,17 +131,19 @@ export function Inspector() {
     return (
       <aside className="flex w-[320px] flex-col border-l border-border bg-card/40">
         <header className="flex items-center justify-between border-b border-border px-3.5 py-2">
-          <span className="text-sm font-medium">Track</span>
-          <span className="text-xs text-muted-foreground">{track.kind}</span>
+          <span className="text-sm font-medium">{t.inspector.track}</span>
+          <span className="text-xs text-muted-foreground">
+            {trackKindLabel(track.kind, t)}
+          </span>
         </header>
         <div className="flex-1 space-y-4 px-3.5 py-3">
           <Section>
-            <Label>Name</Label>
+            <Label>{t.inspector.name}</Label>
             <Value>{track.name}</Value>
           </Section>
           {track.kind === "speaker" && (
             <Section>
-              <Label>Voice</Label>
+              <Label>{t.inspector.voice}</Label>
               <Select
                 value={track.voiceId ?? "__none__"}
                 onValueChange={(value) =>
@@ -132,10 +151,10 @@ export function Inspector() {
                 }
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="— None —" />
+                  <SelectValue placeholder={t.common.none} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__none__">— None —</SelectItem>
+                  <SelectItem value="__none__">{t.common.none}</SelectItem>
                   {project.voices.map((v) => (
                     <SelectItem key={v.id} value={v.id}>
                       {v.name}
@@ -147,7 +166,7 @@ export function Inspector() {
           )}
           {track.kind === "video" && (
             <Section>
-              <Label>Source</Label>
+              <Label>{t.inspector.source}</Label>
               <Value className="break-all">{track.sourcePath}</Value>
             </Section>
           )}
@@ -162,12 +181,14 @@ export function Inspector() {
     return (
       <aside className="flex w-[320px] flex-col border-l border-border bg-card/40">
         <header className="flex items-center justify-between border-b border-border px-3.5 py-2">
-          <span className="text-sm font-medium">Voice</span>
-          <span className="text-xs text-muted-foreground">{voice.sourceKind}</span>
+          <span className="text-sm font-medium">{t.inspector.voicePanel}</span>
+          <span className="text-xs text-muted-foreground">
+            {voiceSourceLabel(voice.sourceKind, t)}
+          </span>
         </header>
         <div className="flex-1 space-y-4 px-3.5 py-3">
           <Section>
-            <Label>Name</Label>
+            <Label>{t.inspector.name}</Label>
             <Input
               value={voice.name}
               onChange={(e) =>
@@ -183,16 +204,16 @@ export function Inspector() {
             />
           </Section>
           <Section>
-            <Label>Reference audio</Label>
+            <Label>{t.inspector.referenceAudio}</Label>
             <Value className="truncate" title={voice.referenceAudioPath}>
               {voice.referenceAudioPath?.split("/").pop() ?? "—"}
             </Value>
           </Section>
           <Section>
             <Label>
-              Reference transcript{" "}
+              {t.inspector.referenceTranscript}{" "}
               <span className="ml-1 normal-case tracking-normal text-muted-foreground/60">
-                (optional)
+                {t.inspector.optional}
               </span>
             </Label>
             <Textarea
@@ -207,13 +228,13 @@ export function Inspector() {
                   },
                 }))
               }
-              placeholder="Required by CosyVoice, Qwen3-TTS, and Fish Audio to anchor a clone. VoxCPM2 clones from audio alone."
+              placeholder={t.inspector.referencePlaceholder}
               className="min-h-[88px]"
             />
           </Section>
           <Section>
-            <Label>Created</Label>
-            <Value>{new Date(voice.createdAt).toLocaleString()}</Value>
+            <Label>{t.inspector.created}</Label>
+            <Value>{new Date(voice.createdAt).toLocaleString(dateLocale(locale))}</Value>
           </Section>
         </div>
       </aside>
@@ -236,7 +257,7 @@ export function Inspector() {
   const needsReferenceTranscript =
     activeEngine?.requiresReferenceTranscript ??
     (engine === "cosyvoice" || engine === "qwen3" || engine === "fish-audio");
-  const transcriptEngineName = activeEngine?.displayName ?? "Selected engine";
+  const transcriptEngineName = activeEngine?.displayName ?? t.inspector.selectedEngine;
   const canRegenerate =
     !isRegenerating &&
     !!effectiveVoice &&
@@ -272,7 +293,7 @@ export function Inspector() {
         ...(out.durationSec > 0 ? { endSec: current.startSec + out.durationSec } : {}),
       });
       setRegenTiming(
-        `Generated ${out.durationSec.toFixed(1)}s audio in ${out.elapsedSec.toFixed(1)}s`,
+        t.common.generatedTiming(out.durationSec.toFixed(1), out.elapsedSec.toFixed(1)),
       );
     } catch (e) {
       console.error("synthesize_clip failed", e);
@@ -283,24 +304,24 @@ export function Inspector() {
   }
 
   function regenerateTitle(): string {
-    if (isRegenerating) return "Generating…";
-    if (!effectiveVoice) return "Assign a voice first";
-    if (!effectiveVoice.referenceAudioPath) return "Voice is missing a reference clip";
+    if (isRegenerating) return t.inspector.generating;
+    if (!effectiveVoice) return t.inspector.assignVoiceFirst;
+    if (!effectiveVoice.referenceAudioPath) return t.inspector.missingReference;
     if (needsReferenceTranscript && !effectiveVoice.referenceText.trim()) {
-      return `${transcriptEngineName} needs the reference transcript`;
+      return t.inspector.referenceTranscriptNeeded(transcriptEngineName);
     }
-    if (current.text.trim().length === 0) return "Write something first";
-    return "Generate audio";
+    if (current.text.trim().length === 0) return t.inspector.writeSomethingFirst;
+    return t.inspector.generateAudio;
   }
 
   return (
     <aside className="flex w-[320px] flex-col border-l border-border bg-card/40">
       <header className="flex items-center justify-between border-b border-border px-3.5 py-2">
-        <span className="text-sm font-medium">Clip</span>
+        <span className="text-sm font-medium">{t.inspector.clip}</span>
       </header>
       <div className="flex-1 space-y-4 overflow-y-auto px-3.5 py-3">
         <Section>
-          <Label>Voice override</Label>
+          <Label>{t.inspector.voiceOverride}</Label>
           <Select
             value={clip.voiceOverrideId ?? "__inherit__"}
             onValueChange={(value) =>
@@ -310,10 +331,10 @@ export function Inspector() {
             }
           >
             <SelectTrigger>
-              <SelectValue placeholder="— Inherit from track —" />
+              <SelectValue placeholder={t.common.inheritFromTrack} />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="__inherit__">— Inherit from track —</SelectItem>
+              <SelectItem value="__inherit__">{t.common.inheritFromTrack}</SelectItem>
               {project.voices.map((v) => (
                 <SelectItem key={v.id} value={v.id}>
                   {v.name}
@@ -326,10 +347,11 @@ export function Inspector() {
         <ScriptEditor value={clip.text} onChange={(text) => updateClip(clip.id, { text })} />
 
         <Section>
-          <Label>Timing</Label>
+          <Label>{t.inspector.timing}</Label>
           <Value>
-            {clip.startSec.toFixed(2)}s → {clip.endSec.toFixed(2)}s (
-            {(clip.endSec - clip.startSec).toFixed(2)}s)
+            {t.common.secondsShort(clip.startSec.toFixed(2))} →{" "}
+            {t.common.secondsShort(clip.endSec.toFixed(2))} (
+            {t.common.secondsShort((clip.endSec - clip.startSec).toFixed(2))})
           </Value>
         </Section>
 
@@ -340,18 +362,18 @@ export function Inspector() {
             ) : (
               <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
             )}
-            {isRegenerating ? "Generating…" : "Regenerate"}
+            {isRegenerating ? t.inspector.generating : t.inspector.regenerate}
           </Button>
           <Button
             variant="secondary"
             onClick={() => updateClip(clip.id, { locked: !clip.locked })}
           >
             {clip.locked ? <Unlock className="mr-1.5 h-3.5 w-3.5" /> : <Lock className="mr-1.5 h-3.5 w-3.5" />}
-            {clip.locked ? "Unlock" : "Lock"}
+            {clip.locked ? t.inspector.unlock : t.inspector.lock}
           </Button>
           <Button variant="ghost" onClick={() => removeClip(clip.id)} disabled={isRegenerating}>
             <Trash2 className="mr-1.5 h-3.5 w-3.5" />
-            Delete
+            {t.inspector.delete}
           </Button>
         </div>
         {regenError && (
@@ -367,7 +389,7 @@ export function Inspector() {
 
         {clip.renderedAudioPath && (
           <Section>
-            <Label>Preview</Label>
+            <Label>{t.inspector.preview}</Label>
             <audio
               key={clip.renderedAudioPath}
               src={convertFileSrc(clip.renderedAudioPath)}
@@ -385,10 +407,10 @@ export function Inspector() {
             <Label>
               <span className="inline-flex items-center gap-1">
                 <History className="h-3 w-3" />
-                History ({clip.history.length})
+                {t.inspector.history(clip.history.length)}
               </span>
             </Label>
-            <Value>{clip.history.length} previous takes</Value>
+            <Value>{t.common.previousTakes(clip.history.length)}</Value>
           </Section>
         )}
       </div>
