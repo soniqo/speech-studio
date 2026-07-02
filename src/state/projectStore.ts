@@ -158,7 +158,7 @@ export const useProjectStore = create<ProjectStore>((set) => ({
   selection: { kind: "none" },
   transport: { playing: false, positionSec: 0, zoomPxPerSec: 100 },
   model: {
-    engine: "voxcpm2",
+    engine: "cosyvoice",
     language: "en",
     engines: [],
     status: "idle",

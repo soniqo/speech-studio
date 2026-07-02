@@ -30,7 +30,7 @@
 - **Tauri 2** 外壳（Rust + 操作系统原生 WebView），因此发布的应用是一个小巧的原生二进制，而非 Chromium 分支。
 - **React + Vite** 前端，负责时间轴、音色库与脚本编辑器。
 - **常驻的 sidecar 进程**让语音引擎保持加载状态，因此首次预热后逐行合成很快。Tauri 启动它一次，并通过 stdin/stdout 以 NDJSON 通信。在 macOS 上是 **Swift sidecar**（`swift-sidecar/`，MLX）；在 Windows/Linux 上是 **C++ sidecar**（`core-sidecar/`，LiteRT）。
-- **VoxCPM2** 是所有平台上的默认引擎——在 macOS 上经由 [`speech-swift`](https://github.com/soniqo/speech-swift)（MLX），在 Windows/Linux 上经由 [`speech-core`](https://github.com/soniqo/speech-core)（LiteRT）。在 macOS 上可从工具栏切换引擎：**CosyVoice3**、**Qwen3-TTS**、**Chatterbox**（支持 23 种语言的多语言克隆）、**OmniVoice**（600+ 语言克隆）、**Indic-Mio**（Hindi/Indic 情感标签）以及 **Fish Audio S2 Pro**（实验性克隆 + 方括号标记）。这些 MLX 引擎仅限 macOS；Windows/Linux 仅运行 VoxCPM2。
+- **CosyVoice 3** 是 macOS 上的默认引擎，经由 [`speech-swift`](https://github.com/soniqo/speech-swift)（MLX）运行。Windows/Linux 默认使用 **VoxCPM2**，经由 [`speech-core`](https://github.com/soniqo/speech-core)（LiteRT）运行。在 macOS 上可从工具栏切换引擎：**VoxCPM2**、**Qwen3-TTS**、**Chatterbox**（支持 23 种语言的多语言克隆）、**OmniVoice**（600+ 语言克隆）、**Indic-Mio**（Hindi/Indic 情感标签）以及 **Fish Audio S2 Pro**（实验性克隆 + 方括号标记）。这些 MLX 引擎仅限 macOS；Windows/Linux 仅运行 VoxCPM2。
 
 ## 引擎
 
@@ -38,8 +38,8 @@
 
 | 引擎 | 平台 | 后端 | 语音克隆 | 情感标记 | 语言数 |
 |---|---|---|:---:|---|:---:|
-| **VoxCPM2** · 默认 | macOS · Windows · Linux | MLX / LiteRT | ✅ | 风格指令 | 30 |
-| **CosyVoice 3** | 仅 macOS | MLX | ✅ | 风格指令 | 9 |
+| **CosyVoice 3** · macOS 默认 | 仅 macOS | MLX | ✅ | 风格指令 | 9 |
+| **VoxCPM2** · Windows/Linux 默认 | macOS · Windows · Linux | MLX / LiteRT | ✅ | 风格指令 | 30 |
 | **Qwen3-TTS** | 仅 macOS | MLX | ✅（ICL） | — | 10 |
 | **Chatterbox** | 仅 macOS | MLX | ✅ | 仅强度¹ | 23 |
 | **OmniVoice** | 仅 macOS | MLX | ✅ | 受限指令² | 600+ |
@@ -95,7 +95,7 @@ MLX 引擎（CosyVoice 3、Qwen3-TTS、Chatterbox、OmniVoice、Indic-Mio、Fish
 
 每个平台都会在**首次运行时下载语音模型**并缓存，因此安装包本身很小：
 
-- **macOS** — `.dmg`（约 46 MB）；拖入 `/Applications`。首次运行会将约 2.75 GB 的 MLX 权重下载到 `~/Library/Caches/qwen3-speech/`。
+- **macOS** — `.dmg`（约 46 MB）；拖入 `/Applications`。首次运行会将 CosyVoice 3 的 MLX 权重下载到 `~/Library/Caches/qwen3-speech/`；之后选择 VoxCPM2 时会再下载约 2.75 GB 的 VoxCPM2 MLX 权重。
 - **Windows** — `.msi` 或 NSIS `-setup.exe`。首次运行会将约 8.8 GB 的 VoxCPM2-LiteRT 模型包下载到 `%LOCALAPPDATA%\speech-core`。
 - **Linux** — `.deb` 或 `.AppImage`。首次运行会将同样的模型包下载到 `~/.cache/speech-core`。
 
@@ -103,7 +103,7 @@ Windows/Linux 的 LiteRT 模型包为 fp16 格式，加载时约需 **10 GiB 空
 
 **macOS 构建已签名并经过公证**（自 v0.0.5 起）——像普通应用一样直接打开，无需绕过 Gatekeeper。Windows 安装包仍未签名：SmartScreen 需要点击 *More info → Run anyway*。
 
-### 手动下载模型（macOS）
+### 手动下载 VoxCPM2 模型（macOS）
 
 如果应用内下载在不稳定或缓慢的网络上反复失败（`Download stalled for …: no progress` / `Failed to download …`），可以自行下载模型并放到应用读取的目录。共两部分：模型权重和一小组分词器文件。
 
@@ -142,7 +142,7 @@ cd swift-sidecar && swift build       # 构建 Swift sidecar
 cd .. && pnpm tauri dev               # 启动应用，热重载 UI
 ```
 
-首次合成时同样会下载约 2.75 GB 的模型（位于 `~/Library/Caches/qwen3-speech/`——如果网络不稳定，请参阅[手动下载模型](#手动下载模型macos)）。
+首次合成时会下载当前选择的 MLX 引擎模型（位于 `~/Library/Caches/qwen3-speech/`）。如果 VoxCPM2 下载不稳定，请参阅[手动下载 VoxCPM2 模型](#手动下载-voxcpm2-模型macos)。
 
 ### 开发循环 — Windows / Linux
 
@@ -160,20 +160,20 @@ pnpm tauri dev
 
 在一台 Apple Silicon Mac（M 系列，统一内存）上测得。**驻留（真实）** 列是实际进程占用（活动监视器的“内存”——`vmmap` 物理足迹），这是你应与 RAM 对照的数字。**MLX 活跃/峰值** 是 MLX 自身的统计（峰值为多行会话期间）。注意：在 Apple Silicon 上 `ps rss` 会少报约 3 倍——Metal 统一内存缓冲不计入 RSS，请以下方驻留数字为准。
 
-默认的 **VoxCPM2** 引擎：
+可选的 **VoxCPM2** MLX 引擎：
 
-| 变体 | 磁盘 | MLX 活跃 | MLX 峰值 | 驻留（真实） | 默认 |
-|---|---|---|---|---|---|
-| `aufklarer/VoxCPM2-MLX-int8`  | 2.75 GB | 3.1 GB | 5.4 GB | **约 4–5 GB** | ✅ |
-| `aufklarer/VoxCPM2-MLX-bf16`  | 4.6 GB  | 9.1 GB | 11.4 GB | 约 12 GB | |
+| 变体 | 磁盘 | MLX 活跃 | MLX 峰值 | 驻留（真实） |
+|---|---|---|---|---|
+| `aufklarer/VoxCPM2-MLX-int8`  | 2.75 GB | 3.1 GB | 5.4 GB | **约 4–5 GB** |
+| `aufklarer/VoxCPM2-MLX-bf16`  | 4.6 GB  | 9.1 GB | 11.4 GB | 约 12 GB |
 
-其他 macOS 引擎在被选中时单独加载——同一时刻只有一个驻留（切换会卸载上一个）：**Chatterbox** 驻留约 4 GB（磁盘 1.3 GB），**CosyVoice 3** 更轻，**Qwen3-TTS**（1.7B bf16）更重。OmniVoice 会在被选中时单独下载并加载。
+macOS 引擎在被选中时单独加载——同一时刻只有一个驻留（切换会卸载上一个）：**Chatterbox** 驻留约 4 GB（磁盘 1.3 GB），**CosyVoice 3** 比 VoxCPM2 更轻，**Qwen3-TTS**（1.7B bf16）更重。OmniVoice 会在被选中时单独下载并加载。
 
-MLX 缓冲缓存上限为 1 GB（可用 `SONIQO_MLX_CACHE_MB` 覆盖）——若没有该上限，长会话中峰值会随着不同形状的缓冲累积增长到数十 GB。如需更高保真度的权重，用 `SONIQO_VOXCPM2_MODEL_ID=aufklarer/VoxCPM2-MLX-bf16` 覆盖默认模型。
+MLX 缓冲缓存上限为 1 GB（可用 `SONIQO_MLX_CACHE_MB` 覆盖）——若没有该上限，长会话中峰值会随着不同形状的缓冲累积增长到数十 GB。如需更高保真度的 VoxCPM2 权重，用 `SONIQO_VOXCPM2_MODEL_ID=aufklarer/VoxCPM2-MLX-bf16` 覆盖 VoxCPM2 模型。
 
 ### 试用演示
 
-点击顶栏的 **Load demo（加载演示）**。它会引导出一个 Scene 04 分镜，包含两个克隆音色（Anna 与 Marek）和四行对白——每行带一个情感标记——然后通过 VoxCPM2 合成全部内容。
+点击顶栏的 **Load demo（加载演示）**。它会引导出一个 Scene 04 分镜，包含两个克隆音色（Anna 与 Marek）和四行对白——每行带一个情感标记——然后通过当前选择的引擎合成全部内容（macOS 默认是 CosyVoice 3）。
 
 ### 打包你自己的 .app / .dmg
 
