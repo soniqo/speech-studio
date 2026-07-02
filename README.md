@@ -30,7 +30,7 @@ The clone is local. The synth is local. No audio leaves your machine.
 - **Tauri 2** shell (Rust + the OS-native WebView) so the shipped app is a small native binary, not a Chromium fork.
 - **React + Vite** frontend for the timeline, voice library, and script editor.
 - **A warm sidecar process** holds the speech engine resident so per-line synthesis is fast after the first warm-up. Tauri spawns it once and talks NDJSON over stdin/stdout. On macOS this is the **Swift sidecar** (`swift-sidecar/`, MLX); on Windows/Linux the **C++ sidecar** (`core-sidecar/`, LiteRT).
-- **VoxCPM2** is the default engine on every platform — via [`speech-swift`](https://github.com/soniqo/speech-swift) (MLX) on macOS and [`speech-core`](https://github.com/soniqo/speech-core) (LiteRT) on Windows/Linux. On macOS you can switch engines from the toolbar: **CosyVoice3**, **Qwen3-TTS**, **Chatterbox** (multilingual cloning across 23 languages), **OmniVoice** (600+ language cloning), **Indic-Mio** (Hindi/Indic emotion tags), and **Fish Audio S2 Pro** (experimental clone + bracket markers). Those MLX engines are macOS-only; Windows/Linux runs VoxCPM2.
+- **CosyVoice 3** is the default engine on macOS via [`speech-swift`](https://github.com/soniqo/speech-swift) (MLX). Windows/Linux default to **VoxCPM2** via [`speech-core`](https://github.com/soniqo/speech-core) (LiteRT). On macOS you can switch engines from the toolbar: **VoxCPM2**, **Qwen3-TTS**, **Chatterbox** (multilingual cloning across 23 languages), **OmniVoice** (600+ language cloning), **Indic-Mio** (Hindi/Indic emotion tags), and **Fish Audio S2 Pro** (experimental clone + bracket markers). Those MLX engines are macOS-only; Windows/Linux runs VoxCPM2.
 
 ## Engines
 
@@ -38,8 +38,8 @@ Switch engine from the toolbar dropdown (macOS only — Windows/Linux always use
 
 | Engine | Platforms | Backend | Voice cloning | Emotion markers | Languages |
 |---|---|---|:---:|---|:---:|
-| **VoxCPM2** · default | macOS · Windows · Linux | MLX / LiteRT | ✅ | style instructions | 30 |
-| **CosyVoice 3** | macOS only | MLX | ✅ | style instructions | 9 |
+| **CosyVoice 3** · macOS default | macOS only | MLX | ✅ | style instructions | 9 |
+| **VoxCPM2** · Windows/Linux default | macOS · Windows · Linux | MLX / LiteRT | ✅ | style instructions | 30 |
 | **Qwen3-TTS** | macOS only | MLX | ✅ (ICL) | — | 10 |
 | **Chatterbox** | macOS only | MLX | ✅ | intensity only¹ | 23 |
 | **OmniVoice** | macOS only | MLX | ✅ | restricted instruct² | 600+ |
@@ -95,7 +95,7 @@ Grab the latest build from the [**releases page**](https://github.com/soniqo/spe
 
 Every platform **downloads its speech model on first run** and caches it, so the installers stay small:
 
-- **macOS** — `.dmg` (~46 MB); drag into `/Applications`. First run pulls ~2.75 GB of MLX weights into `~/Library/Caches/qwen3-speech/`.
+- **macOS** — `.dmg` (~46 MB); drag into `/Applications`. First run pulls the CosyVoice 3 MLX weights into `~/Library/Caches/qwen3-speech/`; selecting VoxCPM2 later pulls its ~2.75 GB MLX weights.
 - **Windows** — `.msi` or the NSIS `-setup.exe`. First run pulls the ~8.8 GB VoxCPM2-LiteRT bundle into `%LOCALAPPDATA%\speech-core`.
 - **Linux** — `.deb` or `.AppImage`. First run pulls the same bundle into `~/.cache/speech-core`.
 
@@ -103,7 +103,7 @@ The Windows/Linux LiteRT bundle is fp16 and needs **~10 GiB of free RAM** to loa
 
 The **macOS build is signed and notarized** (from v0.0.5 on) — it opens like any other app, no Gatekeeper hoops. The Windows installers are still unsigned: SmartScreen needs *More info → Run anyway*.
 
-### Manual model download (macOS)
+### Manual VoxCPM2 model download (macOS)
 
 If the in-app download keeps failing on a flaky or slow network (`Download stalled for …: no progress` / `Failed to download …`), fetch the model yourself and place it where the app looks. Two pieces: the model weights and a small set of tokenizer files.
 
@@ -142,7 +142,7 @@ cd swift-sidecar && swift build       # builds the Swift sidecar
 cd .. && pnpm tauri dev               # launches the app, hot-reloads the UI
 ```
 
-Same ~2.75 GB model download on first synth (into `~/Library/Caches/qwen3-speech/` — see [Manual model download](#manual-model-download-macos) if your network keeps dropping it).
+The selected MLX engine downloads on first synth (into `~/Library/Caches/qwen3-speech/`). For VoxCPM2 specifically, see [Manual VoxCPM2 model download](#manual-voxcpm2-model-download-macos) if your network keeps dropping it.
 
 ### Dev loop — Windows / Linux
 
@@ -160,20 +160,20 @@ pnpm tauri dev
 
 Measured on an Apple Silicon Mac (M-series, unified memory). The **resident** column is the real process footprint (Activity Monitor's "Memory" — `vmmap` physical footprint), which is the figure to check against your RAM. **MLX active/peak** is MLX's own accounting (peak is over a multi-line session). Note: plain `ps rss` under-reports by ~3× on Apple Silicon — Metal unified-memory buffers don't count as RSS, so use the resident figures below.
 
-The default **VoxCPM2** engine:
+The selectable **VoxCPM2** MLX engine:
 
-| Variant | Disk | MLX active | MLX peak | Resident (real) | Default |
-|---|---|---|---|---|---|
-| `aufklarer/VoxCPM2-MLX-int8`  | 2.75 GB | 3.1 GB | 5.4 GB | **~4–5 GB** | ✅ |
-| `aufklarer/VoxCPM2-MLX-bf16`  | 4.6 GB  | 9.1 GB | 11.4 GB | ~12 GB | |
+| Variant | Disk | MLX active | MLX peak | Resident (real) |
+|---|---|---|---|---|
+| `aufklarer/VoxCPM2-MLX-int8`  | 2.75 GB | 3.1 GB | 5.4 GB | **~4–5 GB** |
+| `aufklarer/VoxCPM2-MLX-bf16`  | 4.6 GB  | 9.1 GB | 11.4 GB | ~12 GB |
 
-The other macOS engines load separately when you select them — only one is resident at a time (switching unloads the previous): **Chatterbox** ~4 GB resident (1.3 GB on disk), **CosyVoice 3** lighter, **Qwen3-TTS** (1.7B bf16) heavier. OmniVoice is downloaded and loaded separately when selected.
+The macOS engines load separately when selected — only one is resident at a time (switching unloads the previous): **Chatterbox** ~4 GB resident (1.3 GB on disk), **CosyVoice 3** lighter than VoxCPM2, **Qwen3-TTS** (1.7B bf16) heavier. OmniVoice is downloaded and loaded separately when selected.
 
-The MLX buffer cache is capped at 1 GB (`SONIQO_MLX_CACHE_MB` to override) — without that cap, peak grows to tens of GB on long sessions as varying-shape buffers accumulate. Override the default model with `SONIQO_VOXCPM2_MODEL_ID=aufklarer/VoxCPM2-MLX-bf16` if you want the higher-fidelity weights.
+The MLX buffer cache is capped at 1 GB (`SONIQO_MLX_CACHE_MB` to override) — without that cap, peak grows to tens of GB on long sessions as varying-shape buffers accumulate. Override the VoxCPM2 model with `SONIQO_VOXCPM2_MODEL_ID=aufklarer/VoxCPM2-MLX-bf16` if you want the higher-fidelity weights.
 
 ### Try the demo
 
-Hit **Load demo** in the top bar. It bootstraps a Scene 04 storyboard with two cloned voices (Anna and Marek) and four lines of dialogue — one with each emotion marker — then synthesizes everything via VoxCPM2.
+Hit **Load demo** in the top bar. It bootstraps a Scene 04 storyboard with two cloned voices (Anna and Marek) and four lines of dialogue — one with each emotion marker — then synthesizes everything through the currently selected engine (CosyVoice 3 by default on macOS).
 
 ### Packaging your own .app / .dmg
 

@@ -12,10 +12,9 @@ let package = Package(
             name: "soniqo-tts-sidecar",
             dependencies: [
                 // Products consumed from speech-swift:
-                //   VoxCPM2TTS  — primary engine (simple cloning: refAudio + optional
-                //                 instruct for emotional markers, no transcript needed).
-                //   CosyVoiceTTS — legacy fallback (kept for one release behind
-                //                  SONIQO_TTS_ENGINE=cosyvoice while voxcpm2 stabilises).
+                //   CosyVoiceTTS — default macOS engine (zero-shot clone with transcript).
+                //   VoxCPM2TTS  — simple cloning: refAudio + optional instruct for
+                //                 emotional markers, no transcript needed.
                 //   Qwen3TTS    — older ICL path, kept behind SONIQO_TTS_ENGINE=qwen3.
                 //   ChatterboxTTS — multilingual zero-shot cloning (per-call language).
                 //   IndicMioTTS — Hindi/Indic emotion-marker synthesis.

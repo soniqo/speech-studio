@@ -13,14 +13,14 @@ This file is for any AI coding agent working in this repo (Claude, Codex, Cursor
 3. Rewrite or re-record lines in the cloned voice, with inline emotion markers (e.g. `<whisper>`, `<excited>`, `<sad>`).
 4. Preview against the video; export muxed output.
 
-Status: the clone → script → synthesize → export pipeline works end to end. macOS runs the MLX engines — `VoxCPM2` by default, with `CosyVoice3`, `Qwen3-TTS`, and `Chatterbox` (multilingual) selectable from the toolbar; Windows/Linux run `VoxCPM2` through speech-core's LiteRT backend.
+Status: the clone → script → synthesize → export pipeline works end to end. macOS runs the MLX engines — `CosyVoice3` by default, with `VoxCPM2`, `Qwen3-TTS`, and `Chatterbox` (multilingual) selectable from the toolbar; Windows/Linux run `VoxCPM2` through speech-core's LiteRT backend.
 
 ## Stack
 
 **Tauri** (Rust shell + web frontend) wrapping the Soniqo speech engines.
 
 - **Rust process** — Tauri app, owns the window, menu, file pickers, IPC, model lifecycle, file I/O. Talks to a voice-cloning TTS backend through a **sidecar** chosen at compile time per OS:
-  - **macOS (Apple Silicon)** — `speech-swift` (Swift / MLX) via the `swift-sidecar/` binary. `VoxCPM2` is the default cloning engine; `CosyVoice3`, `Qwen3-TTS`, and the multilingual `Chatterbox` are also selectable (all MLX, macOS-only).
+  - **macOS (Apple Silicon)** — `speech-swift` (Swift / MLX) via the `swift-sidecar/` binary. `CosyVoice3` is the default cloning engine; `VoxCPM2`, `Qwen3-TTS`, and the multilingual `Chatterbox` are also selectable (all MLX, macOS-only).
   - **Windows / Linux (x86_64)** — `speech-core` (C++) via the `core-sidecar/` binary, cloning + cloned-voice TTS with the `VoxCPM2` **LiteRT** model through the C ABI in `include/speech_core/voxcpm2_c.h`.
   - **v1+** — `speech-core`'s broader C ABI (`speech_core_c.h`) for STT (Parakeet), VAD (Silero), noise suppression (DeepFilterNet3), audio utilities.
 - **Web frontend** — **React + Vite**, rendered into the OS WebView (WKWebView on macOS, WebView2 on Windows, WebKitGTK on Linux). Owns the video timeline, voice-clone manager, script editor with emotion markers, and waveform views. Talks to Rust via Tauri `invoke()` commands and events.
@@ -28,7 +28,7 @@ Status: the clone → script → synthesize → export pipeline works end to end
 
 **Target platforms.**
 
-- **v0: macOS (Apple Silicon)** — MLX engines via `swift-sidecar`: `VoxCPM2` (default, cloning + emotional markers) plus selectable `CosyVoice3`, `Qwen3-TTS`, and the multilingual `Chatterbox`. These engines are macOS-only — Windows/Linux don't list them.
+- **v0: macOS (Apple Silicon)** — MLX engines via `swift-sidecar`: `CosyVoice3` (default, cloning + emotional markers) plus selectable `VoxCPM2`, `Qwen3-TTS`, and the multilingual `Chatterbox`. These engines are macOS-only — Windows/Linux don't list them.
 - **v0: Windows / Linux (x86_64)** — `VoxCPM2` via speech-core's LiteRT backend (`core-sidecar`). Same clone + emotion-marker story without MLX. ASR-graded retry isn't wired here yet (see Notes); the first successful take is accepted.
 
 Why Tauri (vs Electron): smaller binaries, native shell, easier C++ FFI from Rust, desktop-first distribution. Matches the "deploy-anywhere" positioning.
@@ -38,7 +38,7 @@ Why Tauri (vs Electron): smaller binaries, native shell, easier C++ FFI from Rus
 ## Sibling repos under `~/repos/`
 
 - **speech-core** — C++ engine. **v0 dependency on Windows/Linux**: the `core-sidecar` links its `speech_core_models_litert` static lib + the `libLiteRt` runtime and drives `VoxCPM2` via `include/speech_core/voxcpm2_c.h`. Also the v1+ source of truth for VAD / STT / non-cloned TTS / enhancement. Build it with `-DSPEECH_CORE_WITH_LITERT=ON -DLITERT_DIR=...` first (see its `AGENTS.md` for the C ABI and CMake targets).
-- **speech-swift** — speech models runtime for Apple Silicon (MLX / CoreML). The macOS voice-cloning backend: `VoxCPM2TTS` (default), `CosyVoiceTTS`, `Qwen3TTS` (ICL clone API in `Qwen3TTS+ICL.swift`), and `ChatterboxTTS` (multilingual, `Sources/ChatterboxTTS/`).
+- **speech-swift** — speech models runtime for Apple Silicon (MLX / CoreML). The macOS voice-cloning backend: `CosyVoiceTTS` (default), `VoxCPM2TTS`, `Qwen3TTS` (ICL clone API in `Qwen3TTS+ICL.swift`), and `ChatterboxTTS` (multilingual, `Sources/ChatterboxTTS/`).
 - **speech-models** — model artifacts on Hugging Face (`aufklarer/`). Studio bundles or downloads from here on first use.
 
 ## Build
@@ -114,7 +114,7 @@ pnpm tauri build                      # add --no-bundle to skip msi/nsis install
 - Per-OS Tauri bundle settings live in `tauri.{macos,windows,linux}.conf.json` (merged over `tauri.conf.json`): `externalBin` selects the sidecar, `resources` ships its runtime (`mlx.metallib` on macOS, `libLiteRt.dll`/`.so` on Windows/Linux). `tauri-build` verifies `externalBin` on **every** cargo build, so stage `src-tauri/binaries/<name>-<triple>` first (it's gitignored) or even `cargo test --lib` fails.
 - **macOS sidecar (`swift-sidecar`)**: the build doesn't emit `mlx.metallib` next to the binary on its own — copy it once from the speech-swift build that does (`~/repos/speech-swift/.build/arm64-apple-macosx/debug/mlx.metallib` → `swift-sidecar/.build/arm64-apple-macosx/debug/mlx.metallib`) or you'll get `MLX error: Failed to load the default metallib`. The Rust `colocate_metallib` helper (macOS-only) handles the bundled `.app` layout.
 - **Windows/Linux sidecar (`core-sidecar`)**: `cfg`'d off macOS. On `init_model` it loads the bundle from `SONIQO_VOXCPM2_BUNDLE_DIR` if set, else calls `sc_voxcpm2_create_from_pretrained` to download+cache it (`SONIQO_VOXCPM2_MODEL_ID`, default `soniqo/VoxCPM2-LiteRT`; cache via `SONIQO_MODEL_CACHE_DIR`/`SPEECH_CORE_CACHE_DIR`). The CMake colocates `libLiteRt` next to the binary; libcurl is linked statically (no extra DLL). `cfgValue` from the synth ladder has no LiteRT knob and is ignored (the ladder still varies `seed`).
-- **TTS model**: macOS MLX path defaults to `aufklarer/VoxCPM2-MLX-int8`. Windows/Linux use the `VoxCPM2-LiteRT` bundle — downloaded on first run (resumable; see speech-core's `SPEECH_CORE_WITH_HF_DOWNLOAD`) or supplied via `SONIQO_VOXCPM2_BUNDLE_DIR`.
+- **TTS model**: macOS defaults to the CosyVoice3 MLX engine; VoxCPM2 remains selectable via `aufklarer/VoxCPM2-MLX-int8`. Windows/Linux use the `VoxCPM2-LiteRT` bundle — downloaded on first run (resumable; see speech-core's `SPEECH_CORE_WITH_HF_DOWNLOAD`) or supplied via `SONIQO_VOXCPM2_BUNDLE_DIR`.
 - Generated clip audio is cached under `dirs::cache_dir()/audio.soniqo.studio/clips/` (`~/Library/Caches/...` on macOS, `%LOCALAPPDATA%\...` on Windows, `$XDG_CACHE_HOME`/`~/.cache` on Linux). The Rust and sidecar sides compute this independently and must stay in sync.
 - **Follow-ups**: (1) ASR-graded retry is macOS-only (`GRADING_AVAILABLE` in `lib.rs`); Windows/Linux accept the first successful take — wiring Parakeet-via-sidecar grading is TODO. (2) The Windows/Linux CI lanes (`build.yml` `build-windows` / `build-linux`) build the sidecar, run `ctest`, `pnpm tauri build`, and attach installers to the Release on tag — but they check out speech-core at the moving `ref: main` (not a pinned SHA) and run no model inference, so an x86_64 LiteRT runtime regression can still slip past CI. First-run model download is handled by speech-core, so installers don't embed the bundle.
 

@@ -503,8 +503,8 @@ final class FishAudioHolder: @unchecked Sendable {
 
 let fishAudioHolder = FishAudioHolder()
 
-// Engine selector. VoxCPM2 is the default. SONIQO_TTS_ENGINE remains a
-// process-level compatibility default, but Studio chooses the engine per
+// Engine selector. CosyVoice is the default. SONIQO_TTS_ENGINE remains a
+// process-level compatibility override, but Studio chooses the engine per
 // request so a user can switch without restarting the app.
 enum TTSEngine: String {
     case voxcpm2, cosyvoice, qwen3, chatterbox, omnivoice
@@ -515,7 +515,7 @@ enum TTSEngine: String {
 let defaultEngine: TTSEngine = {
     if let raw = ProcessInfo.processInfo.environment["SONIQO_TTS_ENGINE"]?.lowercased(),
        let e = TTSEngine(rawValue: raw) { return e }
-    return .voxcpm2
+    return .cosyvoice
 }()
 
 func requestedEngine(for request: Request) -> TTSEngine? {

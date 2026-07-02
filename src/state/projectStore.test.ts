@@ -28,6 +28,12 @@ beforeEach(() => {
   });
 });
 
+describe("projectStore model defaults", () => {
+  it("starts on CosyVoice so macOS loads it by default", () => {
+    expect(useProjectStore.getState().model.engine).toBe("cosyvoice");
+  });
+});
+
 describe("projectStore.addTrack / removeTrack", () => {
   it("adds a track to the project", () => {
     const t = speakerTrack();
