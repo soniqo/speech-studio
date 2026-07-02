@@ -9,6 +9,13 @@ import {
   emptyProject,
 } from "../types/project";
 import type { TtsEngineId, TtsEngineInfo } from "../ipc/commands";
+import {
+  detectInitialLocale,
+  isDefaultProjectName,
+  messages,
+  storeLocale,
+  type AppLocale,
+} from "../i18n/messages";
 
 interface TransportState {
   playing: boolean;
@@ -53,6 +60,8 @@ export interface SynthesisProgress {
 }
 
 interface ProjectStore {
+  locale: AppLocale;
+  setLocale: (locale: AppLocale) => void;
   project: Project;
   selection: Selection;
   transport: TransportState;
@@ -132,7 +141,20 @@ function findClipTrack(project: Project, clipId: string): SpeakerTrack | undefin
 }
 
 export const useProjectStore = create<ProjectStore>((set) => ({
-  project: emptyProject(),
+  locale: detectInitialLocale(),
+  setLocale: (locale) =>
+    set((s) => {
+      storeLocale(locale);
+      const nextDefaultName = messages[locale].defaults.untitledProject;
+      const project = isDefaultProjectName(s.project.name)
+        ? { ...s.project, name: nextDefaultName }
+        : s.project;
+      const wasClean = s.savedSnapshot === JSON.stringify(s.project);
+      const savedSnapshot =
+        wasClean && project !== s.project ? JSON.stringify(project) : s.savedSnapshot;
+      return { locale, project, savedSnapshot };
+    }),
+  project: emptyProject(messages[detectInitialLocale()].defaults.untitledProject),
   selection: { kind: "none" },
   transport: { playing: false, positionSec: 0, zoomPxPerSec: 100 },
   model: {
@@ -164,7 +186,7 @@ export const useProjectStore = create<ProjectStore>((set) => ({
               ? {
                   progress: 0,
                   percent: 0,
-                  message: "Preparing model download",
+                  message: messages.en.model.preparingDownload,
                   updatedAt: now,
                 }
               : undefined,
@@ -206,8 +228,8 @@ export const useProjectStore = create<ProjectStore>((set) => ({
 
   setProject: (project) => set({ project, selection: { kind: "none" } }),
   resetProject: (name) =>
-    set(() => {
-      const project = emptyProject(name);
+    set((s) => {
+      const project = emptyProject(name ?? messages[s.locale].defaults.untitledProject);
       return {
         project,
         selection: { kind: "none" } as Selection,

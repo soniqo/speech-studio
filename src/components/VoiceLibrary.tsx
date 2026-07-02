@@ -11,6 +11,8 @@ import {
 } from "../ipc/commands";
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
+import { useI18n } from "../i18n/useI18n";
+import type { Messages } from "../i18n/messages";
 
 // Reference-level thresholds, mirrored from speech-core's quiet-reference
 // rescue: below QUIET_RMS (0.04) the engine auto-boosts the reference; below
@@ -26,7 +28,15 @@ function levelDb(rms: number): string {
 
 let currentRefAudio: HTMLAudioElement | null = null;
 
+function sourceKindLabel(sourceKind: string, messages: Messages): string {
+  if (sourceKind === "library") return messages.voices.sourceKind.library;
+  if (sourceKind === "clip-clone") return messages.voices.sourceKind.clipClone;
+  if (sourceKind === "track-clone") return messages.voices.sourceKind.trackClone;
+  return sourceKind;
+}
+
 export function VoiceLibrary() {
+  const { messages: t } = useI18n();
   const voices = useProjectStore((s) => s.project.voices);
   const selection = useProjectStore((s) => s.selection);
   const addVoice = useProjectStore((s) => s.addVoice);
@@ -58,7 +68,7 @@ export function VoiceLibrary() {
     try {
       const picked = await pickAudio();
       if (!picked) return;
-      const name = picked.path.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "Voice";
+      const name = picked.path.split("/").pop()?.replace(/\.[^.]+$/, "") ?? t.voices.fallbackName;
       const imported = await importReferenceAudio(picked.path);
 
       // Measure the clip before accepting it as a voice. A nearly-silent
@@ -72,7 +82,7 @@ export function VoiceLibrary() {
       } catch (e) {
         // Decode failure: the file can't work as a reference at all.
         console.error("probe_reference failed", e);
-        setReferenceError(`Reference audio cannot be decoded: ${e}`);
+        setReferenceError(t.voices.decodeFailed(String(e)));
         return;
       }
       if (probe && probe.rms < NEAR_SILENT_RMS) {
@@ -90,22 +100,22 @@ export function VoiceLibrary() {
     <div className="p-2">
       <div className="mb-2 flex items-center justify-between px-1.5">
         <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-          Voices
+          {t.voices.title}
         </span>
         <Button
           variant="ghost"
           size="sm"
           onClick={addByReference}
-          title="Clone from reference clip"
+          title={t.voices.addReferenceTitle}
           className="h-6 px-1.5 text-xs"
         >
           <Plus className="mr-1 h-3 w-3" />
-          Reference
+          {t.voices.addReference}
         </Button>
       </div>
       {voices.length === 0 && (
         <div className="rounded-md border border-dashed border-border/60 bg-background/40 px-3 py-3 text-xs text-muted-foreground">
-          No cloned voices yet. Add a short reference clip to start.
+          {t.voices.empty}
         </div>
       )}
       {referenceError && (
@@ -128,6 +138,7 @@ export function VoiceLibrary() {
             selected={selection.kind === "voice" && selection.id === v.id}
             onSelect={() => select({ kind: "voice", id: v.id })}
             onDelete={() => removeVoice(v.id)}
+            messages={t}
           />
         ))}
       </div>
@@ -136,13 +147,13 @@ export function VoiceLibrary() {
           <div className="mx-4 max-w-md rounded-lg border border-border bg-background p-4 shadow-lg">
             <div className="mb-1 flex items-center gap-2 text-sm font-semibold">
               <TriangleAlert className="h-4 w-4 text-amber-500" />
-              This recording is nearly silent
+              {t.voices.nearlySilentTitle}
             </div>
             <p className="mb-3 text-xs text-muted-foreground">
-              "{pendingQuietRef.name}" measured {levelDb(pendingQuietRef.probe.rms)} average
-              level — far below typical speech. Cloning from it will produce a
-              degraded, noisy voice. Use the original recording if you have it,
-              or re-export this one at normal volume.
+              {t.voices.nearlySilentBody(
+                pendingQuietRef.name,
+                levelDb(pendingQuietRef.probe.rms),
+              )}
             </p>
             <div className="flex justify-end gap-2">
               <Button
@@ -158,7 +169,7 @@ export function VoiceLibrary() {
                   });
                 }}
               >
-                Use anyway
+                {t.voices.useAnyway}
               </Button>
               <Button
                 size="sm"
@@ -168,7 +179,7 @@ export function VoiceLibrary() {
                   void addByReference();
                 }}
               >
-                Choose another file
+                {t.voices.chooseAnother}
               </Button>
             </div>
           </div>
@@ -190,6 +201,7 @@ interface VoiceCardProps {
   selected: boolean;
   onSelect: () => void;
   onDelete: () => void;
+  messages: Messages;
 }
 
 function VoiceCard({
@@ -204,6 +216,7 @@ function VoiceCard({
   selected,
   onSelect,
   onDelete,
+  messages: t,
 }: VoiceCardProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -266,10 +279,10 @@ function VoiceCard({
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium">{name}</div>
         <div className="truncate text-[11px] text-muted-foreground">
-          {sourceKind}
+          {sourceKindLabel(sourceKind, t)}
           {referenceDurationSec != null && (
             <>
-              {" "}&middot; {Math.round(referenceDurationSec)}s
+              {" "}&middot; {t.common.secondsShort(Math.round(referenceDurationSec))}
               {referenceSampleRate != null && <> &middot; {Math.round(referenceSampleRate / 1000)} kHz</>}
               {referenceRms != null && <> &middot; {levelDb(referenceRms)}</>}
             </>
@@ -278,10 +291,12 @@ function VoiceCard({
         {referenceRms != null && referenceRms < QUIET_RMS && (
           <div
             className="mt-0.5 flex items-center gap-1 text-[11px] text-amber-500"
-            title="Quiet reference — the engine auto-boosts it during synthesis; re-record at normal volume for best quality"
+            title={t.voices.quietTitle}
           >
             <TriangleAlert className="h-3 w-3" />
-            {referenceRms < NEAR_SILENT_RMS ? "nearly silent reference" : "quiet reference (auto-boosted)"}
+            {referenceRms < NEAR_SILENT_RMS
+              ? t.voices.nearlySilentReference
+              : t.voices.quietReference}
           </div>
         )}
         {referenceText.trim().length > 0 && (
@@ -295,8 +310,8 @@ function VoiceCard({
         size="icon"
         onClick={togglePlay}
         disabled={!canPlay}
-        title={!canPlay ? "No reference audio" : playing ? "Stop" : "Play reference"}
-        aria-label={playing ? "Stop reference" : "Play reference"}
+        title={!canPlay ? t.voices.noReferenceAudio : playing ? t.voices.stop : t.voices.playReference}
+        aria-label={playing ? t.voices.stopReference : t.voices.playReference}
         className="h-7 w-7 shrink-0"
       >
         {playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
@@ -308,8 +323,8 @@ function VoiceCard({
           e.stopPropagation();
           onDelete();
         }}
-        title="Delete voice (tracks and clips using it become unassigned)"
-        aria-label="Delete voice"
+        title={t.voices.deleteTitle}
+        aria-label={t.voices.deleteAria}
         className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
       >
         <Trash2 className="h-3.5 w-3.5" />

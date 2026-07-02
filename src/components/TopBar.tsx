@@ -14,14 +14,18 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { cn } from "@/lib/utils";
 import { clipAudioPath } from "../lib/clipAudio";
 import { clampPercent, formatPercent } from "../lib/formatPercent";
+import { LOCALES, localizeModelProgressMessage, type AppLocale } from "../i18n/messages";
+import { useI18n } from "../i18n/useI18n";
 
-function formatElapsed(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) return "0s";
+function formatElapsed(seconds: number, locale: AppLocale): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return locale === "ru" ? "0 с" : "0s";
   const whole = Math.floor(seconds);
-  if (whole < 60) return `${whole}s`;
+  if (whole < 60) return locale === "ru" ? `${whole} с` : `${whole}s`;
   const minutes = Math.floor(whole / 60);
   const rest = whole % 60;
-  return `${minutes}m ${rest.toString().padStart(2, "0")}s`;
+  return locale === "ru"
+    ? `${minutes} мин ${rest.toString().padStart(2, "0")} с`
+    : `${minutes}m ${rest.toString().padStart(2, "0")}s`;
 }
 
 function useElapsedSeconds(startedAt?: number): number | null {
@@ -37,12 +41,13 @@ function useElapsedSeconds(startedAt?: number): number | null {
 
 /** Quiet until an update exists; one click downloads + relaunches. */
 function UpdateChip() {
+  const { messages: t } = useI18n();
   const { status, version, progress, install } = useUpdater();
   if (status === "idle") return null;
   if (status === "error") {
     return (
-      <Badge variant="destructive" title="Update failed — try again from the next launch, or download manually from GitHub releases">
-        update failed
+      <Badge variant="destructive" title={t.update.failedTitle}>
+        {t.update.failedLabel}
       </Badge>
     );
   }
@@ -53,7 +58,7 @@ function UpdateChip() {
       size="sm"
       onClick={install}
       disabled={downloading}
-      title={`Update to v${version} and restart`}
+      title={t.update.title(version)}
     >
       {downloading ? (
         <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
@@ -62,9 +67,9 @@ function UpdateChip() {
       )}
       {downloading
         ? progress != null
-          ? `Updating ${Math.round(progress * 100)}%`
-          : "Updating…"
-        : `Update to v${version}`}
+          ? t.update.updatingPercent(Math.round(progress * 100))
+          : t.update.updating
+        : t.update.updateTo(version)}
     </Button>
   );
 }
@@ -82,29 +87,30 @@ function ModelChip({
   lastLoadDurationSec?: number;
   progress?: ModelLoadProgress;
 }) {
+  const { locale, messages: t } = useI18n();
   const variant =
     status === "ready" ? "success" : status === "error" ? "destructive" : "muted";
   const readySuffix =
     status === "ready" && lastLoadDurationSec != null && lastLoadDurationSec >= 1
-      ? ` (${formatElapsed(lastLoadDurationSec)})`
+      ? ` (${formatElapsed(lastLoadDurationSec, locale)})`
       : "";
   const label =
     status === "ready"
-      ? `${engineName} ready${readySuffix}`
+      ? t.model.ready(engineName, readySuffix)
       : status === "loading"
         ? progress
           ? `${engineName} ${formatPercent(progress.percent)}`
-          : `${engineName} loading…`
+          : t.model.loading(engineName)
         : status === "error"
-          ? `${engineName} error`
-          : `${engineName} idle`;
+          ? t.model.error(engineName)
+          : t.model.idle(engineName);
   const title =
     error ??
     (status === "loading"
       ? progress
-        ? `${progress.message} — ${formatPercent(progress.percent)}.`
-        : `Loading ${engineName}. First run may download several GB.`
-      : `Model status: ${status}`);
+        ? `${localizeModelProgressMessage(locale, progress.message)} — ${formatPercent(progress.percent)}.`
+        : t.model.loadingTitle(engineName)
+      : t.model.statusTitle(status));
   return (
     <Badge
       variant={variant}
@@ -149,8 +155,10 @@ const TTS_LANGUAGES: { id: string; label: string }[] = [
 ];
 
 export function TopBar() {
+  const { locale, messages: t } = useI18n();
   const project = useProjectStore((s) => s.project);
   const renameProject = useProjectStore((s) => s.renameProject);
+  const setLocale = useProjectStore((s) => s.setLocale);
   const model = useProjectStore((s) => s.model);
   const setModelStatus = useProjectStore((s) => s.setModelStatus);
   const setTtsEngine = useProjectStore((s) => s.setTtsEngine);
@@ -174,22 +182,25 @@ export function TopBar() {
   const synthMode: "missing" | "all" = missingCount > 0 ? "missing" : "all";
   const synthLabel = synthBusy
     ? synthesisProgress
-      ? `Synth ${synthesisProgress.current}/${synthesisProgress.total} ${synthElapsed == null ? "" : formatElapsed(synthElapsed)} — ${synthesisProgress.label}`
-      : "Synthesizing…"
+      ? t.topBar.synthProgress(
+          synthesisProgress.current,
+          synthesisProgress.total,
+          synthElapsed == null ? "" : formatElapsed(synthElapsed, locale),
+          synthesisProgress.label,
+        )
+      : t.topBar.synthesizing
     : missingCount > 0
-      ? `Synthesize (${missingCount})`
-      : "Resynthesize all";
+      ? t.topBar.synthMissing(missingCount)
+      : t.topBar.resynthesizeAll;
 
   async function onSynthesize() {
     setActionError(null);
     try {
       const result = await runSynthesize(synthMode);
       if (result.total === 0) {
-        setActionError(
-          "Nothing to synthesize — clips need text and an assigned voice (locked clips are skipped)",
-        );
+        setActionError(t.topBar.nothingToSynthesize);
       } else if (result.failed > 0) {
-        setActionError(`${result.failed}/${result.total} clips failed — see console`);
+        setActionError(t.topBar.clipsFailed(result.failed, result.total));
       }
     } catch (e) {
       console.error("synthesize failed", e);
@@ -239,11 +250,11 @@ export function TopBar() {
   async function onExport() {
     const clips = exportClips();
     if (clips.length === 0) return;
-    const defaultName = `${project.name.trim() || "soniqo-export"}.wav`;
+    const defaultName = `${project.name.trim() || t.defaults.exportFileBase}.wav`;
     const chosen = await save({
-      title: "Export mix as WAV",
+      title: t.topBar.exportMixTitle,
       defaultPath: defaultName,
-      filters: [{ name: "WAV audio", extensions: ["wav"] }],
+      filters: [{ name: t.topBar.wavAudio, extensions: ["wav"] }],
     });
     if (!chosen) return;
     try {
@@ -255,7 +266,7 @@ export function TopBar() {
       console.log("[export] ok", result);
     } catch (e) {
       console.error("[export] failed", e);
-      setActionError(`export failed: ${e}`);
+      setActionError(t.topBar.exportFailed(String(e)));
     }
   }
 
@@ -281,6 +292,21 @@ export function TopBar() {
       </div>
       <div className="ml-auto flex items-center gap-2">
         <UpdateChip />
+        <Select
+          value={locale}
+          onValueChange={(value) => setLocale(value as AppLocale)}
+        >
+          <SelectTrigger className="h-7 w-[104px] text-xs" title={t.locale.selectorTitle}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {LOCALES.map((option) => (
+              <SelectItem key={option} value={option}>
+                {option === "ru" ? t.locale.russian : t.locale.english}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         {model.engines.length > 1 && (
           <Select
             value={model.engine}
@@ -291,8 +317,8 @@ export function TopBar() {
               className="h-7 w-[158px] text-xs"
               title={
                 modelStatus === "loading"
-                  ? `Switch engine and interrupt ${engineName} loading`
-                  : "Switches the loaded voice-cloning engine"
+                  ? t.topBar.switchLoadingEngine(engineName)
+                  : t.topBar.switchEngineTitle
               }
             >
               <SelectValue />
@@ -314,7 +340,7 @@ export function TopBar() {
           >
             <SelectTrigger
               className="h-7 w-[120px] text-xs"
-              title="Synthesis language for multilingual engines"
+              title={t.topBar.synthesisLanguageTitle}
             >
               <SelectValue />
             </SelectTrigger>
@@ -352,12 +378,12 @@ export function TopBar() {
           disabled={synthDisabled}
           title={
             modelStatus !== "ready"
-              ? `Wait for ${engineName} to finish loading`
+              ? t.topBar.waitModel(engineName)
               : !hasContent
-                ? "Load a project first"
+                ? t.topBar.loadProjectFirst
                 : missingCount > 0
-                  ? `Synthesize ${missingCount} clip(s) that don't have audio yet`
-                  : "Re-synthesize all non-locked clips"
+                  ? t.topBar.synthesizeMissingTitle(missingCount)
+                  : t.topBar.resynthesizeTitle
           }
         >
           {synthBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
@@ -370,11 +396,11 @@ export function TopBar() {
           disabled={exportDisabled}
           title={
             renderedCount === 0
-              ? "Synthesize at least one clip before exporting"
-              : `Export a WAV mix of ${renderedCount} clip${renderedCount === 1 ? "" : "s"}`
+              ? t.topBar.exportDisabledTitle
+              : t.topBar.exportTitle(renderedCount)
           }
         >
-          Export
+          {t.topBar.exportButton}
         </Button>
       </div>
     </header>

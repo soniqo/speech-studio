@@ -3,21 +3,12 @@ import { EMOTION_TAGS, EmotionTag } from "../types/project";
 import { useProjectStore } from "../state/projectStore";
 import { Textarea } from "./ui/textarea";
 import { Button } from "./ui/button";
+import { useI18n } from "../i18n/useI18n";
 
 interface ScriptEditorProps {
   value: string;
   onChange: (value: string) => void;
 }
-
-/** Honest, per-engine note about how the selected engine applies markers. */
-const STYLE_HINTS: Record<string, string> = {
-  instruction: "Markers steer this line's tone.",
-  intensity:
-    "Chatterbox applies markers as intensity only — more vs. less expressive, not a specific emotion.",
-  "suffix-tag": "Indic-Mio uses suffix tags like <happy> and clones from the reference audio.",
-  "bracket-tag": "Fish Audio uses bracket tags like [excited] and requires a reference transcript for cloning.",
-  none: "This engine ignores emotion markers.",
-};
 
 const INDIC_MIO_TAGS = ["happy", "sad", "angry", "disgust", "fear", "surprise"] as const;
 const FISH_AUDIO_TAGS = [
@@ -56,6 +47,7 @@ function stripEmotionTag(text: string): string {
 }
 
 export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
+  const { messages: m } = useI18n();
   const ref = useRef<HTMLTextAreaElement>(null);
   const styleMode = useProjectStore(
     (s) => s.model.engines.find((e) => e.id === s.model.engine)?.styleMode ?? "instruction",
@@ -70,6 +62,16 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
       ? value.match(LEADING_BRACKET_TAG)?.[1] || value.match(TRAILING_BRACKET_SUFFIX)?.[1]
     : value.match(LEADING_PAREN_TAG)?.[1] || value.match(LEADING_XML_TAG)?.[1];
   const currentTag = (rawCurrentTag ?? "").trim().toLowerCase();
+  const styleHint =
+    styleMode === "intensity"
+      ? m.script.styleHints.intensity
+      : styleMode === "suffix-tag"
+        ? m.script.styleHints.suffixTag
+        : styleMode === "bracket-tag"
+          ? m.script.styleHints.bracketTag
+          : styleMode === "none"
+            ? m.script.styleHints.none
+            : m.script.styleHints.instruction;
 
   function applyTag(
     tag: EmotionTag | (typeof INDIC_MIO_TAGS)[number] | (typeof FISH_AUDIO_TAGS)[number],
@@ -91,38 +93,38 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
   return (
     <div className="space-y-1.5">
       <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
-        Script
+        {m.script.label}
       </div>
       <Textarea
         ref={ref}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="Write the line. Pick an emotion below to set the tone."
+        placeholder={m.script.placeholder}
         className="min-h-[88px]"
       />
       <div className={`flex flex-wrap gap-1 ${markersIgnored ? "opacity-50" : ""}`}>
-        {markerTags.map((t) => {
-          const active = currentTag === t;
-          const markerLabel = suffixMode ? `<${t}>` : bracketMode ? `[${t}]` : `(${t})`;
+        {markerTags.map((tag) => {
+          const active = currentTag === tag;
+          const markerLabel = suffixMode ? `<${tag}>` : bracketMode ? `[${tag}]` : `(${tag})`;
           return (
             <Button
-              key={t}
+              key={tag}
               size="sm"
               variant={active ? "default" : "outline"}
-              onClick={() => applyTag(t)}
+              onClick={() => applyTag(tag)}
               title={
                 active
-                  ? `Remove ${markerLabel} marker`
-                  : `Set this line's tone to ${markerLabel}`
+                  ? m.script.removeMarker(markerLabel)
+                  : m.script.setMarker(markerLabel)
               }
               className="h-6 px-2 text-[11px] font-normal"
             >
-              {t}
+              {tag}
             </Button>
           );
         })}
       </div>
-      <div className="text-[11px] text-muted-foreground">{STYLE_HINTS[styleMode]}</div>
+      <div className="text-[11px] text-muted-foreground">{styleHint}</div>
     </div>
   );
 }

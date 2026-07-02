@@ -9,8 +9,11 @@ import { useDemoProgress } from "../hooks/useDemoProgress";
 import { useProjectStore } from "../state/projectStore";
 import { TooltipProvider } from "./ui/tooltip";
 import { clampPercent, formatPercent } from "../lib/formatPercent";
+import { localizeModelProgressMessage } from "../i18n/messages";
+import { useI18n } from "../i18n/useI18n";
 
 function ModelLoadingBanner() {
+  const { locale, messages: t } = useI18n();
   const model = useProjectStore((s) => s.model);
 
   if (model.status !== "loading") return null;
@@ -20,7 +23,9 @@ function ModelLoadingBanner() {
     model.engine;
   const progress = model.progress;
   const percent = progress ? clampPercent(progress.percent) : null;
-  const message = progress?.message ?? "Preparing model download";
+  const message = progress
+    ? localizeModelProgressMessage(locale, progress.message)
+    : t.appShell.preparingDownload;
 
   return (
     <div className="border-b border-border bg-muted/35 px-3 py-1.5">

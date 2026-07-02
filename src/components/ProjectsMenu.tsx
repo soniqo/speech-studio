@@ -12,6 +12,12 @@ import {
 } from "../ipc/commands";
 import type { Project } from "../types/project";
 import { Button } from "./ui/button";
+import {
+  dateLocale,
+  isDefaultProjectName,
+  localizeDemoProgressMessage,
+} from "../i18n/messages";
+import { useI18n } from "../i18n/useI18n";
 
 // Projects dropdown: open / delete persisted projects (JSON files under the
 // app data dir) plus the built-in demo scene. There is no Save button:
@@ -19,6 +25,7 @@ import { Button } from "./ui/button";
 // saved snapshot, so switching projects is always safe. An untouched empty
 // "Untitled" project is never written — no file litter from just launching.
 export function ProjectsMenu() {
+  const { locale, messages: t } = useI18n();
   const project = useProjectStore((s) => s.project);
   const setProject = useProjectStore((s) => s.setProject);
   const resetProject = useProjectStore((s) => s.resetProject);
@@ -42,7 +49,9 @@ export function ProjectsMenu() {
 
   const dirty = savedSnapshot
     ? JSON.stringify(project) !== savedSnapshot
-    : project.tracks.length > 0 || project.voices.length > 0 || project.name !== "Untitled";
+    : project.tracks.length > 0 ||
+      project.voices.length > 0 ||
+      !isDefaultProjectName(project.name);
 
   // Debounced autosave: any change to the project persists ~1 s later.
   // Reads the store at fire time, never a render-captured value.
@@ -99,7 +108,9 @@ export function ProjectsMenu() {
     const snapshot = JSON.stringify(current);
     if (snapshot === useProjectStore.getState().savedSnapshot) return;
     const hasContent =
-      current.tracks.length > 0 || current.voices.length > 0 || current.name !== "Untitled";
+      current.tracks.length > 0 ||
+      current.voices.length > 0 ||
+      !isDefaultProjectName(current.name);
     if (!hasContent) return;
     await saveProject(current);
     markSaved(snapshot);
@@ -142,7 +153,21 @@ export function ProjectsMenu() {
     const built = await buildDemoProject();
     // Stable id: repeated demo loads + autosave converge on one saved file
     // instead of littering a new project per load.
-    const p = { ...built, id: "demo-scene" };
+    const p = {
+      ...built,
+      id: "demo-scene",
+      name: t.defaults.demoProject,
+      voices: built.voices.map((voice, index) =>
+        index === 0
+          ? { ...voice, name: t.defaults.narratorVoice }
+          : index === 1
+            ? { ...voice, name: t.defaults.antagonistVoice }
+            : voice,
+      ),
+      tracks: built.tracks.map((track) =>
+        track.kind === "video" ? { ...track, name: t.defaults.demoVideoTrack } : track,
+      ),
+    };
     setProject(p);
     // The demo is a starting point, not a saved file — mark it clean so
     // closing it without edits doesn't prompt, but any edit makes it dirty.
@@ -157,7 +182,7 @@ export function ProjectsMenu() {
         size="sm"
         onClick={() => setOpen((v) => !v)}
         disabled={busy}
-        title="Projects — save, open, or start fresh"
+        title={t.projects.title}
       >
         {busy ? (
           <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
@@ -165,10 +190,10 @@ export function ProjectsMenu() {
           <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
         )}
         {busy && demoProgress
-          ? `${demoProgress.current}/${demoProgress.total} — ${demoProgress.message}`
-          : "Projects"}
+          ? `${demoProgress.current}/${demoProgress.total} — ${localizeDemoProgressMessage(locale, demoProgress.message)}`
+          : t.projects.button}
         {(saving || dirty) && (
-          <span className="ml-1 text-amber-400" title="Saving…">•</span>
+          <span className="ml-1 text-amber-400" title={t.projects.saving}>•</span>
         )}
         <ChevronDown className="ml-1 h-3 w-3" />
       </Button>
@@ -182,12 +207,12 @@ export function ProjectsMenu() {
           >
           <MenuRow
             icon={<FilePlus2 className="h-3.5 w-3.5" />}
-            label="New project"
+            label={t.projects.newProject}
             onClick={() => guarded(actionNew)}
           />
           <MenuRow
             icon={<Sparkles className="h-3.5 w-3.5" />}
-            label="Demo scene (built-in)"
+            label={t.projects.demoScene}
             onClick={() => guarded(actionDemo)}
           />
           <div className="my-1 border-t border-border/60" />
@@ -195,32 +220,34 @@ export function ProjectsMenu() {
             {saving || dirty ? (
               <>
                 <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                Saving…
+                {t.projects.saving}
               </>
             ) : (
               <>
                 <Check className="h-2.5 w-2.5 text-emerald-400" />
-                All changes saved automatically
+                {t.projects.allSaved}
               </>
             )}
           </div>
           <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-            Saved projects
+            {t.projects.savedProjects}
           </div>
           {items.length === 0 && (
-            <div className="px-2 pb-1.5 text-xs text-muted-foreground">None yet — Save to create one.</div>
+            <div className="px-2 pb-1.5 text-xs text-muted-foreground">
+              {t.projects.noneYet}
+            </div>
           )}
           {items.map((m) => (
             <div key={m.id} className="group flex items-center">
               <MenuRow
                 className="flex-1"
                 icon={<FolderOpen className="h-3.5 w-3.5" />}
-                label={(m.id === project.id ? project.name : m.name) || "Untitled"}
+                label={(m.id === project.id ? project.name : m.name) || t.defaults.untitledProject}
                 sub={
                   m.id === project.id
-                    ? "open now"
+                    ? t.projects.openNow
                     : m.savedAt
-                      ? new Date(m.savedAt).toLocaleString()
+                      ? new Date(m.savedAt).toLocaleString(dateLocale(locale))
                       : undefined
                 }
                 onClick={() => guarded(() => actionLoad(m.id))}
@@ -229,8 +256,8 @@ export function ProjectsMenu() {
                 variant="ghost"
                 size="icon"
                 className="h-6 w-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
-                title="Delete saved project file"
-                aria-label={`Delete ${m.name}`}
+                title={t.projects.deleteTitle}
+                aria-label={t.projects.deleteAria(m.name)}
                 onClick={() =>
                   void runBusy(async () => {
                     await deleteProject(m.id);

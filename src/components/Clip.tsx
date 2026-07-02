@@ -3,6 +3,7 @@ import { Lock } from "lucide-react";
 import { useProjectStore } from "../state/projectStore";
 import type { Clip as ClipModel } from "../types/project";
 import { cn } from "@/lib/utils";
+import { useI18n } from "../i18n/useI18n";
 
 interface ClipProps {
   clip: ClipModel;
@@ -12,6 +13,7 @@ interface ClipProps {
 type DragKind = "move" | "resize-l" | "resize-r";
 
 export function Clip({ clip, zoomPxPerSec }: ClipProps) {
+  const { messages: t } = useI18n();
   const select = useProjectStore((s) => s.select);
   const updateClip = useProjectStore((s) => s.updateClip);
   const selection = useProjectStore((s) => s.selection);
@@ -56,7 +58,7 @@ export function Clip({ clip, zoomPxPerSec }: ClipProps) {
     (e.target as Element).releasePointerCapture?.(e.pointerId);
   }
 
-  const preview = clip.text.trim() || "(empty)";
+  const preview = clip.text.trim() || t.clip.emptyPreview;
 
   return (
     <div
@@ -71,7 +73,7 @@ export function Clip({ clip, zoomPxPerSec }: ClipProps) {
       onPointerDown={(e) => onPointerDown(e, "move")}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      title={clip.text || "Empty clip"}
+      title={clip.text || t.clip.emptyTitle}
     >
       <div className="line-clamp-2 px-2 pt-1 text-[11px] leading-tight text-foreground">
         {preview}

@@ -3,6 +3,8 @@ import { useProjectStore } from "../state/projectStore";
 import type { SpeakerTrack, Track } from "../types/project";
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
+import { useI18n } from "../i18n/useI18n";
+import type { Messages } from "../i18n/messages";
 
 function TrackIcon({ track }: { track: Track }) {
   if (track.kind === "video") return <Video className="h-3.5 w-3.5 text-amber-300/80" />;
@@ -10,14 +12,15 @@ function TrackIcon({ track }: { track: Track }) {
   return <AudioWaveform className="h-3.5 w-3.5 text-orange-300/70" />;
 }
 
-function metaForTrack(track: Track, voiceName?: string): string {
-  if (track.kind === "video") return "Video";
+function metaForTrack(track: Track, messages: Messages, voiceName?: string): string {
+  if (track.kind === "video") return messages.tracks.kindVideo;
   if (track.kind === "speaker")
-    return voiceName ? `Voice: ${voiceName}` : "No voice assigned";
-  return "Audio";
+    return voiceName ? messages.tracks.voiceMeta(voiceName) : messages.tracks.noVoice;
+  return messages.tracks.kindAudio;
 }
 
 export function TrackList() {
+  const { messages: m } = useI18n();
   const project = useProjectStore((s) => s.project);
   const selection = useProjectStore((s) => s.selection);
   const select = useProjectStore((s) => s.select);
@@ -27,44 +30,50 @@ export function TrackList() {
 
   function addSpeaker() {
     const idx = project.tracks.filter((t) => t.kind === "speaker").length + 1;
-    const t: SpeakerTrack = {
+    const track: SpeakerTrack = {
       kind: "speaker",
       id: crypto.randomUUID(),
-      name: `Speaker ${idx}`,
+      name: m.defaults.speakerTrack(idx),
       clips: [],
     };
-    addTrack(t);
-    select({ kind: "track", id: t.id });
+    addTrack(track);
+    select({ kind: "track", id: track.id });
   }
 
   return (
     <div className="p-2">
       <div className="mb-2 flex items-center justify-between px-1.5">
         <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-          Tracks
+          {m.tracks.title}
         </span>
-        <Button variant="ghost" size="sm" onClick={addSpeaker} title="Add speaker track" className="h-6 px-1.5 text-xs">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={addSpeaker}
+          title={m.tracks.addSpeakerTitle}
+          className="h-6 px-1.5 text-xs"
+        >
           <Plus className="mr-1 h-3 w-3" />
-          Speaker
+          {m.tracks.addSpeaker}
         </Button>
       </div>
       {project.tracks.length === 0 && (
         <div className="rounded-md border border-dashed border-border/60 bg-background/40 px-3 py-3 text-xs text-muted-foreground">
-          No tracks yet. Add a speaker.
+          {m.tracks.empty}
         </div>
       )}
       <div className="space-y-1">
-        {project.tracks.map((t) => {
-          const voiceId = t.kind === "speaker" ? t.voiceId : undefined;
+        {project.tracks.map((trackItem) => {
+          const voiceId = trackItem.kind === "speaker" ? trackItem.voiceId : undefined;
           const voiceName = project.voices.find((v) => v.id === voiceId)?.name;
-          const selected = selection.kind === "track" && selection.id === t.id;
+          const selected = selection.kind === "track" && selection.id === trackItem.id;
           function selectTrack() {
-            select({ kind: "track", id: t.id });
+            select({ kind: "track", id: trackItem.id });
           }
 
           return (
             <div
-              key={t.id}
+              key={trackItem.id}
               role="button"
               tabIndex={0}
               className={cn(
@@ -81,16 +90,16 @@ export function TrackList() {
                 selectTrack();
               }}
             >
-              <TrackIcon track={t} />
+              <TrackIcon track={trackItem} />
               <div className="min-w-0 flex-1">
                 <input
                   className="block w-full bg-transparent text-sm focus:outline-none"
-                  value={t.name}
-                  onChange={(e) => renameTrack(t.id, e.target.value)}
+                  value={trackItem.name}
+                  onChange={(e) => renameTrack(trackItem.id, e.target.value)}
                   onClick={(e) => e.stopPropagation()}
                 />
                 <div className="truncate text-[11px] text-muted-foreground">
-                  {metaForTrack(t, voiceName)}
+                  {metaForTrack(trackItem, m, voiceName)}
                 </div>
               </div>
               <Button
@@ -98,10 +107,10 @@ export function TrackList() {
                 size="icon"
                 onClick={(e) => {
                   e.stopPropagation();
-                  removeTrack(t.id);
+                  removeTrack(trackItem.id);
                 }}
-                title="Delete track and its clips"
-                aria-label="Delete track"
+                title={m.tracks.deleteTitle}
+                aria-label={m.tracks.deleteAria}
                 className="h-6 w-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
               >
                   <Trash2 className="h-3 w-3" />

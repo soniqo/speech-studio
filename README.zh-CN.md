@@ -1,6 +1,6 @@
 # Speech Studio
 
-[English](README.md) · **简体中文**
+[English](README.md) · [Русский](README.ru.md) · **简体中文**
 
 > 一个 [Soniqo](https://soniqo.audio) 项目。
 

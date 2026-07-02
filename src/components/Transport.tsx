@@ -3,6 +3,7 @@ import { useProjectStore } from "../state/projectStore";
 import { useAnyClipRendered } from "../hooks/useSynthesizeAll";
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
+import { useI18n } from "../i18n/useI18n";
 
 function formatTime(sec: number): string {
   const m = Math.floor(sec / 60);
@@ -12,6 +13,7 @@ function formatTime(sec: number): string {
 }
 
 export function Transport() {
+  const { messages: t } = useI18n();
   const transport = useProjectStore((s) => s.transport);
   const project = useProjectStore((s) => s.project);
   const setPlaying = useProjectStore((s) => s.setPlaying);
@@ -23,14 +25,14 @@ export function Transport() {
   const synthBusy = useProjectStore((s) => s.synthesisStatus === "running");
   const playable = hasContent && anyRendered && !synthBusy;
   const playTitle = !hasContent
-    ? "Load a project first"
+    ? t.transport.loadProjectFirst
     : !anyRendered
-      ? "Synthesize at least one clip before playing"
+      ? t.transport.synthesizeBeforePlaying
       : synthBusy
-        ? "Wait — still synthesizing"
+        ? t.transport.waitSynthesizing
         : transport.playing
-          ? "Pause"
-          : "Play";
+          ? t.transport.pause
+          : t.transport.play;
 
   const progressPct = (transport.positionSec / duration) * 100;
 
