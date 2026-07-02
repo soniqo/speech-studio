@@ -3,6 +3,15 @@ export type AppLocale = (typeof LOCALES)[number];
 
 export const LOCALE_STORAGE_KEY = "speech-studio.locale";
 
+function getLocaleStorage(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function normalizeLocale(value: string | null | undefined): AppLocale | null {
   if (!value) return null;
   const normalized = value.toLowerCase();
@@ -16,9 +25,14 @@ export function normalizeLocale(value: string | null | undefined): AppLocale | n
 }
 
 export function detectInitialLocale(): AppLocale {
-  if (typeof window !== "undefined") {
-    const stored = normalizeLocale(window.localStorage.getItem(LOCALE_STORAGE_KEY));
-    if (stored) return stored;
+  const storage = getLocaleStorage();
+  if (storage && typeof storage.getItem === "function") {
+    try {
+      const stored = normalizeLocale(storage.getItem(LOCALE_STORAGE_KEY));
+      if (stored) return stored;
+    } catch {
+      // Fall through to navigator detection when persisted preferences are unavailable.
+    }
   }
   if (typeof navigator !== "undefined") {
     const preferred = [navigator.language, ...(navigator.languages ?? [])]
@@ -481,8 +495,13 @@ export type Messages = typeof en;
 export const messages: Record<AppLocale, Messages> = { en, ru };
 
 export function storeLocale(locale: AppLocale) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+  const storage = getLocaleStorage();
+  if (!storage || typeof storage.setItem !== "function") return;
+  try {
+    storage.setItem(LOCALE_STORAGE_KEY, locale);
+  } catch {
+    // Locale switching should still work for the current session without persistence.
+  }
 }
 
 export function dateLocale(locale: AppLocale): string | undefined {
