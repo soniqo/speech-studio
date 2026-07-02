@@ -125,11 +125,64 @@ jobs:
         run: pnpm tsc --noEmit
 
       - name: Build Tauri bundle (.app + .dmg, unsigned)
+        id: build_tauri_bundle_macos
         working-directory: speech-studio
         # No --no-bundle: we want the .app + .dmg. The macOS bundler
         # ad-hoc signs without a Developer ID; users will need to right-
         # click → Open the first time to bypass Gatekeeper.
-        run: pnpm tauri build
+        run: |
+          set -euo pipefail
+
+          cleanup_stale_dmg_mounts() {
+            echo "::group::macOS disk image cleanup"
+            hdiutil info || true
+            while IFS= read -r device; do
+              [[ -n "$device" ]] || continue
+              echo "Detaching stale Speech Studio disk image: $device"
+              hdiutil detach "$device" || hdiutil detach -force "$device" || true
+            done < <(hdiutil info | awk '/\/Volumes\/Speech Studio/ { print $1 }' | sort -u)
+            rm -f src-tauri/target/release/bundle/dmg/rw.*.dmg || true
+            echo "::endgroup::"
+          }
+
+          if ! pnpm tauri build; then
+            echo "::warning::Tauri macOS bundle failed once; cleaning stale disk images and retrying."
+            cleanup_stale_dmg_mounts
+            sleep 5
+            pnpm tauri build
+          fi
+
+      - name: Collect macOS DMG diagnostics
+        if: ${{ failure() && steps.build_tauri_bundle_macos.outcome == 'failure' }}
+        working-directory: speech-studio
+        run: |
+          set +e
+          echo "::group::macOS version"
+          sw_vers
+          xcodebuild -version
+          echo "::endgroup::"
+
+          echo "::group::disk images"
+          hdiutil info
+          diskutil list
+          pgrep -af 'hdiutil|diskimages' || true
+          echo "::endgroup::"
+
+          echo "::group::bundle outputs"
+          find src-tauri/target/release/bundle -maxdepth 4 -print
+          du -sh src-tauri/target/release/bundle/* 2>/dev/null
+          echo "::endgroup::"
+
+      - name: Upload macOS DMG diagnostics
+        if: ${{ failure() && steps.build_tauri_bundle_macos.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: speech-studio-macos-dmg-diagnostics
+          path: |
+            speech-studio/src-tauri/target/release/bundle/dmg/**
+            speech-studio/src-tauri/target/release/bundle/macos/*.app/Contents/Info.plist
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Upload .dmg
         uses: actions/upload-artifact@v4
@@ -522,7 +575,27 @@ jobs:
         working-directory: speech-studio
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: pnpm tauri build
+        run: |
+          set -euo pipefail
+
+          cleanup_stale_dmg_mounts() {
+            echo "::group::macOS disk image cleanup"
+            hdiutil info || true
+            while IFS= read -r device; do
+              [[ -n "$device" ]] || continue
+              echo "Detaching stale Speech Studio disk image: $device"
+              hdiutil detach "$device" || hdiutil detach -force "$device" || true
+            done < <(hdiutil info | awk '/\/Volumes\/Speech Studio/ { print $1 }' | sort -u)
+            rm -f src-tauri/target/release/bundle/dmg/rw.*.dmg || true
+            echo "::endgroup::"
+          }
+
+          if ! pnpm tauri build; then
+            echo "::warning::Tauri macOS bundle failed once; cleaning stale disk images and retrying."
+            cleanup_stale_dmg_mounts
+            sleep 5
+            pnpm tauri build
+          fi
 
       # NSMicrophoneUsageDescription has to live in Info.plist for the TCC
       # mic prompt to render; Tauri 2 has no config knob for arbitrary plist
@@ -585,15 +658,30 @@ jobs:
           set -euo pipefail
           DMG_DIR="src-tauri/target/release/bundle/dmg"
           APP="src-tauri/target/release/bundle/macos/Speech Studio.app"
-          OLD_DMG="$(ls "$DMG_DIR"/*.dmg | head -1)"
+          shopt -s nullglob
+          DMGS=("$DMG_DIR"/*.dmg)
+          shopt -u nullglob
+          if (( ${#DMGS[@]} == 0 )); then
+            echo "::error::No DMG found in $DMG_DIR"
+            exit 1
+          fi
+          OLD_DMG="${DMGS[0]}"
           DMG_NAME="$(basename "$OLD_DMG")"
           STAGE="$RUNNER_TEMP/dmg-stage"
           rm -rf "$STAGE" && mkdir -p "$STAGE"
           cp -R "$APP" "$STAGE/"
           ln -s /Applications "$STAGE/Applications"
           rm -f "$OLD_DMG"
-          hdiutil create -volname "Speech Studio" -srcfolder "$STAGE" \
-            -ov -format UDZO "$DMG_DIR/$DMG_NAME"
+          create_dmg() {
+            hdiutil create -volname "Speech Studio" -srcfolder "$STAGE" \
+              -ov -format UDZO "$DMG_DIR/$DMG_NAME"
+          }
+          if ! create_dmg; then
+            echo "::warning::hdiutil failed once while rebuilding the signed DMG; retrying."
+            rm -f "$DMG_DIR/$DMG_NAME"
+            sleep 5
+            create_dmg
+          fi
           rm -rf "$STAGE"
 
       - name: Codesign .dmg
@@ -602,7 +690,14 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
-          DMG="$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)"
+          shopt -s nullglob
+          DMGS=(src-tauri/target/release/bundle/dmg/*.dmg)
+          shopt -u nullglob
+          if (( ${#DMGS[@]} == 0 )); then
+            echo "::error::No DMG found to codesign"
+            exit 1
+          fi
+          DMG="${DMGS[0]}"
           codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DMG"
 
       - name: Notarize and staple
@@ -613,7 +708,14 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          DMG="$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)"
+          shopt -s nullglob
+          DMGS=(src-tauri/target/release/bundle/dmg/*.dmg)
+          shopt -u nullglob
+          if (( ${#DMGS[@]} == 0 )); then
+            echo "::error::No DMG found to notarize"
+            exit 1
+          fi
+          DMG="${DMGS[0]}"
           # --wait blocks until Apple finishes scanning (~3-15 min) and
           # exits non-zero on rejection, so we never staple unverified bits.
           xcrun notarytool submit "$DMG" \
