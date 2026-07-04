@@ -24,6 +24,12 @@ export type TtsEngineId =
 export interface TtsEngineInfo {
   id: TtsEngineId;
   displayName: string;
+  modelName: string;
+  modelId: string;
+  modelSize: string;
+  languages: string[];
+  voiceProfileModes: Array<"reference-clone" | "preset-voice" | "designed-voice">;
+  requiresReferenceAudio: boolean;
   requiresReferenceTranscript: boolean;
   /** When true the engine needs a caller-chosen language (e.g. Chatterbox's
    * `[lang]` token); the UI surfaces a language picker. */
@@ -31,11 +37,24 @@ export interface TtsEngineInfo {
   /** How inline emotion markers are applied, so the editor can set honest
    * expectations:
    * - `instruction`: marker → a natural-language style instruction (real tone).
+   * - `controlled-vocabulary`: marker → fixed model vocabulary (limited tone).
    * - `intensity`: marker → an expressiveness level only (not a specific emotion).
    * - `suffix-tag`: marker → an engine-specific suffix tag such as `<happy>`.
    * - `bracket-tag`: marker → an engine-specific suffix tag such as `[excited]`.
    * - `none`: markers are ignored. */
-  styleMode: "instruction" | "intensity" | "suffix-tag" | "bracket-tag" | "none";
+  styleMode:
+    | "instruction"
+    | "controlled-vocabulary"
+    | "intensity"
+    | "suffix-tag"
+    | "bracket-tag"
+    | "none";
+  supportsInstruct: boolean;
+  supportedMarkers: string[];
+  needsTrim: boolean;
+  sampleRate: number;
+  usePolicy: "commercial-safe" | "research-only" | "needs-review" | string;
+  readiness: "production" | "legacy-fallback" | "benchmark" | "experimental" | string;
 }
 
 export function availableTtsEngines(): Promise<TtsEngineInfo[]> {

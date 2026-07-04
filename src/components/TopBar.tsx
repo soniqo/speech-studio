@@ -142,17 +142,31 @@ function ModelChip({
   );
 }
 
-/** Languages a per-language engine (Chatterbox) can synthesize today. */
-const TTS_LANGUAGES: { id: string; label: string }[] = [
-  { id: "en", label: "English" },
-  { id: "ar", label: "العربية" },
-  { id: "hi", label: "हिन्दी" },
-  { id: "de", label: "Deutsch" },
-  { id: "es", label: "Español" },
-  { id: "fr", label: "Français" },
-  { id: "it", label: "Italiano" },
-  { id: "pt", label: "Português" },
-];
+const TTS_LANGUAGE_LABELS: Record<string, string> = {
+  ar: "العربية",
+  da: "Dansk",
+  de: "Deutsch",
+  el: "Ελληνικά",
+  en: "English",
+  es: "Español",
+  fi: "Suomi",
+  fr: "Français",
+  he: "עברית",
+  hi: "हिन्दी",
+  it: "Italiano",
+  ja: "日本語",
+  ko: "한국어",
+  ms: "Bahasa Melayu",
+  nl: "Nederlands",
+  no: "Norsk",
+  pl: "Polski",
+  pt: "Português",
+  ru: "Русский",
+  sv: "Svenska",
+  sw: "Kiswahili",
+  tr: "Türkçe",
+  zh: "中文",
+};
 
 export function TopBar() {
   const { locale, messages: t } = useI18n();
@@ -177,6 +191,9 @@ export function TopBar() {
   const modelStatus = model.status;
   const engineInfo = model.engines.find((candidate) => candidate.id === model.engine);
   const engineName = engineInfo?.displayName ?? "VoxCPM2";
+  const languageOptions = (engineInfo?.languages.length ? engineInfo.languages : ["en"]).map(
+    (id) => ({ id, label: TTS_LANGUAGE_LABELS[id] ?? id }),
+  );
   const synthDisabled = synthBusy || modelStatus !== "ready" || !hasContent;
   const engineSwitchDisabled = synthBusy;
   const synthMode: "missing" | "all" = missingCount > 0 ? "missing" : "all";
@@ -345,7 +362,7 @@ export function TopBar() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {TTS_LANGUAGES.map((lang) => (
+              {languageOptions.map((lang) => (
                 <SelectItem key={lang.id} value={lang.id}>
                   {lang.label}
                 </SelectItem>

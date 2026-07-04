@@ -1,7 +1,5 @@
-// Tag names recognised by the sidecar's emotionInstructs map. Wrap a line
-// with one of these (XML-style `<tag>…</tag>` or leading parenthetical
-// `(tag) …`) and the sidecar passes the matching natural-language style
-// instruction to VoxCPM2's `instruct` channel.
+// Default marker names for instruction-style engines. Engine descriptors can
+// provide a narrower marker palette for suffix/bracket/vocabulary models.
 export const EMOTION_TAGS = [
   "soft",
   "warm",

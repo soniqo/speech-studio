@@ -249,6 +249,8 @@ const en = {
     setMarker: (marker: string) => `Set this line's tone to ${marker}`,
     styleHints: {
       instruction: "Markers steer this line's tone.",
+      controlledVocabulary:
+        "This engine only accepts a fixed style vocabulary; emotion markers are approximations.",
       intensity:
         "Chatterbox applies markers as intensity only — more vs. less expressive, not a specific emotion.",
       suffixTag:
@@ -468,6 +470,8 @@ const ru: typeof en = {
     setMarker: (marker) => `Задать интонацию ${marker}`,
     styleHints: {
       instruction: "Маркеры управляют интонацией этой реплики.",
+      controlledVocabulary:
+        "Этот движок принимает только фиксированный словарь стилей; эмоции передаются приблизительно.",
       intensity:
         "Chatterbox применяет маркеры только как уровень выразительности, а не как конкретную эмоцию.",
       suffixTag:

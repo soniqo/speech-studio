@@ -205,18 +205,34 @@ export const useProjectStore = create<ProjectStore>((set) => ({
         : s,
     ),
   setTtsEngine: (engine) =>
-    set((s) => ({
-      model: {
-        ...s.model,
-        engine,
-        language: engine === "indic-mio" ? "hi" : s.model.language,
-        error: undefined,
-      },
-    })),
+    set((s) => {
+      const nextEngine = s.model.engines.find((candidate) => candidate.id === engine);
+      const languages = nextEngine?.languages ?? [];
+      const language = languages.length && !languages.includes(s.model.language)
+        ? languages[0]
+        : engine === "indic-mio"
+          ? "hi"
+          : s.model.language;
+      return {
+        model: {
+          ...s.model,
+          engine,
+          language,
+          error: undefined,
+        },
+      };
+    }),
   setTtsLanguage: (language) =>
     set((s) => ({ model: { ...s.model, language, error: undefined } })),
   setAvailableTtsEngines: (engines) =>
-    set((s) => ({ model: { ...s.model, engines } })),
+    set((s) => {
+      const active = engines.find((candidate) => candidate.id === s.model.engine);
+      const languages = active?.languages ?? [];
+      const language = languages.length && !languages.includes(s.model.language)
+        ? languages[0]
+        : s.model.language;
+      return { model: { ...s.model, engines, language } };
+    }),
 
   demoProgress: null,
   setDemoProgress: (p) => set(() => ({ demoProgress: p })),

@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { EMOTION_TAGS, EmotionTag } from "../types/project";
+import { EMOTION_TAGS } from "../types/project";
 import { useProjectStore } from "../state/projectStore";
 import { Textarea } from "./ui/textarea";
 import { Button } from "./ui/button";
@@ -9,20 +9,6 @@ interface ScriptEditorProps {
   value: string;
   onChange: (value: string) => void;
 }
-
-const INDIC_MIO_TAGS = ["happy", "sad", "angry", "disgust", "fear", "surprise"] as const;
-const FISH_AUDIO_TAGS = [
-  "pause",
-  "emphasis",
-  "laughing",
-  "excited",
-  "angry",
-  "whisper",
-  "screaming",
-  "shouting",
-  "surprised",
-  "sad",
-] as const;
 
 // Match `(tag)` or `<tag>...</tag>` wrappers at the start of a line so we can
 // swap them out cleanly. Permissive on tag character set to allow custom
@@ -46,16 +32,43 @@ function stripEmotionTag(text: string): string {
   return out.replace(TRAILING_XML_SUFFIX, "").replace(TRAILING_BRACKET_SUFFIX, "");
 }
 
+function rawMarkerValue(marker: string): string {
+  const value = marker.trim();
+  if (
+    (value.startsWith("<") && value.endsWith(">")) ||
+    (value.startsWith("[") && value.endsWith("]")) ||
+    (value.startsWith("(") && value.endsWith(")"))
+  ) {
+    return value.slice(1, -1).trim().toLowerCase();
+  }
+  return value.toLowerCase();
+}
+
+function suffixMarker(marker: string): string {
+  const value = marker.trim();
+  return value.startsWith("<") && value.endsWith(">") ? value : `<${value}>`;
+}
+
+function bracketMarker(marker: string): string {
+  const value = marker.trim();
+  return value.startsWith("[") && value.endsWith("]") ? value : `[${value}]`;
+}
+
 export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
   const { messages: m } = useI18n();
   const ref = useRef<HTMLTextAreaElement>(null);
-  const styleMode = useProjectStore(
-    (s) => s.model.engines.find((e) => e.id === s.model.engine)?.styleMode ?? "instruction",
+  const engineInfo = useProjectStore(
+    (s) => s.model.engines.find((e) => e.id === s.model.engine),
   );
+  const styleMode = engineInfo?.styleMode ?? "instruction";
   const markersIgnored = styleMode === "none";
   const suffixMode = styleMode === "suffix-tag";
   const bracketMode = styleMode === "bracket-tag";
-  const markerTags = suffixMode ? INDIC_MIO_TAGS : bracketMode ? FISH_AUDIO_TAGS : EMOTION_TAGS;
+  const markerTags = markersIgnored
+    ? []
+    : engineInfo?.supportedMarkers.length
+      ? engineInfo.supportedMarkers
+      : [...EMOTION_TAGS];
   const rawCurrentTag = suffixMode
     ? value.match(TRAILING_XML_SUFFIX)?.[1]
     : bracketMode
@@ -65,6 +78,8 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
   const styleHint =
     styleMode === "intensity"
       ? m.script.styleHints.intensity
+      : styleMode === "controlled-vocabulary"
+        ? m.script.styleHints.controlledVocabulary
       : styleMode === "suffix-tag"
         ? m.script.styleHints.suffixTag
         : styleMode === "bracket-tag"
@@ -73,19 +88,18 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
             ? m.script.styleHints.none
             : m.script.styleHints.instruction;
 
-  function applyTag(
-    tag: EmotionTag | (typeof INDIC_MIO_TAGS)[number] | (typeof FISH_AUDIO_TAGS)[number],
-  ) {
+  function applyTag(tag: string) {
     const body = stripEmotionTag(value).trim();
-    if (currentTag === tag) {
+    const rawTag = rawMarkerValue(tag);
+    if (currentTag === rawTag) {
       // Toggle off: clicking the active tag removes it.
       onChange(body);
     } else if (suffixMode) {
-      onChange(`${body} <${tag}>`.trim());
+      onChange(`${body} ${suffixMarker(tag)}`.trim());
     } else if (bracketMode) {
-      onChange(`[${tag}] ${body}`.trim());
+      onChange(`${bracketMarker(tag)} ${body}`.trim());
     } else {
-      onChange(`(${tag}) ${body}`);
+      onChange(`(${rawTag}) ${body}`);
     }
     requestAnimationFrame(() => ref.current?.focus());
   }
@@ -104,8 +118,13 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
       />
       <div className={`flex flex-wrap gap-1 ${markersIgnored ? "opacity-50" : ""}`}>
         {markerTags.map((tag) => {
-          const active = currentTag === tag;
-          const markerLabel = suffixMode ? `<${tag}>` : bracketMode ? `[${tag}]` : `(${tag})`;
+          const rawTag = rawMarkerValue(tag);
+          const active = currentTag === rawTag;
+          const markerLabel = suffixMode
+            ? suffixMarker(tag)
+            : bracketMode
+              ? bracketMarker(tag)
+              : `(${rawTag})`;
           return (
             <Button
               key={tag}
@@ -119,7 +138,7 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
               }
               className="h-6 px-2 text-[11px] font-normal"
             >
-              {tag}
+              {rawTag}
             </Button>
           );
         })}

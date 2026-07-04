@@ -3,6 +3,28 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { ScriptEditor } from "./ScriptEditor";
 import { EMOTION_TAGS } from "../types/project";
 import { useProjectStore } from "../state/projectStore";
+import type { TtsEngineInfo } from "../ipc/commands";
+
+function engineInfo(patch: Partial<TtsEngineInfo> & Pick<TtsEngineInfo, "id" | "displayName">): TtsEngineInfo {
+  return {
+    modelName: patch.id,
+    modelId: `test/${patch.id}`,
+    modelSize: "test",
+    languages: ["en"],
+    voiceProfileModes: ["reference-clone"],
+    requiresReferenceAudio: true,
+    requiresReferenceTranscript: false,
+    requiresLanguage: false,
+    styleMode: "instruction",
+    supportsInstruct: true,
+    supportedMarkers: [...EMOTION_TAGS],
+    needsTrim: true,
+    sampleRate: 24_000,
+    usePolicy: "commercial-safe",
+    readiness: "production",
+    ...patch,
+  };
+}
 
 describe("ScriptEditor", () => {
   beforeEach(() => {
@@ -55,13 +77,15 @@ describe("ScriptEditor", () => {
         engine: "indic-mio",
         language: "hi",
         engines: [
-          {
+          engineInfo({
             id: "indic-mio",
             displayName: "Indic-Mio",
             requiresReferenceTranscript: false,
             requiresLanguage: false,
             styleMode: "suffix-tag",
-          },
+            supportsInstruct: false,
+            supportedMarkers: ["happy", "sad", "angry"],
+          }),
         ],
         status: "ready",
       },
@@ -78,13 +102,15 @@ describe("ScriptEditor", () => {
         engine: "fish-audio",
         language: "en",
         engines: [
-          {
+          engineInfo({
             id: "fish-audio",
             displayName: "Fish Audio S2 Pro",
             requiresReferenceTranscript: true,
             requiresLanguage: false,
             styleMode: "bracket-tag",
-          },
+            supportsInstruct: false,
+            supportedMarkers: ["sad", "excited"],
+          }),
         ],
         status: "ready",
       },
@@ -93,5 +119,49 @@ describe("ScriptEditor", () => {
     render(<ScriptEditor value="[sad] नमस्ते" onChange={onChange} />);
     fireEvent.click(screen.getByRole("button", { name: "excited" }));
     expect(onChange).toHaveBeenCalledWith("[excited] नमस्ते");
+  });
+
+  it("uses the engine-provided marker palette", () => {
+    useProjectStore.setState({
+      model: {
+        engine: "fish-audio",
+        language: "en",
+        engines: [
+          engineInfo({
+            id: "fish-audio",
+            displayName: "Fish Audio S2 Pro",
+            styleMode: "bracket-tag",
+            supportedMarkers: ["whisper", "excited"],
+          }),
+        ],
+        status: "ready",
+      },
+    });
+    render(<ScriptEditor value="" onChange={() => {}} />);
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "whisper",
+      "excited",
+    ]);
+  });
+
+  it("does not render marker buttons when the active engine ignores markers", () => {
+    useProjectStore.setState({
+      model: {
+        engine: "qwen3",
+        language: "en",
+        engines: [
+          engineInfo({
+            id: "qwen3",
+            displayName: "Qwen3-TTS",
+            styleMode: "none",
+            supportsInstruct: false,
+            supportedMarkers: [],
+          }),
+        ],
+        status: "ready",
+      },
+    });
+    render(<ScriptEditor value="Hello" onChange={() => {}} />);
+    expect(screen.queryAllByRole("button")).toHaveLength(0);
   });
 });

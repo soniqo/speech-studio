@@ -407,8 +407,68 @@ impl TtsEngine {
         }
     }
 
+    fn model_name(self) -> &'static str {
+        match self {
+            Self::VoxCPM2 => "voxcpm2-mlx-int8",
+            Self::CosyVoice => "cosyvoice-3-0.5b-mlx-bf16",
+            Self::Qwen3 => "qwen3-tts-1.7b-mlx-bf16",
+            Self::Chatterbox => "chatterbox-multilingual-mlx-fp16",
+            Self::OmniVoice => "omnivoice-mlx-int8",
+            Self::IndicMio => "indic-mio-mlx-fp16",
+            Self::FishAudio => "fish-audio-s2-pro-mlx-fp16",
+        }
+    }
+
+    fn model_id(self) -> &'static str {
+        match self {
+            Self::VoxCPM2 => "aufklarer/VoxCPM2-MLX-int8",
+            Self::CosyVoice => "aufklarer/CosyVoice3-0.5B-MLX-bf16",
+            Self::Qwen3 => "aufklarer/Qwen3-TTS-12Hz-1.7B-Base-MLX-bf16",
+            Self::Chatterbox => "aufklarer/Chatterbox-Multilingual-MLX-fp16",
+            Self::OmniVoice => "aufklarer/OmniVoice-MLX-int8",
+            Self::IndicMio => "aufklarer/Indic-Mio-MLX-fp16",
+            Self::FishAudio => "aufklarer/Fish-Audio-S2-Pro-MLX-fp16",
+        }
+    }
+
+    fn model_size(self) -> &'static str {
+        match self {
+            Self::CosyVoice => "0.5B",
+            Self::Qwen3 => "1.7B",
+            Self::Chatterbox => "0.5B",
+            Self::OmniVoice => "0.5B",
+            Self::IndicMio => "0.6B",
+            Self::VoxCPM2 => "1.7B",
+            Self::FishAudio => "S2 Pro",
+        }
+    }
+
+    fn languages(self) -> &'static [&'static str] {
+        match self {
+            Self::Qwen3 => &["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
+            Self::Chatterbox => &[
+                "ar", "da", "de", "el", "en", "es", "fi", "fr", "he", "hi", "it", "ja", "ko", "ms",
+                "nl", "no", "pl", "pt", "ru", "sv", "sw", "tr", "zh",
+            ],
+            Self::OmniVoice => &[
+                "en", "hi", "ru", "es", "fr", "de", "it", "pt", "zh", "ja", "ko",
+            ],
+            Self::IndicMio => &["hi", "en"],
+            Self::FishAudio => &["hi", "en"],
+            Self::VoxCPM2 | Self::CosyVoice => &["en", "zh"],
+        }
+    }
+
+    fn voice_profile_modes(self) -> &'static [&'static str] {
+        &["reference-clone"]
+    }
+
     fn requires_reference_transcript(self) -> bool {
         matches!(self, Self::CosyVoice | Self::Qwen3 | Self::FishAudio)
+    }
+
+    fn requires_reference_audio(self) -> bool {
+        true
     }
 
     /// Whether synthesis needs a caller-chosen language. Chatterbox prepends a
@@ -420,6 +480,7 @@ impl TtsEngine {
 
     /// How the engine applies inline emotion markers — drives the editor hint:
     /// - `instruction`: marker → an engine-specific style instruction.
+    /// - `controlled-vocabulary`: marker → fixed engine vocabulary only.
     /// - `intensity`: marker → an expressiveness level only (Chatterbox; not a
     ///   specific emotion).
     /// - `suffix-tag`: marker is appended as an engine-specific suffix tag.
@@ -427,11 +488,103 @@ impl TtsEngine {
     /// - `none`: markers are stripped and ignored.
     fn style_mode(self) -> &'static str {
         match self {
-            Self::VoxCPM2 | Self::CosyVoice | Self::OmniVoice => "instruction",
+            Self::VoxCPM2 | Self::CosyVoice => "instruction",
+            Self::OmniVoice => "controlled-vocabulary",
             Self::Chatterbox => "intensity",
             Self::IndicMio => "suffix-tag",
             Self::FishAudio => "bracket-tag",
             Self::Qwen3 => "none",
+        }
+    }
+
+    fn supports_instruct(self) -> bool {
+        matches!(self, Self::VoxCPM2 | Self::CosyVoice)
+    }
+
+    fn supported_markers(self) -> &'static [&'static str] {
+        match self {
+            Self::VoxCPM2 | Self::CosyVoice => &[
+                "soft",
+                "warm",
+                "whispering",
+                "intense",
+                "excited",
+                "happy",
+                "calm",
+                "serious",
+                "surprised",
+                "sad",
+                "angry",
+                "dramatic",
+                "laughs",
+            ],
+            Self::OmniVoice => &[
+                "whispering",
+                "excited",
+                "happy",
+                "calm",
+                "serious",
+                "sad",
+                "angry",
+            ],
+            Self::Chatterbox => &[
+                "soft",
+                "warm",
+                "whispering",
+                "intense",
+                "excited",
+                "happy",
+                "calm",
+                "serious",
+                "surprised",
+                "sad",
+                "angry",
+                "dramatic",
+                "laughs",
+            ],
+            Self::IndicMio => &["happy", "sad", "angry", "disgust", "fear", "surprise"],
+            Self::FishAudio => &[
+                "pause",
+                "emphasis",
+                "laughing",
+                "excited",
+                "angry",
+                "whisper",
+                "screaming",
+                "shouting",
+                "surprised",
+                "sad",
+            ],
+            Self::Qwen3 => &[],
+        }
+    }
+
+    fn needs_trim(self) -> bool {
+        trim_long_form_chunk_edges(self)
+    }
+
+    fn sample_rate(self) -> u32 {
+        match self {
+            Self::VoxCPM2 => 48_000,
+            Self::FishAudio => 44_100,
+            Self::CosyVoice | Self::Qwen3 | Self::Chatterbox | Self::OmniVoice | Self::IndicMio => {
+                24_000
+            }
+        }
+    }
+
+    fn use_policy(self) -> &'static str {
+        match self {
+            Self::FishAudio => "research-only",
+            _ => "commercial-safe",
+        }
+    }
+
+    fn readiness(self) -> &'static str {
+        match self {
+            Self::Qwen3 => "legacy-fallback",
+            Self::FishAudio => "benchmark",
+            _ => "production",
         }
     }
 }
@@ -441,12 +594,12 @@ fn normalize_sidecar_language(engine: TtsEngine, language: Option<&str>) -> Opti
     match engine {
         // The UI keeps BCP-47-ish ids because Chatterbox expects `[hi]`, but
         // OmniVoice gives cleaner Hindi output with the spelled language item.
-        TtsEngine::OmniVoice | TtsEngine::IndicMio => trimmed.map(|value| {
-            match value.to_ascii_lowercase().as_str() {
+        TtsEngine::OmniVoice | TtsEngine::IndicMio => {
+            trimmed.map(|value| match value.to_ascii_lowercase().as_str() {
                 "hi" | "hin" => "hindi".to_string(),
                 _ => value.to_string(),
-            }
-        }),
+            })
+        }
         _ => trimmed.map(str::to_string),
     }
 }
@@ -502,21 +655,55 @@ struct TtsEngineInfo {
     id: TtsEngine,
     #[serde(rename = "displayName")]
     display_name: &'static str,
+    #[serde(rename = "modelName")]
+    model_name: &'static str,
+    #[serde(rename = "modelId")]
+    model_id: &'static str,
+    #[serde(rename = "modelSize")]
+    model_size: &'static str,
+    languages: &'static [&'static str],
+    #[serde(rename = "voiceProfileModes")]
+    voice_profile_modes: &'static [&'static str],
+    #[serde(rename = "requiresReferenceAudio")]
+    requires_reference_audio: bool,
     #[serde(rename = "requiresReferenceTranscript")]
     requires_reference_transcript: bool,
     #[serde(rename = "requiresLanguage")]
     requires_language: bool,
     #[serde(rename = "styleMode")]
     style_mode: &'static str,
+    #[serde(rename = "supportsInstruct")]
+    supports_instruct: bool,
+    #[serde(rename = "supportedMarkers")]
+    supported_markers: &'static [&'static str],
+    #[serde(rename = "needsTrim")]
+    needs_trim: bool,
+    #[serde(rename = "sampleRate")]
+    sample_rate: u32,
+    #[serde(rename = "usePolicy")]
+    use_policy: &'static str,
+    readiness: &'static str,
 }
 
 fn tts_engine_info(engine: TtsEngine) -> TtsEngineInfo {
     TtsEngineInfo {
         id: engine,
         display_name: engine.display_name(),
+        model_name: engine.model_name(),
+        model_id: engine.model_id(),
+        model_size: engine.model_size(),
+        languages: engine.languages(),
+        voice_profile_modes: engine.voice_profile_modes(),
+        requires_reference_audio: engine.requires_reference_audio(),
         requires_reference_transcript: engine.requires_reference_transcript(),
         requires_language: engine.requires_language(),
         style_mode: engine.style_mode(),
+        supports_instruct: engine.supports_instruct(),
+        supported_markers: engine.supported_markers(),
+        needs_trim: engine.needs_trim(),
+        sample_rate: engine.sample_rate(),
+        use_policy: engine.use_policy(),
+        readiness: engine.readiness(),
     }
 }
 
@@ -2917,7 +3104,29 @@ mod tests {
         assert_eq!(TtsEngine::VoxCPM2.style_mode(), "instruction");
         assert_eq!(TtsEngine::IndicMio.style_mode(), "suffix-tag");
         assert_eq!(TtsEngine::FishAudio.style_mode(), "bracket-tag");
+        assert_eq!(TtsEngine::OmniVoice.style_mode(), "controlled-vocabulary");
         assert_eq!(TtsEngine::Qwen3.style_mode(), "none");
+    }
+
+    #[test]
+    fn tts_engine_info_exposes_model_capabilities() {
+        let qwen = tts_engine_info(TtsEngine::Qwen3);
+        assert_eq!(qwen.model_name, "qwen3-tts-1.7b-mlx-bf16");
+        assert_eq!(qwen.model_id, "aufklarer/Qwen3-TTS-12Hz-1.7B-Base-MLX-bf16");
+        assert_eq!(qwen.voice_profile_modes, &["reference-clone"]);
+        assert!(qwen.requires_reference_audio);
+        assert!(qwen.requires_reference_transcript);
+        assert!(!qwen.supports_instruct);
+        assert_eq!(qwen.style_mode, "none");
+        assert!(qwen.languages.contains(&"en"));
+        assert!(qwen.languages.contains(&"ru"));
+        assert!(qwen.supported_markers.is_empty());
+
+        let fish = tts_engine_info(TtsEngine::FishAudio);
+        assert_eq!(fish.style_mode, "bracket-tag");
+        assert!(fish.supported_markers.contains(&"excited"));
+        assert_eq!(fish.use_policy, "research-only");
+        assert!(!fish.needs_trim);
     }
 
     #[test]
