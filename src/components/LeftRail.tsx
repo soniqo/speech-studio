@@ -1,10 +1,11 @@
 import { useState } from "react";
+import { DictationPanel } from "./DictationPanel";
 import { TrackList } from "./TrackList";
 import { VoiceLibrary } from "./VoiceLibrary";
 import { cn } from "@/lib/utils";
 import { useI18n } from "../i18n/useI18n";
 
-type Tab = "tracks" | "voices";
+type Tab = "tracks" | "voices" | "dictation";
 
 export function LeftRail() {
   const { messages: t } = useI18n();
@@ -13,7 +14,7 @@ export function LeftRail() {
   return (
     <aside className="flex w-[240px] flex-col border-r border-border bg-card/40">
       <div className="flex border-b border-border">
-        {(["tracks", "voices"] as const).map((item) => (
+        {(["tracks", "voices", "dictation"] as const).map((item) => (
           <button
             key={item}
             onClick={() => setTab(item)}
@@ -24,12 +25,22 @@ export function LeftRail() {
                 : "text-muted-foreground hover:text-foreground border-b-2 border-transparent",
             )}
           >
-            {item === "tracks" ? t.rail.tracks : t.rail.voices}
+            {item === "tracks"
+              ? t.rail.tracks
+              : item === "voices"
+                ? t.rail.voices
+                : t.rail.dictation}
           </button>
         ))}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {tab === "tracks" ? <TrackList /> : <VoiceLibrary />}
+        {tab === "tracks" ? (
+          <TrackList />
+        ) : tab === "voices" ? (
+          <VoiceLibrary />
+        ) : (
+          <DictationPanel />
+        )}
       </div>
     </aside>
   );

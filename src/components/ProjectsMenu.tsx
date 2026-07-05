@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, FilePlus2, FolderOpen, Loader2, Sparkles, Trash2 } from "lucide-react";
 import { useProjectStore } from "../state/projectStore";
-import { buildDemoProject } from "../state/demoProject";
+import { buildDemoProject, buildHindiDemoProject } from "../state/demoProject";
 import {
   deleteProject,
   listProjects,
@@ -29,10 +29,12 @@ export function ProjectsMenu() {
   const project = useProjectStore((s) => s.project);
   const setProject = useProjectStore((s) => s.setProject);
   const resetProject = useProjectStore((s) => s.resetProject);
+  const setTtsEngine = useProjectStore((s) => s.setTtsEngine);
   const savedSnapshot = useProjectStore((s) => s.savedSnapshot);
   const markSaved = useProjectStore((s) => s.markSaved);
   const setDemoProgress = useProjectStore((s) => s.setDemoProgress);
   const demoProgress = useProjectStore((s) => s.demoProgress);
+  const engines = useProjectStore((s) => s.model.engines);
 
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<ProjectMeta[]>([]);
@@ -175,6 +177,41 @@ export function ProjectsMenu() {
     setDemoProgress(null);
   }
 
+  async function actionHindiDemo() {
+    const built = await buildHindiDemoProject();
+    const p = {
+      ...built,
+      id: "demo-hindi-voice-clone",
+      name: t.defaults.hindiDemoProject,
+      voices: built.voices.map((voice, index) =>
+        index === 0
+          ? { ...voice, name: t.defaults.hindiVoice }
+          : index === 1
+            ? { ...voice, name: t.defaults.hindiVoice2 }
+            : voice,
+      ),
+      tracks: built.tracks.map((track) =>
+        track.kind === "video"
+          ? { ...track, name: t.defaults.hindiDemoVideoTrack }
+          : track.kind === "speaker"
+            ? {
+                ...track,
+                name:
+                  track.voiceId === built.voices[0].id
+                    ? t.defaults.hindiSpeakerTrack
+                    : t.defaults.hindiSpeakerTrack2,
+              }
+            : track,
+      ),
+    };
+    setProject(p);
+    markSaved(JSON.stringify(p));
+    setDemoProgress(null);
+    if (engines.some((engine) => engine.id === "indic-mio")) {
+      setTtsEngine("indic-mio");
+    }
+  }
+
   return (
     <div className="relative" ref={rootRef}>
       <Button
@@ -214,6 +251,11 @@ export function ProjectsMenu() {
             icon={<Sparkles className="h-3.5 w-3.5" />}
             label={t.projects.demoScene}
             onClick={() => guarded(actionDemo)}
+          />
+          <MenuRow
+            icon={<Sparkles className="h-3.5 w-3.5" />}
+            label={t.projects.hindiDemoScene}
+            onClick={() => guarded(actionHindiDemo)}
           />
           <div className="my-1 border-t border-border/60" />
           <div className="flex items-center gap-1 px-2 py-1 text-[10px] text-muted-foreground">

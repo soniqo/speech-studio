@@ -680,7 +680,7 @@ fn bundled_voice_path(name: &str) -> PathBuf {
 }
 
 // Reference text for the bundled WAVs. Must match seed_demo in src/lib.rs.
-const ANNA_REF_TEXT: &str = "The Hispaniola was rolling scuppers under in the ocean swell. The booms were tearing at the blocks, ruddering.";
+const ANNA_REF_TEXT: &str = "The Hispaniola was rolling scuppers under in the ocean swell. The booms were tearing at the blocks. The rudder was banging.";
 const MAREK_REF_TEXT: &str = "It is a pretty little spot there, a green grass plateau running along by the water's edge and overhung by willows.";
 
 // Demo target lines. Must match `lines` in `seed_demo`.
@@ -932,4 +932,274 @@ fn demo_references_e2e() {
         "overall mean coverage {:.0}% < 90%",
         overall * 100.0
     );
+}
+
+// -----------------------------------------------------------------------------
+// Onset-junk + emotion-marker e2e tests.
+//
+// Qwen3 ICL and OmniVoice both opened some renders (reference-dependent) with
+// a short low-level codec artifact before the first word — quiet hiss for
+// Qwen3 on the Marek reference, a low hum for OmniVoice on Anna — followed by
+// a silence gap before the phrase. The sidecar removes these via
+// trimLeadingJunk before edge conditioning. These tests replay the exact
+// production requests that used to produce audible junk (deterministic at
+// seed 1000) and assert the first thing you hear is speech-loud.
+//
+// Indic-Mio styles via a closed suffix-tag vocabulary; the sidecar maps the
+// Studio's inline "(happy)"-style marker onto it. Before that mapping the
+// model read the marker aloud, so the third test pins "marker is styled, not
+// spoken".
+//
+// All three load real models (cached under ~/.cache/huggingface after the
+// first run) and need the `speech` CLI for Parakeet grading. Opt in via:
+//   cargo test --test sidecar -- --ignored --nocapture qwen_onset_is_speech_not_junk
+//   cargo test --test sidecar -- --ignored --nocapture omnivoice_onset_is_speech_not_junk
+//   cargo test --test sidecar -- --ignored --nocapture indic_mio_does_not_speak_emotion_marker
+// -----------------------------------------------------------------------------
+
+/// Read a sidecar-written WAV (44-byte header, 16-bit PCM mono) as f32 samples.
+fn read_wav_samples(path: &str) -> (Vec<f32>, usize) {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).expect("open wav");
+    let mut header = [0u8; 44];
+    f.read_exact(&mut header).expect("wav header");
+    let channels = u16::from_le_bytes([header[22], header[23]]) as usize;
+    let sample_rate = u32::from_le_bytes([header[24], header[25], header[26], header[27]]) as usize;
+    let bps = u16::from_le_bytes([header[34], header[35]]);
+    assert_eq!(bps, 16, "expected 16-bit PCM");
+    assert_eq!(channels, 1, "expected mono");
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).expect("wav data");
+    let samples = buf
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+        .collect();
+    (samples, sample_rate)
+}
+
+/// Group audio into energy islands (5 ms RMS windows above -60 dBFS, closed
+/// by ≥50 ms of quiet) and return (first_island_peak_db, max_island_peak_db).
+/// Mirrors the sidecar's trimLeadingJunk analysis: a clean render opens with
+/// a speech-loud island; onset junk shows up as a first island far below the
+/// loudest one (measured 10-28 dB down across both engines).
+fn onset_island_peaks(samples: &[f32], sample_rate: usize) -> Option<(f64, f64)> {
+    let win = sample_rate * 5 / 1000;
+    if win == 0 || samples.len() < win * 8 {
+        return None;
+    }
+    let dbs: Vec<f64> = samples
+        .chunks_exact(win)
+        .map(|c| {
+            let e = c.iter().map(|s| (*s as f64) * (*s as f64)).sum::<f64>() / c.len() as f64;
+            if e > 0.0 { 10.0 * e.log10() } else { -120.0 }
+        })
+        .collect();
+    let mut peaks: Vec<f64> = Vec::new();
+    let mut current: Option<f64> = None;
+    let mut quiet = 0;
+    for &db in &dbs {
+        if db > -60.0 {
+            current = Some(current.map_or(db, |p: f64| p.max(db)));
+            quiet = 0;
+        } else if let Some(peak) = current {
+            quiet += 1;
+            if quiet >= 10 {
+                peaks.push(peak);
+                current = None;
+            }
+        }
+    }
+    if let Some(peak) = current {
+        peaks.push(peak);
+    }
+    let first = *peaks.first()?;
+    let max = peaks.iter().cloned().fold(f64::MIN, f64::max);
+    Some((first, max))
+}
+
+fn parakeet_transcript(audio_path: &str) -> String {
+    let out = Command::new("speech")
+        .args(["transcribe", audio_path, "--engine", "parakeet"])
+        .output()
+        .expect("run `speech transcribe` (install the speech CLI for e2e tests)");
+    assert!(
+        out.status.success(),
+        "speech transcribe failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("Result: "))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Send one synthesis request, assert success, and return the output path.
+fn synth_expect_ok(s: &mut SidecarHandle, payload: serde_json::Value) -> String {
+    let id = payload["id"].as_str().unwrap_or("").to_string();
+    s.send(&payload);
+    let v = s.recv();
+    assert_eq!(v["id"], serde_json::Value::String(id));
+    assert_eq!(
+        v["ok"],
+        true,
+        "synthesis failed: {}",
+        v["error"].as_str().unwrap_or("(no error)")
+    );
+    let path = v["result"]["audioPath"].as_str().expect("audioPath").to_string();
+    let dur = v["result"]["durationSec"].as_f64().unwrap_or(0.0);
+    assert!(
+        (1.0..=15.0).contains(&dur),
+        "implausible duration {:.2}s for {}",
+        dur,
+        path
+    );
+    path
+}
+
+/// The first energy island must be speech, not a quiet junk prefix. 8 dB is
+/// the sidecar detector's own quiet-junk bound: clean takes measured ≤4.7 dB
+/// below the loudest island, junk takes ≥10.2 dB.
+fn assert_onset_is_speech(audio_path: &str, target_text: &str) {
+    let (samples, sample_rate) = read_wav_samples(audio_path);
+    let (first_peak, max_peak) =
+        onset_island_peaks(&samples, sample_rate).expect("no energy islands in output");
+    let deficit = max_peak - first_peak;
+    assert!(
+        deficit <= 8.0,
+        "onset junk: first island peaks {:.1} dB below the loudest ({:.1} vs {:.1} dBFS) in {}",
+        deficit,
+        first_peak,
+        max_peak,
+        audio_path
+    );
+    let transcript = parakeet_transcript(audio_path);
+    let (_, _, cov) = token_coverage(target_text, &transcript);
+    assert!(
+        cov >= 0.6,
+        "coverage {:.0}% < 60% — transcript {:?} vs target {:?}",
+        cov * 100.0,
+        transcript,
+        target_text
+    );
+}
+
+#[test]
+#[ignore]
+fn qwen_onset_is_speech_not_junk() {
+    let marek = bundled_voice_path("marek");
+    let mut s = SidecarHandle::spawn();
+    // The exact production request (post-preprocess text, seed 1000) that
+    // used to open with ~100 ms of quiet hiss followed by half a second of
+    // silence before the phrase.
+    let path = synth_expect_ok(
+        &mut s,
+        serde_json::json!({
+            "id": "e2e-qwen-onset",
+            "command": "synthesize_icl",
+            "engine": "qwen3",
+            "text": "Then we end this together, Tonight.",
+            "voiceId": "marek",
+            "referenceAudioPath": marek.to_string_lossy(),
+            "referenceText": MAREK_REF_TEXT,
+            "seed": 1000,
+            "maxTokens": 44,
+        }),
+    );
+    assert_onset_is_speech(&path, "Then we end this together, Tonight.");
+}
+
+#[test]
+#[ignore]
+fn omnivoice_onset_is_speech_not_junk() {
+    let anna = bundled_voice_path("anna");
+    let mut s = SidecarHandle::spawn();
+    // OmniVoice's variant of the same artifact: a ~200 ms low hum on the
+    // Anna reference before the first word.
+    let path = synth_expect_ok(
+        &mut s,
+        serde_json::json!({
+            "id": "e2e-omni-onset",
+            "command": "synthesize_omnivoice",
+            "engine": "omnivoice",
+            "modelId": "aufklarer/OmniVoice-MLX-fp16",
+            "text": "(dramatic) I never thought we'd make it this far.",
+            "voiceId": "anna",
+            "referenceAudioPath": anna.to_string_lossy(),
+            "referenceText": ANNA_REF_TEXT,
+            "language": "en",
+            "seed": 1000,
+        }),
+    );
+    assert_onset_is_speech(&path, "I never thought we'd make it this far.");
+}
+
+#[test]
+#[ignore]
+fn indic_mio_does_not_speak_emotion_marker() {
+    let anna = bundled_voice_path("anna");
+    let mut s = SidecarHandle::spawn();
+    let target = "This line should sound bright and clear.";
+    let path = synth_expect_ok(
+        &mut s,
+        serde_json::json!({
+            "id": "e2e-indic-marker",
+            "command": "synthesize_indic_mio",
+            "engine": "indic-mio",
+            "modelId": "aufklarer/Indic-Mio-MLX-fp16",
+            "text": format!("(happy) {}", target),
+            "voiceId": "indic-test",
+            "referenceAudioPath": anna.to_string_lossy(),
+            "referenceText": ANNA_REF_TEXT,
+            "language": "en",
+            "seed": 1000,
+        }),
+    );
+    let transcript = parakeet_transcript(&path);
+    let (_, _, cov) = token_coverage(target, &transcript);
+    assert!(
+        cov >= 0.6,
+        "coverage {:.0}% < 60% — transcript {:?}",
+        cov * 100.0,
+        transcript
+    );
+    assert!(
+        !tokenize(&transcript).contains(&"happy".to_string()),
+        "emotion marker was spoken aloud — transcript {:?}",
+        transcript
+    );
+}
+
+#[test]
+fn sidecar_rejects_engine_mismatch() {
+    let mut s = SidecarHandle::spawn();
+    s.send(&serde_json::json!({
+        "id": "mismatch",
+        "command": "synthesize_omnivoice",
+        "engine": "qwen3",
+        "text": "hi",
+        "referenceAudioPath": "/nonexistent.wav",
+    }));
+    let v = s.recv();
+    assert_eq!(v["ok"], false);
+    let err = v["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("requires engine"),
+        "unexpected error: {}",
+        err
+    );
+}
+
+#[test]
+fn sidecar_rejects_indic_mio_without_text() {
+    let mut s = SidecarHandle::spawn();
+    s.send(&serde_json::json!({
+        "id": "no-text",
+        "command": "synthesize_indic_mio",
+        "engine": "indic-mio",
+    }));
+    let v = s.recv();
+    assert_eq!(v["ok"], false);
+    let err = v["error"].as_str().unwrap_or("");
+    assert!(err.contains("requires text"), "unexpected error: {}", err);
 }

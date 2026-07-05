@@ -19,6 +19,7 @@ let package = Package(
                 //   ChatterboxTTS — multilingual zero-shot cloning (per-call language).
                 //   IndicMioTTS — Hindi/Indic emotion-marker synthesis.
                 //   FishAudioTTS — experimental Fish Audio S2 Pro clone + bracket markers.
+                //   ParakeetASR — local dictation / transcription model.
                 //   AudioCommon — shared audio I/O helpers.
                 .product(name: "VoxCPM2TTS", package: "speech-swift"),
                 .product(name: "CosyVoiceTTS", package: "speech-swift"),
@@ -27,6 +28,7 @@ let package = Package(
                 .product(name: "OmniVoiceTTS", package: "speech-swift"),
                 .product(name: "IndicMioTTS", package: "speech-swift"),
                 .product(name: "FishAudioTTS", package: "speech-swift"),
+                .product(name: "ParakeetASR", package: "speech-swift"),
                 .product(name: "AudioCommon", package: "speech-swift")
             ],
             path: "Sources/soniqo-tts-sidecar",

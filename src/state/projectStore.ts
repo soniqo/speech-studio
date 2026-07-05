@@ -140,6 +140,18 @@ function findClipTrack(project: Project, clipId: string): SpeakerTrack | undefin
   return undefined;
 }
 
+function normalizeModelLanguage(
+  engine: TtsEngineInfo | undefined,
+  currentLanguage: string,
+): string {
+  if (!engine?.requiresLanguage || engine.languages.length === 0) {
+    return currentLanguage;
+  }
+  return engine.languages.includes(currentLanguage)
+    ? currentLanguage
+    : engine.languages[0];
+}
+
 export const useProjectStore = create<ProjectStore>((set) => ({
   locale: detectInitialLocale(),
   setLocale: (locale) =>
@@ -207,12 +219,7 @@ export const useProjectStore = create<ProjectStore>((set) => ({
   setTtsEngine: (engine) =>
     set((s) => {
       const nextEngine = s.model.engines.find((candidate) => candidate.id === engine);
-      const languages = nextEngine?.languages ?? [];
-      const language = languages.length && !languages.includes(s.model.language)
-        ? languages[0]
-        : engine === "indic-mio"
-          ? "hi"
-          : s.model.language;
+      const language = normalizeModelLanguage(nextEngine, s.model.language);
       return {
         model: {
           ...s.model,
@@ -223,14 +230,17 @@ export const useProjectStore = create<ProjectStore>((set) => ({
       };
     }),
   setTtsLanguage: (language) =>
-    set((s) => ({ model: { ...s.model, language, error: undefined } })),
+    set((s) => {
+      const active = s.model.engines.find((candidate) => candidate.id === s.model.engine);
+      if (!active?.requiresLanguage || !active.languages.includes(language)) {
+        return s;
+      }
+      return { model: { ...s.model, language, error: undefined } };
+    }),
   setAvailableTtsEngines: (engines) =>
     set((s) => {
       const active = engines.find((candidate) => candidate.id === s.model.engine);
-      const languages = active?.languages ?? [];
-      const language = languages.length && !languages.includes(s.model.language)
-        ? languages[0]
-        : s.model.language;
+      const language = normalizeModelLanguage(active, s.model.language);
       return { model: { ...s.model, engines, language } };
     }),
 

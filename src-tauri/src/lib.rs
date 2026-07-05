@@ -1,11 +1,14 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
-    Mutex,
+    LazyLock, Mutex,
 };
+use std::time::Instant;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
@@ -382,20 +385,28 @@ enum TtsEngine {
     FishAudio,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct TtsEngineInfo {
     id: TtsEngine,
     #[serde(rename = "displayName")]
-    display_name: &'static str,
+    display_name: String,
     #[serde(rename = "modelName")]
-    model_name: &'static str,
+    model_name: String,
     #[serde(rename = "modelId")]
-    model_id: &'static str,
+    model_id: String,
     #[serde(rename = "modelSize")]
-    model_size: &'static str,
-    languages: &'static [&'static str],
+    model_size: String,
+    runtime: String,
+    precision: String,
+    languages: Vec<String>,
+    #[serde(
+        rename = "benchmarkLanguages",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    benchmark_languages: Vec<String>,
     #[serde(rename = "voiceProfileModes")]
-    voice_profile_modes: &'static [&'static str],
+    voice_profile_modes: Vec<String>,
     #[serde(rename = "requiresReferenceAudio")]
     requires_reference_audio: bool,
     #[serde(rename = "requiresReferenceTranscript")]
@@ -403,263 +414,183 @@ struct TtsEngineInfo {
     #[serde(rename = "requiresLanguage")]
     requires_language: bool,
     #[serde(rename = "styleMode")]
-    style_mode: &'static str,
+    style_mode: String,
     #[serde(rename = "supportsInstruct")]
     supports_instruct: bool,
     #[serde(rename = "supportedMarkers")]
-    supported_markers: &'static [&'static str],
+    supported_markers: Vec<String>,
     #[serde(rename = "needsTrim")]
     needs_trim: bool,
     #[serde(rename = "sampleRate")]
     sample_rate: u32,
     #[serde(rename = "usePolicy")]
-    use_policy: &'static str,
-    readiness: &'static str,
+    use_policy: String,
+    readiness: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TtsEngineRegistryEntry {
+    #[serde(flatten)]
     info: TtsEngineInfo,
-    sidecar_command: &'static str,
+    sidecar_command: String,
     macos_only: bool,
+    #[serde(default)]
+    platform_overrides: HashMap<String, ModelPlatformOverride>,
 }
 
-const REFERENCE_CLONE_PROFILE: &[&str] = &["reference-clone"];
-const EN_ZH_LANGUAGES: &[&str] = &["en", "zh"];
-const QWEN_TTS_LANGUAGES: &[&str] = &["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"];
-const CHATTERBOX_LANGUAGES: &[&str] = &[
-    "ar", "da", "de", "el", "en", "es", "fi", "fr", "he", "hi", "it", "ja", "ko", "ms", "nl", "no",
-    "pl", "pt", "ru", "sv", "sw", "tr", "zh",
-];
-const OMNIVOICE_LANGUAGES: &[&str] = &[
-    "en", "hi", "ru", "es", "fr", "de", "it", "pt", "zh", "ja", "ko",
-];
-const HI_EN_LANGUAGES: &[&str] = &["hi", "en"];
-const INSTRUCTION_MARKERS: &[&str] = &[
-    "soft",
-    "warm",
-    "whispering",
-    "intense",
-    "excited",
-    "happy",
-    "calm",
-    "serious",
-    "surprised",
-    "sad",
-    "angry",
-    "dramatic",
-    "laughs",
-];
-const OMNIVOICE_MARKERS: &[&str] = &[
-    "whispering",
-    "excited",
-    "happy",
-    "calm",
-    "serious",
-    "sad",
-    "angry",
-];
-const INDIC_MIO_MARKERS: &[&str] = &["happy", "sad", "angry", "disgust", "fear", "surprise"];
-const FISH_AUDIO_MARKERS: &[&str] = &[
-    "pause",
-    "emphasis",
-    "laughing",
-    "excited",
-    "angry",
-    "whisper",
-    "screaming",
-    "shouting",
-    "surprised",
-    "sad",
-];
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum AsrModel {
+    ParakeetTdtV3,
+}
 
-const TTS_ENGINE_REGISTRY: &[TtsEngineRegistryEntry] = &[
-    TtsEngineRegistryEntry {
-        info: TtsEngineInfo {
-            id: TtsEngine::VoxCPM2,
-            display_name: "VoxCPM2",
-            model_name: "voxcpm2-mlx-int8",
-            model_id: "aufklarer/VoxCPM2-MLX-int8",
-            model_size: "1.7B",
-            languages: EN_ZH_LANGUAGES,
-            voice_profile_modes: REFERENCE_CLONE_PROFILE,
-            requires_reference_audio: true,
-            requires_reference_transcript: false,
-            requires_language: false,
-            style_mode: "instruction",
-            supports_instruct: true,
-            supported_markers: INSTRUCTION_MARKERS,
-            needs_trim: true,
-            sample_rate: 48_000,
-            use_policy: "commercial-safe",
-            readiness: "production",
-        },
-        sidecar_command: "synthesize_voxcpm2",
-        macos_only: false,
-    },
-    TtsEngineRegistryEntry {
-        info: TtsEngineInfo {
-            id: TtsEngine::CosyVoice,
-            display_name: "CosyVoice 3",
-            model_name: "cosyvoice-3-0.5b-mlx-bf16",
-            model_id: "aufklarer/CosyVoice3-0.5B-MLX-bf16",
-            model_size: "0.5B",
-            languages: EN_ZH_LANGUAGES,
-            voice_profile_modes: REFERENCE_CLONE_PROFILE,
-            requires_reference_audio: true,
-            requires_reference_transcript: true,
-            requires_language: false,
-            style_mode: "instruction",
-            supports_instruct: true,
-            supported_markers: INSTRUCTION_MARKERS,
-            needs_trim: true,
-            sample_rate: 24_000,
-            use_policy: "commercial-safe",
-            readiness: "production",
-        },
-        sidecar_command: "synthesize_cosyvoice",
-        macos_only: true,
-    },
-    TtsEngineRegistryEntry {
-        info: TtsEngineInfo {
-            id: TtsEngine::Qwen3,
-            display_name: "Qwen3-TTS",
-            model_name: "qwen3-tts-1.7b-mlx-bf16",
-            model_id: "aufklarer/Qwen3-TTS-12Hz-1.7B-Base-MLX-bf16",
-            model_size: "1.7B",
-            languages: QWEN_TTS_LANGUAGES,
-            voice_profile_modes: REFERENCE_CLONE_PROFILE,
-            requires_reference_audio: true,
-            requires_reference_transcript: true,
-            requires_language: false,
-            style_mode: "none",
-            supports_instruct: false,
-            supported_markers: &[],
-            needs_trim: true,
-            sample_rate: 24_000,
-            use_policy: "commercial-safe",
-            readiness: "legacy-fallback",
-        },
-        sidecar_command: "synthesize_icl",
-        macos_only: true,
-    },
-    TtsEngineRegistryEntry {
-        info: TtsEngineInfo {
-            id: TtsEngine::Chatterbox,
-            display_name: "Chatterbox",
-            model_name: "chatterbox-multilingual-mlx-fp16",
-            model_id: "aufklarer/Chatterbox-Multilingual-MLX-fp16",
-            model_size: "0.5B",
-            languages: CHATTERBOX_LANGUAGES,
-            voice_profile_modes: REFERENCE_CLONE_PROFILE,
-            requires_reference_audio: true,
-            requires_reference_transcript: false,
-            requires_language: true,
-            style_mode: "intensity",
-            supports_instruct: false,
-            supported_markers: INSTRUCTION_MARKERS,
-            needs_trim: true,
-            sample_rate: 24_000,
-            use_policy: "commercial-safe",
-            readiness: "production",
-        },
-        sidecar_command: "synthesize_chatterbox",
-        macos_only: true,
-    },
-    TtsEngineRegistryEntry {
-        info: TtsEngineInfo {
-            id: TtsEngine::OmniVoice,
-            display_name: "OmniVoice",
-            model_name: "omnivoice-mlx-int8",
-            model_id: "aufklarer/OmniVoice-MLX-int8",
-            model_size: "0.5B",
-            languages: OMNIVOICE_LANGUAGES,
-            voice_profile_modes: REFERENCE_CLONE_PROFILE,
-            requires_reference_audio: true,
-            requires_reference_transcript: false,
-            requires_language: true,
-            style_mode: "controlled-vocabulary",
-            supports_instruct: false,
-            supported_markers: OMNIVOICE_MARKERS,
-            needs_trim: true,
-            sample_rate: 24_000,
-            use_policy: "commercial-safe",
-            readiness: "production",
-        },
-        sidecar_command: "synthesize_omnivoice",
-        macos_only: true,
-    },
-    TtsEngineRegistryEntry {
-        info: TtsEngineInfo {
-            id: TtsEngine::IndicMio,
-            display_name: "Indic-Mio",
-            model_name: "indic-mio-mlx-fp16",
-            model_id: "aufklarer/Indic-Mio-MLX-fp16",
-            model_size: "0.6B",
-            languages: HI_EN_LANGUAGES,
-            voice_profile_modes: REFERENCE_CLONE_PROFILE,
-            requires_reference_audio: true,
-            requires_reference_transcript: false,
-            requires_language: false,
-            style_mode: "suffix-tag",
-            supports_instruct: false,
-            supported_markers: INDIC_MIO_MARKERS,
-            needs_trim: true,
-            sample_rate: 24_000,
-            use_policy: "commercial-safe",
-            readiness: "production",
-        },
-        sidecar_command: "synthesize_indic_mio",
-        macos_only: true,
-    },
-    TtsEngineRegistryEntry {
-        info: TtsEngineInfo {
-            id: TtsEngine::FishAudio,
-            display_name: "Fish Audio S2 Pro",
-            model_name: "fish-audio-s2-pro-mlx-fp16",
-            model_id: "aufklarer/Fish-Audio-S2-Pro-MLX-fp16",
-            model_size: "S2 Pro",
-            languages: HI_EN_LANGUAGES,
-            voice_profile_modes: REFERENCE_CLONE_PROFILE,
-            requires_reference_audio: true,
-            requires_reference_transcript: true,
-            requires_language: false,
-            style_mode: "bracket-tag",
-            supports_instruct: false,
-            supported_markers: FISH_AUDIO_MARKERS,
-            needs_trim: false,
-            sample_rate: 44_100,
-            use_policy: "research-only",
-            readiness: "benchmark",
-        },
-        sidecar_command: "synthesize_fish_audio",
-        macos_only: true,
-    },
-];
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AsrModelInfo {
+    id: AsrModel,
+    #[serde(rename = "displayName")]
+    display_name: String,
+    #[serde(rename = "modelName")]
+    model_name: String,
+    #[serde(rename = "modelId")]
+    model_id: String,
+    #[serde(rename = "modelSize")]
+    model_size: String,
+    languages: Vec<String>,
+    runtime: String,
+    #[serde(rename = "sampleRate")]
+    sample_rate: u32,
+    #[serde(rename = "maxSegmentSec")]
+    max_segment_sec: u32,
+    streaming: bool,
+    readiness: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AsrModelRegistryEntry {
+    #[serde(flatten)]
+    info: AsrModelInfo,
+    sidecar_command: String,
+    #[serde(default)]
+    platform_overrides: HashMap<String, ModelPlatformOverride>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelPlatformOverride {
+    model_name: Option<String>,
+    model_id: Option<String>,
+    runtime: Option<String>,
+    precision: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelRegistry {
+    version: u32,
+    tts_engines: Vec<TtsEngineRegistryEntry>,
+    asr_models: Vec<AsrModelRegistryEntry>,
+}
+
+impl TtsEngineInfo {
+    fn apply_platform_override(&mut self, item: &ModelPlatformOverride) {
+        if let Some(value) = &item.model_name {
+            self.model_name = value.clone();
+        }
+        if let Some(value) = &item.model_id {
+            self.model_id = value.clone();
+        }
+        if let Some(value) = &item.runtime {
+            self.runtime = value.clone();
+        }
+        if let Some(value) = &item.precision {
+            self.precision = value.clone();
+        }
+    }
+}
+
+impl AsrModelInfo {
+    fn apply_platform_override(&mut self, item: &ModelPlatformOverride) {
+        if let Some(value) = &item.model_name {
+            self.model_name = value.clone();
+        }
+        if let Some(value) = &item.model_id {
+            self.model_id = value.clone();
+        }
+        if let Some(value) = &item.runtime {
+            self.runtime = value.clone();
+        }
+    }
+}
+
+fn platform_registry_key() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
+static MODEL_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(|| {
+    let mut registry: ModelRegistry =
+        serde_json::from_str(include_str!("../../model-registry.json"))
+            .expect("model-registry.json must be valid");
+    assert_eq!(registry.version, 1, "unsupported model registry version");
+
+    let platform = platform_registry_key();
+    for entry in &mut registry.tts_engines {
+        if let Some(item) = entry.platform_overrides.get(platform) {
+            entry.info.apply_platform_override(item);
+        }
+    }
+    for entry in &mut registry.asr_models {
+        if let Some(item) = entry.platform_overrides.get(platform) {
+            entry.info.apply_platform_override(item);
+        }
+    }
+    registry
+});
+
+impl AsrModel {
+    fn registry_entry(self) -> &'static AsrModelRegistryEntry {
+        MODEL_REGISTRY
+            .asr_models
+            .iter()
+            .find(|entry| entry.info.id == self)
+            .expect("AsrModel missing from ASR_MODEL_REGISTRY")
+    }
+
+    fn sidecar_command(self) -> &'static str {
+        self.registry_entry().sidecar_command.as_str()
+    }
+}
 
 impl TtsEngine {
     fn registry_entry(self) -> &'static TtsEngineRegistryEntry {
-        TTS_ENGINE_REGISTRY
+        MODEL_REGISTRY
+            .tts_engines
             .iter()
             .find(|entry| entry.info.id == self)
             .expect("TtsEngine missing from TTS_ENGINE_REGISTRY")
     }
 
     fn sidecar_command(self) -> &'static str {
-        self.registry_entry().sidecar_command
+        self.registry_entry().sidecar_command.as_str()
     }
 
     fn display_name(self) -> &'static str {
-        self.registry_entry().info.display_name
+        self.registry_entry().info.display_name.as_str()
     }
 
     fn requires_reference_transcript(self) -> bool {
         self.registry_entry().info.requires_reference_transcript
     }
 
-    /// Whether synthesis needs a caller-chosen language. Chatterbox prepends a
-    /// `[lang]` token, so the Studio shows a language picker for it; the other
-    /// engines infer language from the text.
+    /// Whether synthesis needs a caller-chosen language. The Studio shows a
+    /// language picker only for engines that declare this in the registry.
     fn requires_language(self) -> bool {
         self.registry_entry().info.requires_language
     }
@@ -673,13 +604,25 @@ impl TtsEngine {
     /// - `bracket-tag`: marker is appended as an engine-specific bracket tag.
     /// - `none`: markers are stripped and ignored.
     fn style_mode(self) -> &'static str {
-        self.registry_entry().info.style_mode
+        self.registry_entry().info.style_mode.as_str()
     }
 }
 
 fn normalize_sidecar_language(engine: TtsEngine, language: Option<&str>) -> Option<String> {
     let trimmed = language.map(str::trim).filter(|value| !value.is_empty());
     match engine {
+        TtsEngine::CosyVoice => trimmed.map(|value| match value.to_ascii_lowercase().as_str() {
+            "zh" | "zho" | "cmn" | "chinese" => "chinese".to_string(),
+            "en" | "eng" | "english" => "english".to_string(),
+            "ja" | "jpn" | "japanese" => "japanese".to_string(),
+            "ko" | "kor" | "korean" => "korean".to_string(),
+            "de" | "deu" | "ger" | "german" => "german".to_string(),
+            "es" | "spa" | "spanish" => "spanish".to_string(),
+            "fr" | "fra" | "fre" | "french" => "french".to_string(),
+            "it" | "ita" | "italian" => "italian".to_string(),
+            "ru" | "rus" | "russian" => "russian".to_string(),
+            _ => value.to_string(),
+        }),
         // The UI keeps BCP-47-ish ids because Chatterbox expects `[hi]`, but
         // OmniVoice gives cleaner Hindi output with the spelled language item.
         TtsEngine::OmniVoice | TtsEngine::IndicMio => {
@@ -732,15 +675,29 @@ fn humanize_sidecar_error(engine: TtsEngine, error: String) -> String {
 }
 
 fn tts_engine_info(engine: TtsEngine) -> TtsEngineInfo {
-    engine.registry_entry().info
+    engine.registry_entry().info.clone()
+}
+
+fn asr_model_info(model: AsrModel) -> AsrModelInfo {
+    model.registry_entry().info.clone()
 }
 
 #[tauri::command]
 async fn available_tts_engines() -> Vec<TtsEngineInfo> {
-    TTS_ENGINE_REGISTRY
+    MODEL_REGISTRY
+        .tts_engines
         .iter()
         .filter(|entry| engine_is_supported(entry.info.id))
-        .map(|entry| entry.info)
+        .map(|entry| entry.info.clone())
+        .collect()
+}
+
+#[tauri::command]
+async fn available_asr_models() -> Vec<AsrModelInfo> {
+    MODEL_REGISTRY
+        .asr_models
+        .iter()
+        .map(|entry| entry.info.clone())
         .collect()
 }
 
@@ -762,10 +719,12 @@ struct InitModelArgs {
 #[tauri::command]
 async fn init_model(manager: State<'_, SidecarManager>, args: InitModelArgs) -> Result<(), String> {
     ensure_engine_supported(args.engine)?;
+    let info = tts_engine_info(args.engine);
     let payload = serde_json::json!({
         "id": format!("init-{}", uuid::Uuid::new_v4()),
         "command": "init_model",
         "engine": args.engine,
+        "modelId": info.model_id,
     });
     let raw = manager.request(&payload)?;
     let env: SidecarResponse = serde_json::from_value(raw).map_err(|e| e.to_string())?;
@@ -870,9 +829,7 @@ fn reference_access_error(action: &str, path: &Path, err: &std::io::Error) -> St
         std::io::ErrorKind::NotFound => {
             "The file is no longer at that path. Re-add the reference from its current location."
         }
-        _ => {
-            "Copy or export the reference audio to a normal local folder, then add it again."
-        }
+        _ => "Copy or export the reference audio to a normal local folder, then add it again.",
     };
     format!(
         "Cannot {action} reference audio \"{}\": {err}. {hint}",
@@ -1116,8 +1073,8 @@ struct SynthesizeArgs {
     reference_audio_path: String,
     #[serde(rename = "referenceText")]
     reference_text: String,
-    /// Synthesis language id (Chatterbox `[lang]` token, e.g. "en"/"ar"/"hi").
-    /// Optional; engines that infer language from text ignore it.
+    /// Synthesis language id for engines with `requiresLanguage=true`.
+    /// Optional; engines that infer or default language do not receive it.
     #[serde(default)]
     language: Option<String>,
 }
@@ -1268,6 +1225,25 @@ fn chunk_text_for_synthesis(text: &str, max_words: usize) -> Vec<String> {
     chunks
 }
 
+const DEFAULT_SYNTH_SEED_LADDER: &[u64] = &[1000, 1001, 1002, 1010, 1011, 1012];
+
+fn synth_seed_ladder(engine: TtsEngine) -> &'static [u64] {
+    debug_assert_ne!(engine, TtsEngine::Qwen3);
+    DEFAULT_SYNTH_SEED_LADDER
+}
+
+fn synth_max_tokens(engine: TtsEngine, target_word_count: usize) -> usize {
+    if engine == TtsEngine::Qwen3 {
+        // Qwen3 frames are ~80 ms each. The generic cap lets short lines run
+        // to 96 frames (~7.7 s of audio, ~12 s wall time) whenever EOS fails.
+        // Keep enough headroom for slow speech, but prevent minute-long retry
+        // ladders for one short utterance.
+        (target_word_count.saturating_mul(4) + 20).clamp(40, 96)
+    } else {
+        (target_word_count.saturating_mul(12) + 40).clamp(60, 320)
+    }
+}
+
 /// One synthesis pass (seed/cfg retry ladder + optional ASR grading) for a
 /// single piece of text. Returns (audio_path, duration_sec) of the accepted
 /// take. Extracted from synthesize_clip so long-form chunking can call it
@@ -1285,15 +1261,12 @@ fn synth_one_line(
     invocation_salt: &str,
     part_idx: usize,
 ) -> Result<(String, f64), String> {
-    // Seed ladder: both backends are deterministic per seed. VoxCPM2 also
-    // consumes cfgValue; CosyVoice ignores that optional field.
-    const SEED_LADDER: &[u64] = &[1000, 1001, 1002, 1010, 1011, 1012];
     const CFG_LADDER: &[f32] = &[2.0, 2.5, 3.0];
 
     // Token budget: ~12 steps/word + headroom (each step ≈ 50 ms of audio).
     let grade_target = strip_style_markers_for_grading(text);
     let target_word_count = canon_tokens(&grade_target).len();
-    let max_tokens = (target_word_count.saturating_mul(12) + 40).clamp(60, 320);
+    let max_tokens = synth_max_tokens(engine, target_word_count);
     // Floor under the model's stop signal: VoxCPM2 fires its stop token
     // prematurely on long non-Latin-script lines (a 19-word Hindi sentence
     // stops at ~40 steps ≈ 6 s, cutting the sentence). The model speaks
@@ -1314,16 +1287,59 @@ fn synth_one_line(
         .chars()
         .any(|c| !c.is_ascii() && c.is_alphabetic());
     let sidecar_language = normalize_sidecar_language(engine, language);
+    let model_id = engine.registry_entry().info.model_id.as_str();
 
     let mut best: Option<(String, Grade, u64, f64)> = None;
     let mut last_error: Option<String> = None;
 
-    for (attempt_idx, &seed) in SEED_LADDER.iter().enumerate() {
+    if engine == TtsEngine::Qwen3 {
+        let seed = 1000;
+        let payload = serde_json::json!({
+            "id": format!("synth-{}-p{}-s{}-{}", clip_id, part_idx, seed, invocation_salt),
+            "command": engine.sidecar_command(),
+            "engine": engine,
+            "modelId": model_id,
+            "text": text,
+            "voiceId": voice_id,
+            "referenceAudioPath": reference_audio_path,
+            "referenceText": reference_text,
+            "language": sidecar_language.as_deref(),
+            "seed": seed,
+            "maxTokens": max_tokens,
+        });
+        let raw = manager.request(&payload)?;
+        let env: SidecarResponse = serde_json::from_value(raw).map_err(|e| e.to_string())?;
+        if !env.ok {
+            return Err(humanize_sidecar_error(
+                engine,
+                env.error.unwrap_or_else(|| "sidecar error".into()),
+            ));
+        }
+        let result = env.result.unwrap_or_default();
+        let audio_path = result
+            .get("audioPath")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing audioPath in sidecar response".to_string())?
+            .to_string();
+        let duration = result
+            .get("durationSec")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        validate_synth_audio(&audio_path)?;
+        eprintln!(
+            "[synth] clip {} part {} accepted qwen single-shot (seed={}, {:.2}s)",
+            clip_id, part_idx, seed, duration
+        );
+        return Ok((audio_path, duration));
+    }
+
+    for (attempt_idx, &seed) in synth_seed_ladder(engine).iter().enumerate() {
         let cfg = CFG_LADDER[attempt_idx.min(CFG_LADDER.len() - 1)];
         let payload = serde_json::json!({
             "id": format!("synth-{}-p{}-s{}-{}", clip_id, part_idx, seed, invocation_salt),
             "command": engine.sidecar_command(),
             "engine": engine,
+            "modelId": model_id,
             "text": text,
             "voiceId": voice_id,
             "referenceAudioPath": reference_audio_path,
@@ -2450,11 +2466,9 @@ fn canon_tokens(s: &str) -> Vec<String> {
 
 // ---------- demo seed ----------
 //
-// The demo uses real Qwen3-TTS ICL synthesis. Since Qwen3-TTS needs a
-// reference audio + reference transcript per voice, and we don't ship any
-// audio in this repo, we bootstrap the references by calling macOS `say`
-// (Samantha / Daniel) into a temp WAV. Then we synthesize each demo line
-// through the sidecar, which loads the Qwen3-TTS model on first call.
+// The demo embeds human reference WAVs. Engines such as Qwen3-TTS and Fish
+// Audio need the reference transcript to match that WAV closely, otherwise
+// prompt words can leak into the synthesized take.
 //
 // First-ever invocation: downloads ~300MB of model weights from HuggingFace,
 // then ~2-5s per line. Subsequent invocations reuse the warm model.
@@ -2487,6 +2501,9 @@ struct DemoSeed {
     clips: Vec<DemoClipSeed>,
 }
 
+const DEMO_ANNA_REFERENCE_TEXT: &str = "The Hispaniola was rolling scuppers under in the ocean swell. The booms were tearing at the blocks. The rudder was banging.";
+const DEMO_MAREK_REFERENCE_TEXT: &str = "It is a pretty little spot there, a green grass plateau running along by the water's edge and overhung by willows.";
+
 fn short_hash(s: &str) -> u32 {
     // FNV-1a 32-bit. Stable across runs without pulling another crate.
     let mut h: u32 = 0x811c9dc5;
@@ -2511,6 +2528,15 @@ fn clip_cache_dir() -> std::path::PathBuf {
     dir
 }
 
+fn dictation_cache_dir() -> std::path::PathBuf {
+    let dir = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("audio.soniqo.studio")
+        .join("dictation");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 fn wav_duration_sec(path: &std::path::Path) -> Result<f64, String> {
     use std::io::Read;
     let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -2526,6 +2552,132 @@ fn wav_duration_sec(path: &std::path::Path) -> Result<f64, String> {
     let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let audio_bytes = metadata.len().saturating_sub(44);
     Ok(audio_bytes as f64 / byte_rate as f64)
+}
+
+#[derive(Deserialize)]
+struct SaveDictationAudioArgs {
+    #[serde(rename = "wavBase64")]
+    wav_base64: String,
+}
+
+#[derive(Serialize)]
+struct SaveDictationAudioResult {
+    #[serde(rename = "audioPath")]
+    audio_path: String,
+    #[serde(rename = "durationSec")]
+    duration_sec: f64,
+}
+
+#[tauri::command]
+async fn save_dictation_audio(
+    args: SaveDictationAudioArgs,
+) -> Result<SaveDictationAudioResult, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(args.wav_base64.trim())
+        .map_err(|e| format!("invalid dictation audio payload: {e}"))?;
+    const MAX_DICTATION_WAV_BYTES: usize = 100 * 1024 * 1024;
+    if bytes.len() > MAX_DICTATION_WAV_BYTES {
+        return Err("dictation recording is too large".into());
+    }
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("dictation audio must be a WAV file".into());
+    }
+
+    let path =
+        dictation_cache_dir().join(format!("dictation-{}.wav", uuid::Uuid::new_v4().simple()));
+    std::fs::write(&path, &bytes).map_err(|e| format!("could not write dictation audio: {e}"))?;
+    let duration_sec = wav_duration_sec(&path).unwrap_or(0.0);
+    Ok(SaveDictationAudioResult {
+        audio_path: path.to_string_lossy().to_string(),
+        duration_sec,
+    })
+}
+
+#[derive(Deserialize)]
+struct TranscribeAudioArgs {
+    #[serde(rename = "audioPath")]
+    audio_path: String,
+    model: Option<AsrModel>,
+    language: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TranscribeAudioResult {
+    text: String,
+    #[serde(rename = "modelName")]
+    model_name: String,
+    #[serde(rename = "modelId")]
+    model_id: String,
+    #[serde(rename = "durationSec")]
+    duration_sec: f64,
+    #[serde(rename = "elapsedSec")]
+    elapsed_sec: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
+}
+
+#[tauri::command]
+async fn transcribe_audio(
+    manager: State<'_, SidecarManager>,
+    args: TranscribeAudioArgs,
+) -> Result<TranscribeAudioResult, String> {
+    let model = args.model.unwrap_or(AsrModel::ParakeetTdtV3);
+    let info = asr_model_info(model);
+    let audio_path = PathBuf::from(&args.audio_path);
+    let metadata = std::fs::metadata(&audio_path)
+        .map_err(|e| format!("cannot read dictation audio {}: {e}", audio_path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "dictation audio path is not a file: {}",
+            audio_path.display()
+        ));
+    }
+
+    let started = Instant::now();
+    let payload = serde_json::json!({
+        "id": format!("asr-{}", uuid::Uuid::new_v4().simple()),
+        "command": model.sidecar_command(),
+        "audioPath": audio_path.to_string_lossy(),
+        "language": args.language,
+    });
+    let raw = manager.request(&payload)?;
+    let env: SidecarResponse = serde_json::from_value(raw).map_err(|e| e.to_string())?;
+    if !env.ok {
+        return Err(env
+            .error
+            .unwrap_or_else(|| format!("{} transcription failed", info.display_name)));
+    }
+
+    let result = env.result.unwrap_or_default();
+    let text = result
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let language = result
+        .get("language")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let duration_sec = result
+        .get("durationSec")
+        .and_then(|v| v.as_f64())
+        .or_else(|| wav_duration_sec(&audio_path).ok())
+        .unwrap_or(0.0);
+    let elapsed_sec = result
+        .get("elapsedSec")
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| started.elapsed().as_secs_f64());
+
+    Ok(TranscribeAudioResult {
+        text,
+        model_name: info.model_name,
+        model_id: info.model_id,
+        duration_sec,
+        elapsed_sec,
+        language,
+    })
 }
 
 #[derive(Serialize, Clone)]
@@ -2554,9 +2706,38 @@ fn emit_progress(
     );
 }
 
+fn demo_clip_seeds(cache_prefix: &str, lines: &[(usize, &str)]) -> Vec<DemoClipSeed> {
+    let cache_dir = clip_cache_dir();
+    let mut clips = Vec::with_capacity(lines.len());
+    for (idx, (speaker_idx, text)) in lines.iter().enumerate() {
+        let stable_id = format!(
+            "{}-s{}-l{}-{:x}",
+            cache_prefix,
+            speaker_idx,
+            idx,
+            short_hash(text)
+        );
+        let cached_path = cache_dir.join(format!("{}.wav", stable_id));
+        let (audio_path, duration_sec) = if cached_path.exists() {
+            let dur = wav_duration_sec(&cached_path).ok();
+            (Some(cached_path.to_string_lossy().to_string()), dur)
+        } else {
+            (None, None)
+        };
+
+        clips.push(DemoClipSeed {
+            speaker_index: *speaker_idx,
+            audio_path,
+            duration_sec,
+            text: (*text).to_string(),
+        });
+    }
+    clips
+}
+
 #[tauri::command]
 async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
-    eprintln!("[seed_demo] start (lazy mode: no Qwen3 synth, only `say` references)");
+    eprintln!("[seed_demo] start (lazy mode: bundled references only)");
     emit_progress(&app, "references", 0, 1, "Preparing reference voices…");
     let dir = std::env::temp_dir().join("soniqo-demo");
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {}", e))?;
@@ -2568,17 +2749,17 @@ async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
     // clips, ~450 KB each, embedded via include_bytes!):
     //   Anna  → female reader, ~10s, literary narration.
     //   Marek → male reader, ~9s, calm narration.
-    // Reference text was produced by Parakeet ASR over the same WAV — close
-    // enough to verbatim for ICL.
+    // Reference text must be exact for Qwen3-TTS ICL. A stale Anna transcript
+    // leaked prompt words into the synthesized take, while Marek stayed clean.
     let ref_specs: [(&[u8], &str, &str); 2] = [
         (
             include_bytes!("../resources/voices/anna.wav"),
-            "The Hispaniola was rolling scuppers under in the ocean swell. The booms were tearing at the blocks, ruddering.",
+            DEMO_ANNA_REFERENCE_TEXT,
             "ref-anna.wav",
         ),
         (
             include_bytes!("../resources/voices/marek.wav"),
-            "It is a pretty little spot there, a green grass plateau running along by the water's edge and overhung by willows.",
+            DEMO_MAREK_REFERENCE_TEXT,
             "ref-marek.wav",
         ),
     ];
@@ -2600,9 +2781,7 @@ async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
             reference_text: (*ref_text).to_string(),
         });
     }
-    eprintln!(
-        "[seed_demo] references ready, starting Qwen3-TTS synthesis (first call downloads model)"
-    );
+    eprintln!("[seed_demo] references ready; synthesis is on demand");
 
     // Step 2 — demo lines, each wrapped in a VoxCPM2 style marker. The
     // sidecar's extractFirstEmotionTag pulls the tag name out and passes it
@@ -2623,25 +2802,54 @@ async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
     // attach its path so the user can immediately play it; otherwise leave
     // audio_path = None and let the user trigger synthesis explicitly via
     // Regenerate. No Qwen3 calls happen here — Load demo is ~instant.
-    let cache_dir = clip_cache_dir();
-    let mut clips = Vec::with_capacity(lines.len());
-    for (idx, (speaker_idx, text)) in lines.iter().enumerate() {
-        let stable_id = format!("demo-s{}-l{}-{:x}", speaker_idx, idx, short_hash(text));
-        let cached_path = cache_dir.join(format!("{}.wav", stable_id));
-        let (audio_path, duration_sec) = if cached_path.exists() {
-            let dur = wav_duration_sec(&cached_path).ok();
-            (Some(cached_path.to_string_lossy().to_string()), dur)
-        } else {
-            (None, None)
-        };
+    let clips = demo_clip_seeds("demo", &lines);
 
-        clips.push(DemoClipSeed {
-            speaker_index: *speaker_idx,
-            audio_path,
-            duration_sec,
-            text: (*text).to_string(),
+    Ok(DemoSeed { voices, clips })
+}
+
+#[tauri::command]
+async fn seed_hindi_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
+    eprintln!("[seed_hindi_demo] start");
+    emit_progress(&app, "references", 0, 1, "Preparing Hindi reference voice…");
+    let dir = std::env::temp_dir().join("soniqo-demo");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {}", e))?;
+
+    // Two FLEURS hi_in test-split speakers (CC-BY, PCM16 mono 16 kHz), one per
+    // gender. Reference text must be exact for voice-clone ICL — both
+    // transcripts are the raw FLEURS transcriptions, ASR-verified against the
+    // audio (a mismatched transcript leaks prompt words into the takes).
+    let ref_specs: [(&[u8], &str, &str); 2] = [
+        (
+            include_bytes!("../resources/voices/hindi_fleurs.wav"),
+            "लूना को साथी पहलवानों ने भी श्रद्धांजलि दी.",
+            "ref-hindi-fleurs.wav",
+        ),
+        (
+            include_bytes!("../resources/voices/hindi_fleurs_female.wav"),
+            "यह शहर देश के बाकी शहरों से अलग है क्योंकि यह किसी अफ्रीकी शहर की बजाय अरब शहर लगता है.",
+            "ref-hindi-fleurs-female.wav",
+        ),
+    ];
+
+    let mut voices = Vec::with_capacity(ref_specs.len());
+    for (bytes, ref_text, filename) in ref_specs.iter() {
+        let path = dir.join(filename);
+        std::fs::write(&path, bytes)
+            .map_err(|e| format!("write {} failed: {}", path.display(), e))?;
+        voices.push(DemoVoiceSeed {
+            reference_audio_path: path.to_string_lossy().to_string(),
+            reference_text: (*ref_text).to_string(),
         });
     }
+
+    // Male (0) and female (1) speakers alternate, like the English demo.
+    let lines: [(usize, &str); 4] = [
+        (0, "(happy) नमस्ते, आज हम हिंदी आवाज़ का परीक्षण कर रहे हैं।"),
+        (1, "(sad) यह पंक्ति शांत और भावुक सुनाई देनी चाहिए।"),
+        (0, "(angry) अब आवाज़ में थोड़ी तीव्रता और ज़ोर चाहिए।"),
+        (1, "(surprised) अंत में यह वाक्य साफ़ और उत्साहित होना चाहिए।"),
+    ];
+    let clips = demo_clip_seeds("demo-hi", &lines);
 
     Ok(DemoSeed { voices, clips })
 }
@@ -3029,6 +3237,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ping_sidecar,
             available_tts_engines,
+            available_asr_models,
             init_model,
             interrupt_model_load,
             pick_video,
@@ -3036,6 +3245,8 @@ pub fn run() {
             import_reference_audio,
             probe_reference,
             clone_voice,
+            save_dictation_audio,
+            transcribe_audio,
             synthesize_clip,
             export_project,
             list_projects,
@@ -3043,6 +3254,7 @@ pub fn run() {
             load_project,
             delete_project,
             seed_demo,
+            seed_hindi_demo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -3056,9 +3268,15 @@ mod tests {
     fn tts_engine_protocol_names_are_stable() {
         let cosy: TtsEngine = serde_json::from_str("\"cosyvoice\"").unwrap();
         assert_eq!(cosy, TtsEngine::CosyVoice);
+        let parakeet: AsrModel = serde_json::from_str("\"parakeet-tdt-v3\"").unwrap();
+        assert_eq!(parakeet, AsrModel::ParakeetTdtV3);
         assert_eq!(
             serde_json::to_string(&TtsEngine::VoxCPM2).unwrap(),
             "\"voxcpm2\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AsrModel::ParakeetTdtV3).unwrap(),
+            "\"parakeet-tdt-v3\""
         );
         assert_eq!(
             serde_json::to_string(&TtsEngine::IndicMio).unwrap(),
@@ -3077,6 +3295,7 @@ mod tests {
             TtsEngine::FishAudio.sidecar_command(),
             "synthesize_fish_audio"
         );
+        assert_eq!(parakeet.sidecar_command(), "transcribe_parakeet");
     }
 
     #[test]
@@ -3114,6 +3333,15 @@ mod tests {
     }
 
     #[test]
+    fn demo_anna_reference_transcript_matches_bundled_audio() {
+        assert!(
+            !DEMO_ANNA_REFERENCE_TEXT.contains("ruddering"),
+            "stale Anna transcript leaks reference text into Qwen3-TTS ICL output"
+        );
+        assert!(DEMO_ANNA_REFERENCE_TEXT.ends_with("The rudder was banging."));
+    }
+
+    #[test]
     fn chatterbox_engine_wiring() {
         let c: TtsEngine = serde_json::from_str("\"chatterbox\"").unwrap();
         assert_eq!(c, TtsEngine::Chatterbox);
@@ -3133,28 +3361,149 @@ mod tests {
 
     #[test]
     fn tts_engine_info_exposes_model_capabilities() {
+        let vox = tts_engine_info(TtsEngine::VoxCPM2);
+        assert_eq!(vox.languages.len(), 30);
+        assert!(vox.languages.iter().any(|language| language == "hi"));
+        assert!(vox.languages.iter().any(|language| language == "vi"));
+        assert!(!vox.requires_language);
+        assert_eq!(vox.model_name, "voxcpm2-mlx-bf16");
+        assert_eq!(vox.model_id, "aufklarer/VoxCPM2-MLX-bf16");
+        assert_eq!(vox.precision, "bf16");
+
+        let cosy = tts_engine_info(TtsEngine::CosyVoice);
+        assert!(cosy.requires_language);
+        assert_eq!(
+            cosy.languages,
+            ["en", "zh", "ja", "ko", "de", "es", "fr", "it", "ru"]
+        );
+        assert!(cosy
+            .supported_markers
+            .iter()
+            .any(|marker| marker == "excited"));
+
         let qwen = tts_engine_info(TtsEngine::Qwen3);
         assert_eq!(qwen.model_name, "qwen3-tts-1.7b-mlx-bf16");
         assert_eq!(qwen.model_id, "aufklarer/Qwen3-TTS-12Hz-1.7B-Base-MLX-bf16");
-        assert_eq!(qwen.voice_profile_modes, &["reference-clone"]);
+        assert_eq!(qwen.voice_profile_modes, ["reference-clone"]);
         assert!(qwen.requires_reference_audio);
         assert!(qwen.requires_reference_transcript);
+        assert!(qwen.requires_language);
         assert!(!qwen.supports_instruct);
         assert_eq!(qwen.style_mode, "none");
-        assert!(qwen.languages.contains(&"en"));
-        assert!(qwen.languages.contains(&"ru"));
+        assert!(qwen.languages.iter().any(|language| language == "en"));
+        assert!(qwen.languages.iter().any(|language| language == "ru"));
         assert!(qwen.supported_markers.is_empty());
+        assert_eq!(qwen.precision, "bf16");
+
+        let chatterbox = tts_engine_info(TtsEngine::Chatterbox);
+        assert_eq!(chatterbox.languages.len(), 22);
+        assert!(chatterbox.languages.iter().any(|language| language == "zh"));
+        assert!(chatterbox.languages.iter().any(|language| language == "ja"));
+        assert!(!chatterbox.languages.iter().any(|language| language == "he"));
+        assert!(chatterbox.languages.iter().any(|language| language == "ko"));
+        assert_eq!(chatterbox.precision, "fp16");
+
+        let omni = tts_engine_info(TtsEngine::OmniVoice);
+        assert_eq!(omni.model_name, "omnivoice-mlx-fp16");
+        assert_eq!(omni.model_id, "aufklarer/OmniVoice-MLX-fp16");
+        assert_eq!(omni.precision, "fp16");
 
         let fish = tts_engine_info(TtsEngine::FishAudio);
         assert_eq!(fish.style_mode, "bracket-tag");
-        assert!(fish.supported_markers.contains(&"excited"));
+        assert!(fish.languages.len() > 70);
+        assert!(fish
+            .benchmark_languages
+            .iter()
+            .any(|language| language == "hi"));
+        assert!(fish
+            .supported_markers
+            .iter()
+            .any(|marker| marker == "excited"));
         assert_eq!(fish.use_policy, "research-only");
         assert!(!fish.needs_trim);
     }
 
     #[test]
+    fn hindi_demo_reference_is_bundled_pcm_wav() {
+        let path = std::env::temp_dir().join(format!(
+            "speech-studio-hindi-ref-{}.wav",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(
+            &path,
+            include_bytes!("../resources/voices/hindi_fleurs.wav"),
+        )
+        .unwrap();
+
+        let (sample_rate, channels, bits) = read_wav_header(&path).unwrap();
+        assert_eq!(sample_rate, 16_000);
+        assert_eq!(channels, 1);
+        assert_eq!(bits, 16);
+
+        let duration = wav_duration_sec(&path).unwrap();
+        assert!(
+            (3.7..4.0).contains(&duration),
+            "unexpected Hindi reference duration: {duration}"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tts_registry_defaults_keep_16bit_precision_floor() {
+        for entry in MODEL_REGISTRY
+            .tts_engines
+            .iter()
+            .filter(|entry| engine_is_supported(entry.info.id))
+        {
+            assert!(
+                matches!(entry.info.precision.as_str(), "bf16" | "fp16"),
+                "{} default precision should stay 16-bit, got {}",
+                entry.info.model_name,
+                entry.info.precision
+            );
+            assert!(
+                !entry.info.model_id.contains("int8")
+                    && !entry.info.model_id.contains("8bit")
+                    && !entry.info.model_id.contains("4bit"),
+                "{} default model id should not be quantized: {}",
+                entry.info.model_name,
+                entry.info.model_id
+            );
+        }
+    }
+
+    #[test]
+    fn asr_registry_uses_parakeet_family_on_all_platforms() {
+        let parakeet = asr_model_info(AsrModel::ParakeetTdtV3);
+        assert_eq!(parakeet.model_name, "parakeet-tdt-v3-0.6b-int8");
+        assert_eq!(parakeet.sample_rate, 16_000);
+        assert_eq!(parakeet.max_segment_sec, 30);
+        assert!(parakeet.streaming);
+        assert_eq!(parakeet.readiness, "production");
+        assert_eq!(parakeet.languages, ["en"]);
+        assert_eq!(
+            parakeet.runtime,
+            if cfg!(target_os = "macos") {
+                "coreml"
+            } else {
+                "litert"
+            }
+        );
+        assert_eq!(
+            parakeet.model_id,
+            if cfg!(target_os = "macos") {
+                "aufklarer/Parakeet-TDT-v3-CoreML-INT8-30s"
+            } else {
+                "soniqo/Parakeet-TDT-0.6B-v3-LiteRT-INT8"
+            }
+        );
+    }
+
+    #[test]
     fn studio_registry_keeps_qwen_on_bf16() {
-        let ids: Vec<TtsEngine> = TTS_ENGINE_REGISTRY
+        let ids: Vec<TtsEngine> = MODEL_REGISTRY
+            .tts_engines
             .iter()
             .map(|entry| entry.info.id)
             .collect();
@@ -3180,11 +3529,29 @@ mod tests {
         assert!(!qwen.info.model_name.contains("8bit"));
         assert!(!qwen.info.model_id.contains("8bit"));
         assert!(!qwen.info.model_name.contains("0.6b"));
+        assert_eq!(qwen.info.precision, "bf16");
         assert_eq!(qwen.info.style_mode, "none");
     }
 
     #[test]
+    fn qwen_synth_budget_is_bounded_for_short_lines() {
+        assert_eq!(synth_seed_ladder(TtsEngine::CosyVoice).len(), 6);
+        assert_eq!(synth_max_tokens(TtsEngine::Qwen3, 2), 40);
+        assert_eq!(synth_max_tokens(TtsEngine::Qwen3, 6), 44);
+        assert_eq!(synth_max_tokens(TtsEngine::Qwen3, 20), 96);
+        assert_eq!(synth_max_tokens(TtsEngine::CosyVoice, 6), 112);
+    }
+
+    #[test]
     fn sidecar_language_normalization_preserves_chatterbox_hi() {
+        assert_eq!(
+            normalize_sidecar_language(TtsEngine::CosyVoice, Some("ru")).as_deref(),
+            Some("russian")
+        );
+        assert_eq!(
+            normalize_sidecar_language(TtsEngine::CosyVoice, Some("ja")).as_deref(),
+            Some("japanese")
+        );
         assert_eq!(
             normalize_sidecar_language(TtsEngine::Chatterbox, Some("hi")).as_deref(),
             Some("hi")
@@ -3243,6 +3610,21 @@ mod tests {
         assert!(
             dir.to_string_lossy().contains("audio.soniqo.studio"),
             "cache dir should be under the app namespace: {:?}",
+            dir
+        );
+    }
+
+    #[test]
+    fn dictation_cache_dir_under_app_namespace() {
+        let dir = dictation_cache_dir();
+        assert!(
+            dir.ends_with("dictation"),
+            "dictation dir should end with dictation: {:?}",
+            dir
+        );
+        assert!(
+            dir.to_string_lossy().contains("audio.soniqo.studio"),
+            "dictation dir should be under the app namespace: {:?}",
             dir
         );
     }

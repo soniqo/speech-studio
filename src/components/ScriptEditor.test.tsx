@@ -10,6 +10,8 @@ function engineInfo(patch: Partial<TtsEngineInfo> & Pick<TtsEngineInfo, "id" | "
     modelName: patch.id,
     modelId: `test/${patch.id}`,
     modelSize: "test",
+    runtime: "MLX",
+    precision: "fp16",
     languages: ["en"],
     voiceProfileModes: ["reference-clone"],
     requiresReferenceAudio: true,

@@ -48,6 +48,8 @@ export function useSynthesizeAll() {
   const updateClip = useProjectStore((s) => s.updateClip);
   const setSynthesisStatus = useProjectStore((s) => s.setSynthesisStatus);
   const setSynthesisProgress = useProjectStore((s) => s.setSynthesisProgress);
+  const setPlaying = useProjectStore((s) => s.setPlaying);
+  const seek = useProjectStore((s) => s.seek);
 
   const run = useCallback(
     async (mode: "missing" | "all"): Promise<SynthesizeAllResult> => {
@@ -57,7 +59,9 @@ export function useSynthesizeAll() {
       const engine = initialState.model.engine;
       const engineInfo = initialState.model.engines.find((candidate) => candidate.id === engine);
       const engineName = engineInfo?.displayName ?? engine;
-      const language = initialState.model.language;
+      const language = engineInfo?.requiresLanguage
+        ? initialState.model.language
+        : undefined;
       const fallbackRequiresReferenceTranscript =
         engine === "cosyvoice" || engine === "qwen3" || engine === "fish-audio";
       if (
@@ -73,6 +77,8 @@ export function useSynthesizeAll() {
       let completed = 0;
       let failed = 0;
 
+      setPlaying(false);
+      seek(jobs[0].clip.startSec);
       setSynthesisStatus("running");
       try {
         let lastElapsedSec: number | undefined;
@@ -129,7 +135,7 @@ export function useSynthesizeAll() {
         setSynthesisStatus("idle");
       }
     },
-    [updateClip, setSynthesisStatus, setSynthesisProgress],
+    [updateClip, setSynthesisStatus, setSynthesisProgress, setPlaying, seek],
   );
 
   return { run };

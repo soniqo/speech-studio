@@ -13,6 +13,8 @@ function engineInfo(
     modelName: id,
     modelId: `test/${id}`,
     modelSize: "test",
+    runtime: "MLX",
+    precision: "fp16",
     languages: ["en"],
     voiceProfileModes: ["reference-clone"],
     requiresReferenceAudio: true,
@@ -86,6 +88,45 @@ describe("projectStore model defaults", () => {
     }));
     useProjectStore.getState().setTtsEngine("chatterbox");
     expect(useProjectStore.getState().model.language).toBe("hi");
+  });
+
+  it("accepts only languages declared by the active language-aware engine", () => {
+    useProjectStore.setState((s) => ({
+      model: {
+        ...s.model,
+        engine: "cosyvoice",
+        language: "en",
+        engines: [
+          engineInfo("cosyvoice", {
+            languages: ["en", "zh"],
+            requiresLanguage: true,
+          }),
+        ],
+      },
+    }));
+    useProjectStore.getState().setTtsLanguage("zh");
+    expect(useProjectStore.getState().model.language).toBe("zh");
+
+    useProjectStore.getState().setTtsLanguage("ru");
+    expect(useProjectStore.getState().model.language).toBe("zh");
+  });
+
+  it("ignores language changes for engines that do not expose a language selector", () => {
+    useProjectStore.setState((s) => ({
+      model: {
+        ...s.model,
+        engine: "qwen3",
+        language: "en",
+        engines: [
+          engineInfo("qwen3", {
+            languages: ["zh", "en"],
+            requiresLanguage: false,
+          }),
+        ],
+      },
+    }));
+    useProjectStore.getState().setTtsLanguage("zh");
+    expect(useProjectStore.getState().model.language).toBe("en");
   });
 });
 

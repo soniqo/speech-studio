@@ -27,12 +27,14 @@ export interface TtsEngineInfo {
   modelName: string;
   modelId: string;
   modelSize: string;
+  runtime: "MLX" | "LiteRT" | string;
+  precision: "bf16" | "fp16" | "int8" | "4bit" | string;
   languages: string[];
+  benchmarkLanguages?: string[];
   voiceProfileModes: Array<"reference-clone" | "preset-voice" | "designed-voice">;
   requiresReferenceAudio: boolean;
   requiresReferenceTranscript: boolean;
-  /** When true the engine needs a caller-chosen language (e.g. Chatterbox's
-   * `[lang]` token); the UI surfaces a language picker. */
+  /** When true the engine needs a caller-chosen synthesis language. */
   requiresLanguage: boolean;
   /** How inline emotion markers are applied, so the editor can set honest
    * expectations:
@@ -59,6 +61,26 @@ export interface TtsEngineInfo {
 
 export function availableTtsEngines(): Promise<TtsEngineInfo[]> {
   return invoke<TtsEngineInfo[]>("available_tts_engines");
+}
+
+export type AsrModelId = "parakeet-tdt-v3";
+
+export interface AsrModelInfo {
+  id: AsrModelId;
+  displayName: string;
+  modelName: string;
+  modelId: string;
+  modelSize: string;
+  languages: string[];
+  runtime: "coreml" | "litert" | string;
+  sampleRate: number;
+  maxSegmentSec: number;
+  streaming: boolean;
+  readiness: "production" | "experimental" | string;
+}
+
+export function availableAsrModels(): Promise<AsrModelInfo[]> {
+  return invoke<AsrModelInfo[]>("available_asr_models");
 }
 
 export function initModel(engine: TtsEngineId): Promise<void> {
@@ -131,7 +153,7 @@ export interface SynthesizeClipArgs {
   voiceId: string;
   referenceAudioPath: string;
   referenceText: string;
-  /** Synthesis language id for engines that need one (Chatterbox `[lang]`). */
+  /** Synthesis language id for engines with requiresLanguage=true. */
   language?: string;
 }
 
@@ -145,6 +167,34 @@ export interface SynthesizeClipResult {
 
 export function synthesizeClip(args: SynthesizeClipArgs): Promise<SynthesizeClipResult> {
   return invoke<SynthesizeClipResult>("synthesize_clip", { args });
+}
+
+export interface SaveDictationAudioResult {
+  audioPath: string;
+  durationSec: number;
+}
+
+export function saveDictationAudio(wavBase64: string): Promise<SaveDictationAudioResult> {
+  return invoke<SaveDictationAudioResult>("save_dictation_audio", { args: { wavBase64 } });
+}
+
+export interface TranscribeAudioArgs {
+  audioPath: string;
+  model?: AsrModelId;
+  language?: string;
+}
+
+export interface TranscribeAudioResult {
+  text: string;
+  modelName: string;
+  modelId: string;
+  durationSec: number;
+  elapsedSec: number;
+  language?: string;
+}
+
+export function transcribeAudio(args: TranscribeAudioArgs): Promise<TranscribeAudioResult> {
+  return invoke<TranscribeAudioResult>("transcribe_audio", { args });
 }
 
 export interface ExportClip {
@@ -215,4 +265,8 @@ export interface DemoSeed {
 
 export function seedDemo(): Promise<DemoSeed> {
   return invoke<DemoSeed>("seed_demo");
+}
+
+export function seedHindiDemo(): Promise<DemoSeed> {
+  return invoke<DemoSeed>("seed_hindi_demo");
 }

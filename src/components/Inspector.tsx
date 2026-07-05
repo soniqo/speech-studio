@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { Lock, Unlock, Trash2, RefreshCw, History, Loader2 } from "lucide-react";
 import { useProjectStore } from "../state/projectStore";
 import { ScriptEditor } from "./ScriptEditor";
@@ -15,6 +14,8 @@ import {
   SelectValue,
 } from "./ui/select";
 import { cn } from "@/lib/utils";
+import { clipAudioVersion } from "../lib/clipAudio";
+import { mediaFileSrc } from "../lib/mediaSrc";
 import { dateLocale, type Messages } from "../i18n/messages";
 import { useI18n } from "../i18n/useI18n";
 
@@ -62,8 +63,10 @@ export function Inspector() {
   const updateClip = useProjectStore((s) => s.updateClip);
   const assignVoiceToTrack = useProjectStore((s) => s.assignVoiceToTrack);
   const removeClip = useProjectStore((s) => s.removeClip);
+  const setPlaying = useProjectStore((s) => s.setPlaying);
+  const seek = useProjectStore((s) => s.seek);
   const engine = useProjectStore((s) => s.model.engine);
-  const language = useProjectStore((s) => s.model.language);
+  const modelLanguage = useProjectStore((s) => s.model.language);
   const activeEngine = useProjectStore((s) =>
     s.model.engines.find((candidate) => candidate.id === s.model.engine),
   );
@@ -257,6 +260,7 @@ export function Inspector() {
   const needsReferenceTranscript =
     activeEngine?.requiresReferenceTranscript ??
     (engine === "cosyvoice" || engine === "qwen3" || engine === "fish-audio");
+  const language = activeEngine?.requiresLanguage ? modelLanguage : undefined;
   const transcriptEngineName = activeEngine?.displayName ?? t.inspector.selectedEngine;
   const canRegenerate =
     !isRegenerating &&
@@ -267,6 +271,8 @@ export function Inspector() {
 
   async function regenerate() {
     if (!effectiveVoice || !effectiveVoice.referenceAudioPath) return;
+    setPlaying(false);
+    seek(current.startSec);
     setIsRegenerating(true);
     setRegenError(null);
     setRegenTiming(null);
@@ -391,8 +397,8 @@ export function Inspector() {
           <Section>
             <Label>{t.inspector.preview}</Label>
             <audio
-              key={clip.renderedAudioPath}
-              src={convertFileSrc(clip.renderedAudioPath)}
+              key={`${clip.renderedAudioPath}:${clipAudioVersion(clip) ?? ""}`}
+              src={mediaFileSrc(clip.renderedAudioPath, clipAudioVersion(clip))}
               controls
               className="w-full"
             />

@@ -14,7 +14,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { cn } from "@/lib/utils";
 import { clipAudioPath } from "../lib/clipAudio";
 import { clampPercent, formatPercent } from "../lib/formatPercent";
-import { LOCALES, localizeModelProgressMessage, type AppLocale } from "../i18n/messages";
+import { languageLabel } from "../lib/languageLabels";
+import { localizeModelProgressMessage, type AppLocale } from "../i18n/messages";
 import { useI18n } from "../i18n/useI18n";
 
 function formatElapsed(seconds: number, locale: AppLocale): string {
@@ -78,25 +79,19 @@ function ModelChip({
   status,
   error,
   engineName,
-  lastLoadDurationSec,
   progress,
 }: {
   status: ModelStatus;
   error?: string;
   engineName: string;
-  lastLoadDurationSec?: number;
   progress?: ModelLoadProgress;
 }) {
   const { locale, messages: t } = useI18n();
   const variant =
     status === "ready" ? "success" : status === "error" ? "destructive" : "muted";
-  const readySuffix =
-    status === "ready" && lastLoadDurationSec != null && lastLoadDurationSec >= 1
-      ? ` (${formatElapsed(lastLoadDurationSec, locale)})`
-      : "";
   const label =
     status === "ready"
-      ? t.model.ready(engineName, readySuffix)
+      ? t.model.ready(engineName, "")
       : status === "loading"
         ? progress
           ? `${engineName} ${formatPercent(progress.percent)}`
@@ -142,37 +137,10 @@ function ModelChip({
   );
 }
 
-const TTS_LANGUAGE_LABELS: Record<string, string> = {
-  ar: "العربية",
-  da: "Dansk",
-  de: "Deutsch",
-  el: "Ελληνικά",
-  en: "English",
-  es: "Español",
-  fi: "Suomi",
-  fr: "Français",
-  he: "עברית",
-  hi: "हिन्दी",
-  it: "Italiano",
-  ja: "日本語",
-  ko: "한국어",
-  ms: "Bahasa Melayu",
-  nl: "Nederlands",
-  no: "Norsk",
-  pl: "Polski",
-  pt: "Português",
-  ru: "Русский",
-  sv: "Svenska",
-  sw: "Kiswahili",
-  tr: "Türkçe",
-  zh: "中文",
-};
-
 export function TopBar() {
   const { locale, messages: t } = useI18n();
   const project = useProjectStore((s) => s.project);
   const renameProject = useProjectStore((s) => s.renameProject);
-  const setLocale = useProjectStore((s) => s.setLocale);
   const model = useProjectStore((s) => s.model);
   const setModelStatus = useProjectStore((s) => s.setModelStatus);
   const setTtsEngine = useProjectStore((s) => s.setTtsEngine);
@@ -191,9 +159,15 @@ export function TopBar() {
   const modelStatus = model.status;
   const engineInfo = model.engines.find((candidate) => candidate.id === model.engine);
   const engineName = engineInfo?.displayName ?? "VoxCPM2";
-  const languageOptions = (engineInfo?.languages.length ? engineInfo.languages : ["en"]).map(
-    (id) => ({ id, label: TTS_LANGUAGE_LABELS[id] ?? id }),
-  );
+  const languageIds = engineInfo?.requiresLanguage ? engineInfo.languages : [];
+  const languageOptions = languageIds.map((id) => ({
+    id,
+    label: languageLabel(id),
+  }));
+  const selectedLanguage = languageIds.includes(model.language)
+    ? model.language
+    : languageIds[0];
+  const showLanguageSelector = languageOptions.length > 1 && !!selectedLanguage;
   const synthDisabled = synthBusy || modelStatus !== "ready" || !hasContent;
   const engineSwitchDisabled = synthBusy;
   const synthMode: "missing" | "all" = missingCount > 0 ? "missing" : "all";
@@ -309,21 +283,6 @@ export function TopBar() {
       </div>
       <div className="ml-auto flex items-center gap-2">
         <UpdateChip />
-        <Select
-          value={locale}
-          onValueChange={(value) => setLocale(value as AppLocale)}
-        >
-          <SelectTrigger className="h-7 w-[104px] text-xs" title={t.locale.selectorTitle}>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {LOCALES.map((option) => (
-              <SelectItem key={option} value={option}>
-                {option === "ru" ? t.locale.russian : t.locale.english}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
         {model.engines.length > 1 && (
           <Select
             value={model.engine}
@@ -349,9 +308,9 @@ export function TopBar() {
             </SelectContent>
           </Select>
         )}
-        {engineInfo?.requiresLanguage && (
+        {showLanguageSelector && (
           <Select
-            value={model.language}
+            value={selectedLanguage}
             onValueChange={(value) => setTtsLanguage(value)}
             disabled={synthBusy}
           >
@@ -374,7 +333,6 @@ export function TopBar() {
           status={modelStatus}
           error={model.error}
           engineName={engineName}
-          lastLoadDurationSec={model.lastLoadDurationSec}
           progress={model.progress}
         />
         <DevPing />
