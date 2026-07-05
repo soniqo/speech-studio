@@ -129,6 +129,9 @@ const en = {
     exportTitle: (count: number) =>
       `Export a WAV mix of ${count} clip${count === 1 ? "" : "s"}`,
     exportButton: "Export",
+    save: "Save",
+    saved: "Saved",
+    saveTitle: "Save the project now (changes also autosave)",
   },
   projects: {
     title: "Projects — save, open, or start fresh",
@@ -161,6 +164,8 @@ const en = {
     noVoice: "No voice assigned",
     deleteTitle: "Delete track and its clips",
     deleteAria: "Delete track",
+    addLineTitle: "Add a script line to this track",
+    addLineAria: "Add script line",
   },
   voices: {
     title: "Voices",
@@ -251,6 +256,8 @@ const en = {
     name: "Name",
     voice: "Voice",
     source: "Source",
+    lines: (count: number) => `Script lines (${count})`,
+    addLine: "Add script line",
     voicePanel: "Voice",
     referenceAudio: "Reference audio",
     referenceTranscript: "Reference transcript",
@@ -277,9 +284,14 @@ const en = {
   },
   script: {
     label: "Script",
-    placeholder: "Write the line. Pick an emotion below to set the tone.",
+    placeholder: "Write the line, or dictate it with the mic. Pick an emotion below to set the tone.",
     removeMarker: (marker: string) => `Remove ${marker} marker`,
     setMarker: (marker: string) => `Set this line's tone to ${marker}`,
+    dictate: "Dictate",
+    dictateStop: "Stop",
+    dictateTranscribing: "…",
+    dictateTitle: "Dictate this line with the microphone",
+    dictateStopTitle: "Stop recording and transcribe into the line",
     styleHints: {
       instruction: "Markers steer this line's tone.",
       controlledVocabulary:
@@ -382,6 +394,9 @@ const ru: typeof en = {
     exportTitle: (count) =>
       `Экспортировать WAV-микс из ${count} ${ruPlural(count, "клипа", "клипов", "клипов")}`,
     exportButton: "Экспорт",
+    save: "Сохранить",
+    saved: "Сохранено",
+    saveTitle: "Сохранить проект сейчас (изменения также сохраняются автоматически)",
   },
   projects: {
     title: "Проекты: сохранить, открыть или начать заново",
@@ -414,6 +429,8 @@ const ru: typeof en = {
     noVoice: "Голос не назначен",
     deleteTitle: "Удалить дорожку и её клипы",
     deleteAria: "Удалить дорожку",
+    addLineTitle: "Добавить строку сценария на эту дорожку",
+    addLineAria: "Добавить строку сценария",
   },
   voices: {
     title: "Голоса",
@@ -504,6 +521,8 @@ const ru: typeof en = {
     name: "Название",
     voice: "Голос",
     source: "Источник",
+    lines: (count) => `Строки сценария (${count})`,
+    addLine: "Добавить строку сценария",
     voicePanel: "Голос",
     referenceAudio: "Референсное аудио",
     referenceTranscript: "Транскрипт референса",
@@ -530,9 +549,14 @@ const ru: typeof en = {
   },
   script: {
     label: "Сценарий",
-    placeholder: "Напишите реплику. Ниже можно выбрать эмоцию для интонации.",
+    placeholder: "Напишите реплику или надиктуйте её микрофоном. Ниже можно выбрать эмоцию для интонации.",
     removeMarker: (marker) => `Убрать маркер ${marker}`,
     setMarker: (marker) => `Задать интонацию ${marker}`,
+    dictate: "Диктовка",
+    dictateStop: "Стоп",
+    dictateTranscribing: "…",
+    dictateTitle: "Надиктовать реплику микрофоном",
+    dictateStopTitle: "Остановить запись и распознать в реплику",
     styleHints: {
       instruction: "Маркеры управляют интонацией этой реплики.",
       controlledVocabulary:

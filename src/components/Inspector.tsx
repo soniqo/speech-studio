@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { Lock, Unlock, Trash2, RefreshCw, History, Loader2 } from "lucide-react";
-import { useProjectStore } from "../state/projectStore";
+import { Lock, Unlock, Trash2, RefreshCw, History, Loader2, ListPlus } from "lucide-react";
+import { useProjectStore, newClip } from "../state/projectStore";
 import { ScriptEditor } from "./ScriptEditor";
 import { synthesizeClip } from "../ipc/commands";
 import { Button } from "./ui/button";
@@ -63,6 +63,8 @@ export function Inspector() {
   const updateClip = useProjectStore((s) => s.updateClip);
   const assignVoiceToTrack = useProjectStore((s) => s.assignVoiceToTrack);
   const removeClip = useProjectStore((s) => s.removeClip);
+  const addClip = useProjectStore((s) => s.addClip);
+  const select = useProjectStore((s) => s.select);
   const setPlaying = useProjectStore((s) => s.setPlaying);
   const seek = useProjectStore((s) => s.seek);
   const engine = useProjectStore((s) => s.model.engine);
@@ -171,6 +173,34 @@ export function Inspector() {
             <Section>
               <Label>{t.inspector.source}</Label>
               <Value className="break-all">{track.sourcePath}</Value>
+            </Section>
+          )}
+          {track.kind === "speaker" && (
+            <Section>
+              <Label>{t.inspector.lines(track.clips.length)}</Label>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="w-full"
+                onClick={() => {
+                  const lastEnd = track.clips.reduce(
+                    (max, c) => Math.max(max, c.endSec),
+                    0,
+                  );
+                  const startSec = track.clips.length > 0 ? lastEnd + 0.5 : 0;
+                  const clip = newClip({
+                    trackId: track.id,
+                    startSec,
+                    endSec: startSec + 2,
+                    text: "",
+                  });
+                  addClip(clip);
+                  select({ kind: "clip", id: clip.id });
+                }}
+              >
+                <ListPlus className="mr-1.5 h-3.5 w-3.5" />
+                {t.inspector.addLine}
+              </Button>
             </Section>
           )}
         </div>

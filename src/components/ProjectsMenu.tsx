@@ -20,10 +20,11 @@ import {
 import { useI18n } from "../i18n/useI18n";
 
 // Projects dropdown: open / delete persisted projects (JSON files under the
-// app data dir) plus the built-in demo scene. There is no Save button:
-// changes autosave (debounced) whenever the project differs from the last
-// saved snapshot, so switching projects is always safe. An untouched empty
-// "Untitled" project is never written — no file litter from just launching.
+// app data dir) plus the built-in demo scene. Changes autosave (debounced)
+// whenever the project differs from the last saved snapshot, so switching
+// projects is always safe; the TopBar also has an explicit Save button
+// (useProjectSave) for a manual flush. An untouched empty "Untitled" project
+// is never written — no file litter from just launching.
 export function ProjectsMenu() {
   const { locale, messages: t } = useI18n();
   const project = useProjectStore((s) => s.project);

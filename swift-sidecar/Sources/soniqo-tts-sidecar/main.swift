@@ -454,6 +454,12 @@ let omnivoiceHolder = OmniVoiceHolder()
 final class IndicMioHolder: @unchecked Sendable {
     private var model: IndicMioTTSModel?
     private var loadedModelId: String?
+    // The global speaker embedding is a pure function of the reference audio,
+    // so cache it per reference path. WavLM (a heavy SSL transformer over the
+    // whole reference) then runs once per voice instead of once per synthesis
+    // — the dominant per-call cost. Reference paths are content-hashed, so a
+    // changed clip lands on a new key. Cleared whenever the model is swapped.
+    private var embeddingCache: [String: [Float]] = [:]
 
     func load(modelId requestedId: String? = nil) async throws -> IndicMioTTSModel {
         let modelId = requestedId
@@ -474,9 +480,29 @@ final class IndicMioHolder: @unchecked Sendable {
         return m
     }
 
+    /// Global speaker embedding for a reference, computed once per path and
+    /// reused thereafter. `model` must be the currently loaded instance so the
+    /// cache and the embedding space stay in sync.
+    func globalEmbedding(
+        using model: IndicMioTTSModel,
+        referencePath: String,
+        referenceAudio: [Float],
+        referenceSampleRate: Int
+    ) async throws -> (embedding: [Float], cached: Bool) {
+        if let cached = embeddingCache[referencePath] {
+            return (cached, true)
+        }
+        let embedding = try await model.extractGlobalEmbedding(
+            referenceAudio: referenceAudio,
+            referenceSampleRate: referenceSampleRate)
+        embeddingCache[referencePath] = embedding
+        return (embedding, false)
+    }
+
     func unload() {
         model = nil
         loadedModelId = nil
+        embeddingCache.removeAll()
     }
 }
 
@@ -759,6 +785,10 @@ func trimLeadingJunk(_ samples: [Float], sampleRate: Int) -> [Float] {
         // require a pure low-frequency signature so short isolated words
         // with any consonant content are spared. Median ZCR is amplitude-
         // invariant, so fades and gain don't move it.
+        //
+        // Deliberately NOT gap-based: a quiet, short, gap-separated leading
+        // island can be a real whispered onset word (VoxCPM2 renders "Just, …"
+        // exactly that way), so trimming on the gap alone eats the first word.
         let quietDb = maxPeak - island.peak
         let shapeMatches = quietDb >= 20
             || (quietDb >= 8 && island.medianZcr <= 0.06)
@@ -779,6 +809,38 @@ func trimLeadingJunk(_ samples: [Float], sampleRate: Int) -> [Float] {
     }
     guard trimIdx > 0 else { return samples }
     return Array(samples.dropFirst(trimIdx * win))
+}
+
+/// The onset pipeline every cloning engine runs before writing its WAV: strip
+/// leading codec/reference-boundary junk, then edge-condition. Several engines
+/// (reference- and seed-dependent) open a take with a short quiet blip and a
+/// silence gap before the first word — audible especially on quiet/whisper
+/// takes. trimLeadingJunk removes it and returns clean audio unchanged, so
+/// engines without junk are unaffected. `engine` labels the trim log line.
+func conditionSynthOutput(
+    _ generated: [Float],
+    sampleRate: Int,
+    engine: String,
+    preTrimMs: Int = 0,
+    leadInMs: Int = 100,
+    postRollMs: Int = 240,
+    fadeInMs: Int = 40,
+    fadeOutMs: Int = 40
+) -> [Float] {
+    let dejunked = trimLeadingJunk(generated, sampleRate: sampleRate)
+    if dejunked.count != generated.count {
+        let trimmedMs = (generated.count - dejunked.count) * 1000 / sampleRate
+        logErr("[sidecar] \(engine) onset junk: trimmed leading \(trimmedMs)ms")
+    }
+    return conditionAudioEdges(
+        dejunked,
+        sampleRate: sampleRate,
+        preTrimMs: preTrimMs,
+        leadInMs: leadInMs,
+        postRollMs: postRollMs,
+        fadeInMs: fadeInMs,
+        fadeOutMs: fadeOutMs
+    )
 }
 
 func safeFilename(_ s: String) -> String {
@@ -1112,7 +1174,7 @@ while let line = readLine(strippingNewline: true) {
 
             let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
             let sampleRate = model.sampleRate
-            let audio = conditionAudioEdges(generatedAudio, sampleRate: sampleRate)
+            let audio = conditionSynthOutput(generatedAudio, sampleRate: sampleRate, engine: "voxcpm2")
             try WAVWriter.write(samples: audio, sampleRate: sampleRate, to: outURL)
             let durationSec = Double(audio.count) / Double(sampleRate)
             logMemorySnapshot("post-vox-synth")
@@ -1218,7 +1280,7 @@ while let line = readLine(strippingNewline: true) {
             }
 
             let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
-            let audio = conditionAudioEdges(trimmedAudio, sampleRate: 24000)
+            let audio = conditionSynthOutput(trimmedAudio, sampleRate: 24000, engine: "cosyvoice")
             try WAVWriter.write(samples: audio, sampleRate: 24000, to: outURL)
 
             let durationSec = Double(audio.count) / 24000.0
@@ -1300,7 +1362,7 @@ while let line = readLine(strippingNewline: true) {
 
             let sampleRate = ChatterboxS3Gen.sampleRate
             let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
-            let audio = conditionAudioEdges(generatedAudio, sampleRate: sampleRate)
+            let audio = conditionSynthOutput(generatedAudio, sampleRate: sampleRate, engine: "chatterbox")
             try WAVWriter.write(samples: audio, sampleRate: sampleRate, to: outURL)
             let durationSec = Double(audio.count) / Double(sampleRate)
             logMemorySnapshot("post-cbx-synth")
@@ -1368,12 +1430,7 @@ while let line = readLine(strippingNewline: true) {
 
             let sampleRate = model.sampleRate
             let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
-            let dejunkedAudio = trimLeadingJunk(generatedAudio, sampleRate: sampleRate)
-            if dejunkedAudio.count != generatedAudio.count {
-                let trimmedMs = (generatedAudio.count - dejunkedAudio.count) * 1000 / sampleRate
-                logErr("[sidecar] omni onset junk: trimmed leading \(trimmedMs)ms")
-            }
-            let audio = conditionAudioEdges(dejunkedAudio, sampleRate: sampleRate)
+            let audio = conditionSynthOutput(generatedAudio, sampleRate: sampleRate, engine: "omnivoice")
             try WAVWriter.write(samples: audio, sampleRate: sampleRate, to: outURL)
             let durationSec = Double(audio.count) / Double(sampleRate)
             logMemorySnapshot("post-omni-synth")
@@ -1440,12 +1497,19 @@ while let line = readLine(strippingNewline: true) {
             if let refPath = request.referenceAudioPath, !refPath.isEmpty {
                 let refURL = URL(fileURLWithPath: refPath)
                 let refSamples = try AudioFileLoader.load(url: refURL, targetSampleRate: model.sampleRate)
-                logErr("[sidecar] indic-mio reference=\(refPath) samples=\(refSamples.count) @ \(model.sampleRate) Hz")
+                // Encode the reference once per voice; every later line (and
+                // any re-render) reuses the cached speaker embedding instead of
+                // re-running WavLM over the whole clip.
+                let (embedding, cached) = try await indicMioHolder.globalEmbedding(
+                    using: model,
+                    referencePath: refPath,
+                    referenceAudio: refSamples,
+                    referenceSampleRate: model.sampleRate)
+                logErr("[sidecar] indic-mio reference=\(refPath) samples=\(refSamples.count) @ \(model.sampleRate) Hz embedding=\(cached ? "cached" : "computed")")
                 audio = try await model.generate(
                     text: finalText,
                     language: language,
-                    referenceAudio: refSamples,
-                    referenceSampleRate: model.sampleRate,
+                    globalEmbedding: embedding,
                     sampling: sampling
                 )
             } else {
@@ -1457,7 +1521,7 @@ while let line = readLine(strippingNewline: true) {
             }
             let sampleRate = model.sampleRate
             let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
-            let conditionedAudio = conditionAudioEdges(audio, sampleRate: sampleRate)
+            let conditionedAudio = conditionSynthOutput(audio, sampleRate: sampleRate, engine: "indic-mio")
             try WAVWriter.write(samples: conditionedAudio, sampleRate: sampleRate, to: outURL)
             let durationSec = Double(conditionedAudio.count) / Double(sampleRate)
             logErr(String(format: "[sidecar] indic-mio wrote %.2fs → %@", durationSec, outURL.path))
@@ -1522,9 +1586,10 @@ while let line = readLine(strippingNewline: true) {
                 sampling: sampling
             )
             let sampleRate = model.sampleRate
-            let audio = conditionAudioEdges(
+            let audio = conditionSynthOutput(
                 generatedAudio,
                 sampleRate: sampleRate,
+                engine: "fish-audio",
                 leadInMs: 120,
                 postRollMs: 220
             )
@@ -1595,12 +1660,7 @@ while let line = readLine(strippingNewline: true) {
             )
 
             let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
-            let dejunkedAudio = trimLeadingJunk(generatedAudio, sampleRate: 24000)
-            if dejunkedAudio.count != generatedAudio.count {
-                let trimmedMs = (generatedAudio.count - dejunkedAudio.count) * 1000 / 24000
-                logErr("[sidecar] qwen onset junk: trimmed leading \(trimmedMs)ms")
-            }
-            let audio = conditionAudioEdges(dejunkedAudio, sampleRate: 24000, preTrimMs: 20)
+            let audio = conditionSynthOutput(generatedAudio, sampleRate: 24000, engine: "qwen", preTrimMs: 20)
             try WAVWriter.write(samples: audio, sampleRate: 24000, to: outURL)
 
             let durationSec = Double(audio.count) / 24000.0

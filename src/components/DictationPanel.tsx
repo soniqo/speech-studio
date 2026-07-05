@@ -1,27 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Clipboard, FilePlus2, Loader2, Mic, Pause, Play, Square } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import {
-  availableAsrModels,
-  saveDictationAudio,
-  transcribeAudio,
-  type AsrModelInfo,
-  type TranscribeAudioResult,
-} from "../ipc/commands";
+import { availableAsrModels, type AsrModelInfo } from "../ipc/commands";
 import { newClip, useProjectStore } from "../state/projectStore";
 import type { SpeakerTrack } from "../types/project";
 import { Button } from "./ui/button";
 import { useI18n } from "../i18n/useI18n";
-
-interface RecorderSession {
-  stream: MediaStream;
-  context: AudioContext;
-  source: MediaStreamAudioSourceNode;
-  processor: ScriptProcessorNode;
-  chunks: Float32Array[];
-  sampleRate: number;
-  startedAt: number;
-}
+import { useDictationRecorder } from "../hooks/useDictationRecorder";
 
 interface DictationCapture {
   id: string;
@@ -33,60 +18,6 @@ interface DictationCapture {
 }
 
 let currentDictationAudio: HTMLAudioElement | null = null;
-
-function flattenChunks(chunks: Float32Array[]): Float32Array {
-  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const out = new Float32Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
-}
-
-function writeAscii(view: DataView, offset: number, value: string) {
-  for (let i = 0; i < value.length; i += 1) {
-    view.setUint8(offset + i, value.charCodeAt(i));
-  }
-}
-
-function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
-  const bytesPerSample = 2;
-  const dataBytes = samples.length * bytesPerSample;
-  const buffer = new ArrayBuffer(44 + dataBytes);
-  const view = new DataView(buffer);
-  writeAscii(view, 0, "RIFF");
-  view.setUint32(4, 36 + dataBytes, true);
-  writeAscii(view, 8, "WAVE");
-  writeAscii(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * bytesPerSample, true);
-  view.setUint16(32, bytesPerSample, true);
-  view.setUint16(34, 16, true);
-  writeAscii(view, 36, "data");
-  view.setUint32(40, dataBytes, true);
-  let offset = 44;
-  for (const sample of samples) {
-    const clamped = Math.max(-1, Math.min(1, sample));
-    view.setInt16(offset, Math.round(clamped * 32767), true);
-    offset += bytesPerSample;
-  }
-  return buffer;
-}
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  const chunkSize = 0x8000;
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
-}
 
 function formatSec(value: number): string {
   return value.toFixed(value < 10 ? 1 : 0);
@@ -103,14 +34,12 @@ export function DictationPanel() {
   const addClip = useProjectStore((s) => s.addClip);
   const updateClip = useProjectStore((s) => s.updateClip);
   const select = useProjectStore((s) => s.select);
+  const { recording, busy, error, setError, start, stopAndTranscribe } =
+    useDictationRecorder();
   const [models, setModels] = useState<AsrModelInfo[]>([]);
-  const [recording, setRecording] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [flowMessage, setFlowMessage] = useState<string | null>(null);
   const [captures, setCaptures] = useState<DictationCapture[]>([]);
   const [playingId, setPlayingId] = useState<string | null>(null);
-  const recorderRef = useRef<RecorderSession | null>(null);
 
   const model = models[0];
 
@@ -125,104 +54,27 @@ export function DictationPanel() {
       });
     return () => {
       cancelled = true;
-      stopRecorderOnly();
       if (currentDictationAudio) {
         currentDictationAudio.pause();
         currentDictationAudio = null;
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function stopRecorderOnly(): RecorderSession | null {
-    const session = recorderRef.current;
-    recorderRef.current = null;
-    if (!session) return null;
-    session.processor.disconnect();
-    session.source.disconnect();
-    session.stream.getTracks().forEach((track) => track.stop());
-    void session.context.close();
-    setRecording(false);
-    return session;
+  async function record() {
+    setFlowMessage(null);
+    await start();
   }
 
-  async function startRecording() {
-    setError(null);
+  async function finishRecording() {
     setFlowMessage(null);
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setError(t.dictation.unsupported);
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-        },
-      });
-      const AudioContextCtor = window.AudioContext;
-      const context = new AudioContextCtor({ sampleRate: 16000 });
-      const source = context.createMediaStreamSource(stream);
-      const processor = context.createScriptProcessor(4096, 1, 1);
-      const chunks: Float32Array[] = [];
-      processor.onaudioprocess = (event) => {
-        chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
-        event.outputBuffer.getChannelData(0).fill(0);
-      };
-      source.connect(processor);
-      processor.connect(context.destination);
-      recorderRef.current = {
-        stream,
-        context,
-        source,
-        processor,
-        chunks,
-        sampleRate: context.sampleRate,
-        startedAt: performance.now(),
-      };
-      setRecording(true);
-    } catch (e) {
-      setError(t.dictation.micFailed(String(e)));
-    }
-  }
-
-  async function stopAndTranscribe() {
-    const session = stopRecorderOnly();
-    if (!session || busy) return;
-    const samples = flattenChunks(session.chunks);
-    const durationSec = samples.length / session.sampleRate;
-    if (durationSec < 0.2) {
-      setError(t.dictation.tooShort);
-      return;
-    }
-
-    setBusy(true);
-    setError(null);
-    setFlowMessage(null);
-    try {
-      const wav = encodeWav(samples, session.sampleRate);
-      const saved = await saveDictationAudio(arrayBufferToBase64(wav));
-      const transcript: TranscribeAudioResult = await transcribeAudio({
-        audioPath: saved.audioPath,
-        model: model?.id,
-      });
-      setCaptures((prev) => [
-        {
-          id: crypto.randomUUID(),
-          audioPath: saved.audioPath,
-          durationSec: transcript.durationSec || saved.durationSec || durationSec,
-          text: transcript.text,
-          elapsedSec: transcript.elapsedSec,
-          createdAt: new Date().toISOString(),
-        },
-        ...prev,
-      ]);
-    } catch (e) {
-      setError(t.dictation.transcribeFailed(String(e)));
-    } finally {
-      setBusy(false);
-    }
+    const result = await stopAndTranscribe(model?.id);
+    if (!result) return;
+    setCaptures((prev) => [
+      { id: crypto.randomUUID(), createdAt: new Date().toISOString(), ...result },
+      ...prev,
+    ]);
   }
 
   function insertCapture(capture: DictationCapture) {
@@ -309,7 +161,7 @@ export function DictationPanel() {
           size="sm"
           variant={recording ? "destructive" : "default"}
           className="h-8 w-full text-xs"
-          onClick={recording ? stopAndTranscribe : startRecording}
+          onClick={recording ? finishRecording : record}
           disabled={busy || !model}
           title={recording ? t.dictation.stopTitle : t.dictation.recordTitle}
         >

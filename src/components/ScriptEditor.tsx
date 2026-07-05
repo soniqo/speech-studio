@@ -1,6 +1,8 @@
 import { useRef } from "react";
+import { Loader2, Mic, Square } from "lucide-react";
 import { EMOTION_TAGS } from "../types/project";
 import { useProjectStore } from "../state/projectStore";
+import { useDictationRecorder } from "../hooks/useDictationRecorder";
 import { Textarea } from "./ui/textarea";
 import { Button } from "./ui/button";
 import { useI18n } from "../i18n/useI18n";
@@ -57,6 +59,8 @@ function bracketMarker(marker: string): string {
 export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
   const { messages: m } = useI18n();
   const ref = useRef<HTMLTextAreaElement>(null);
+  const { recording, busy, error: dictationError, start, stopAndTranscribe } =
+    useDictationRecorder();
   const engineInfo = useProjectStore(
     (s) => s.model.engines.find((e) => e.id === s.model.engine),
   );
@@ -88,6 +92,22 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
             ? m.script.styleHints.none
             : m.script.styleHints.instruction;
 
+  async function dictate() {
+    if (recording) {
+      const result = await stopAndTranscribe();
+      const spoken = result?.text.trim();
+      if (spoken) {
+        // Append to whatever's already in the line (including a chosen
+        // emotion tag), so dictation adds to the script rather than wiping it.
+        const existing = value.trim();
+        onChange(existing ? `${existing} ${spoken}` : spoken);
+      }
+      requestAnimationFrame(() => ref.current?.focus());
+      return;
+    }
+    await start();
+  }
+
   function applyTag(tag: string) {
     const body = stripEmotionTag(value).trim();
     const rawTag = rawMarkerValue(tag);
@@ -106,8 +126,28 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
 
   return (
     <div className="space-y-1.5">
-      <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
-        {m.script.label}
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
+          {m.script.label}
+        </div>
+        <Button
+          size="sm"
+          variant={recording ? "destructive" : "ghost"}
+          onClick={() => void dictate()}
+          disabled={busy}
+          title={recording ? m.script.dictateStopTitle : m.script.dictateTitle}
+          aria-label={recording ? m.script.dictateStopTitle : m.script.dictateTitle}
+          className="h-6 gap-1 px-2 text-[11px] font-normal"
+        >
+          {busy ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : recording ? (
+            <Square className="h-3.5 w-3.5" />
+          ) : (
+            <Mic className="h-3.5 w-3.5" />
+          )}
+          {busy ? m.script.dictateTranscribing : recording ? m.script.dictateStop : m.script.dictate}
+        </Button>
       </div>
       <Textarea
         ref={ref}
@@ -116,7 +156,13 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
         placeholder={m.script.placeholder}
         className="min-h-[88px]"
       />
-      <div className={`flex flex-wrap gap-1 ${markersIgnored ? "opacity-50" : ""}`}>
+      {dictationError && (
+        <div className="text-[11px] text-destructive">{dictationError}</div>
+      )}
+      <div
+        data-testid="emotion-markers"
+        className={`flex flex-wrap gap-1 ${markersIgnored ? "opacity-50" : ""}`}
+      >
         {markerTags.map((tag) => {
           const rawTag = rawMarkerValue(tag);
           const active = currentTag === rawTag;

@@ -1093,38 +1093,6 @@ struct SynthesizeResult {
     elapsed_sec: f64,
 }
 
-/// How ASR-graded retry runs on this platform. macOS shells out to the
-/// `speech` CLI (Parakeet, ships with the speech-swift toolchain). Windows and
-/// Linux grade through the sidecar's `transcribe` command (Omnilingual
-/// CTC-300M, multilingual), enabled by pointing SONIQO_STT_MODEL_DIR at a
-/// directory holding omnilingual-ctc-300m.tflite + tokenizer.model. With
-/// neither available we accept the first successful take.
-enum Grader {
-    SpeechCli,
-    Sidecar(String),
-    None,
-}
-
-fn resolve_grader() -> Grader {
-    if cfg!(target_os = "macos") {
-        return Grader::SpeechCli;
-    }
-    if let Ok(dir) = std::env::var("SONIQO_STT_MODEL_DIR") {
-        if std::path::Path::new(&dir)
-            .join("omnilingual-ctc-300m.tflite")
-            .exists()
-            && std::path::Path::new(&dir).join("tokenizer.model").exists()
-        {
-            return Grader::Sidecar(dir);
-        }
-        eprintln!(
-            "[synth] SONIQO_STT_MODEL_DIR set but model files missing: {}",
-            dir
-        );
-    }
-    Grader::None
-}
-
 /// Split text into sentences on terminal punctuation, including the
 /// Devanagari danda/double-danda. The terminator stays attached to its
 /// sentence so the model gets a clean stop cue per chunk.
@@ -1225,13 +1193,6 @@ fn chunk_text_for_synthesis(text: &str, max_words: usize) -> Vec<String> {
     chunks
 }
 
-const DEFAULT_SYNTH_SEED_LADDER: &[u64] = &[1000, 1001, 1002, 1010, 1011, 1012];
-
-fn synth_seed_ladder(engine: TtsEngine) -> &'static [u64] {
-    debug_assert_ne!(engine, TtsEngine::Qwen3);
-    DEFAULT_SYNTH_SEED_LADDER
-}
-
 fn synth_max_tokens(engine: TtsEngine, target_word_count: usize) -> usize {
     if engine == TtsEngine::Qwen3 {
         // Qwen3 frames are ~80 ms each. The generic cap lets short lines run
@@ -1261,11 +1222,8 @@ fn synth_one_line(
     invocation_salt: &str,
     part_idx: usize,
 ) -> Result<(String, f64), String> {
-    const CFG_LADDER: &[f32] = &[2.0, 2.5, 3.0];
-
     // Token budget: ~12 steps/word + headroom (each step ≈ 50 ms of audio).
-    let grade_target = strip_style_markers_for_grading(text);
-    let target_word_count = canon_tokens(&grade_target).len();
+    let target_word_count = canon_tokens(&strip_style_markers_for_grading(text)).len();
     let max_tokens = synth_max_tokens(engine, target_word_count);
     // Floor under the model's stop signal: VoxCPM2 fires its stop token
     // prematurely on long non-Latin-script lines (a 19-word Hindi sentence
@@ -1278,204 +1236,68 @@ fn synth_one_line(
     // so short chunks can still end naturally. A flat floor of 32 forced a
     // 6-word chunk (natural ≈ 15 steps) to ramble to 74 steps / 11.8 s.
     let min_stop_steps = (target_word_count.saturating_mul(5) / 2).clamp(8, max_tokens - 16);
-
-    let grader = resolve_grader();
-    // Non-Latin targets get a stricter accept rule (see below): the babble
-    // tail VoxCPM2 leaves on Hindi overshoots is short in ASR tokens (~2) but
-    // seconds long audibly, so the Latin-tuned suffix allowance is too loose.
-    let target_is_non_latin = grade_target
-        .chars()
-        .any(|c| !c.is_ascii() && c.is_alphabetic());
     let sidecar_language = normalize_sidecar_language(engine, language);
     let model_id = engine.registry_entry().info.model_id.as_str();
 
-    let mut best: Option<(String, Grade, u64, f64)> = None;
-    let mut last_error: Option<String> = None;
-
-    if engine == TtsEngine::Qwen3 {
-        let seed = 1000;
-        let payload = serde_json::json!({
-            "id": format!("synth-{}-p{}-s{}-{}", clip_id, part_idx, seed, invocation_salt),
-            "command": engine.sidecar_command(),
-            "engine": engine,
-            "modelId": model_id,
-            "text": text,
-            "voiceId": voice_id,
-            "referenceAudioPath": reference_audio_path,
-            "referenceText": reference_text,
-            "language": sidecar_language.as_deref(),
-            "seed": seed,
-            "maxTokens": max_tokens,
-        });
-        let raw = manager.request(&payload)?;
-        let env: SidecarResponse = serde_json::from_value(raw).map_err(|e| e.to_string())?;
-        if !env.ok {
-            return Err(humanize_sidecar_error(
-                engine,
-                env.error.unwrap_or_else(|| "sidecar error".into()),
-            ));
-        }
-        let result = env.result.unwrap_or_default();
-        let audio_path = result
-            .get("audioPath")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "missing audioPath in sidecar response".to_string())?
-            .to_string();
-        let duration = result
-            .get("durationSec")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        validate_synth_audio(&audio_path)?;
-        eprintln!(
-            "[synth] clip {} part {} accepted qwen single-shot (seed={}, {:.2}s)",
-            clip_id, part_idx, seed, duration
-        );
-        return Ok((audio_path, duration));
+    // Single-shot for every engine. The 16-bit (fp16/bf16) models produce
+    // intelligible speech in one pass, so there is no seed/cfg retry ladder and
+    // no ASR grading gate — only a non-empty/non-silent audio guard. The old
+    // ladder graded takes with Parakeet on macOS, which cannot read non-Latin
+    // scripts: it scored good Hindi/CJK audio near 0% and burned every seed for
+    // nothing, and for Indic-Mio it re-ran the heavy WavLM speaker encoder on
+    // each attempt. cfgValue and minStopSteps are read only by the engines that
+    // use them (VoxCPM2, CosyVoice, …); the others ignore them.
+    //
+    // Seed varies per synthesis (derived from the per-call invocation_salt), so
+    // every Regenerate rolls a fresh take. That is the manual escape hatch for
+    // an unlucky single-shot render (e.g. a doubled onset word on one seed):
+    // the user re-rolls instead of an ASR gate auto-retrying. Matches how
+    // Voicebox handles it (regenerate → new random seed, no grading). A cached
+    // take keeps its salt, so it stays put until explicitly regenerated.
+    let seed = short_hash(invocation_salt) as u64;
+    let payload = serde_json::json!({
+        "id": format!("synth-{}-p{}-s{}-{}", clip_id, part_idx, seed, invocation_salt),
+        "command": engine.sidecar_command(),
+        "engine": engine,
+        "modelId": model_id,
+        "text": text,
+        "voiceId": voice_id,
+        "referenceAudioPath": reference_audio_path,
+        "referenceText": reference_text,
+        "language": sidecar_language.as_deref(),
+        "seed": seed,
+        "cfgValue": 2.0,
+        "maxTokens": max_tokens,
+        "minStopSteps": min_stop_steps,
+    });
+    let raw = manager.request(&payload)?;
+    let env: SidecarResponse = serde_json::from_value(raw).map_err(|e| e.to_string())?;
+    if !env.ok {
+        return Err(humanize_sidecar_error(
+            engine,
+            env.error.unwrap_or_else(|| "sidecar error".into()),
+        ));
     }
-
-    for (attempt_idx, &seed) in synth_seed_ladder(engine).iter().enumerate() {
-        let cfg = CFG_LADDER[attempt_idx.min(CFG_LADDER.len() - 1)];
-        let payload = serde_json::json!({
-            "id": format!("synth-{}-p{}-s{}-{}", clip_id, part_idx, seed, invocation_salt),
-            "command": engine.sidecar_command(),
-            "engine": engine,
-            "modelId": model_id,
-            "text": text,
-            "voiceId": voice_id,
-            "referenceAudioPath": reference_audio_path,
-            "referenceText": reference_text,
-            "language": sidecar_language.as_deref(),
-            "seed": seed,
-            "cfgValue": cfg,
-            "maxTokens": max_tokens,
-            "minStopSteps": min_stop_steps,
-        });
-
-        let raw = match manager.request(&payload) {
-            Ok(v) => v,
-            Err(e) => {
-                last_error = Some(format!("attempt {} (seed={}): {}", attempt_idx, seed, e));
-                eprintln!("[synth] {}", last_error.as_ref().unwrap());
-                continue;
-            }
-        };
-        let env: SidecarResponse = match serde_json::from_value(raw) {
-            Ok(e) => e,
-            Err(e) => {
-                last_error = Some(format!("parse response: {}", e));
-                eprintln!("[synth] {}", last_error.as_ref().unwrap());
-                continue;
-            }
-        };
-        if !env.ok {
-            last_error = Some(humanize_sidecar_error(
-                engine,
-                env.error.unwrap_or_else(|| "sidecar error".into()),
-            ));
-            eprintln!(
-                "[synth] clip {} part {} attempt {} (seed={}) failed: {}",
-                clip_id,
-                part_idx,
-                attempt_idx,
-                seed,
-                last_error.as_ref().unwrap()
-            );
-            continue;
-        }
-        let result = env.result.unwrap_or_default();
-        let audio_path = match result.get("audioPath").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => continue,
-        };
-        let duration = result
-            .get("durationSec")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        if let Err(e) = validate_synth_audio(&audio_path) {
-            last_error = Some(format!("attempt {} (seed={}): {}", attempt_idx, seed, e));
-            eprintln!(
-                "[synth] clip {} part {} attempt {} (seed={}) rejected: {}",
-                clip_id,
-                part_idx,
-                attempt_idx,
-                seed,
-                last_error.as_ref().unwrap()
-            );
-            continue;
-        }
-
-        // No ASR grader on this platform — accept the first successful take
-        // rather than burning the whole seed ladder (each take is a full synth).
-        let graded = match &grader {
-            Grader::SpeechCli => asr_grade(&audio_path, &grade_target),
-            Grader::Sidecar(dir) => asr_grade_sidecar(manager, &audio_path, &grade_target, dir),
-            Grader::None => {
-                eprintln!(
-                    "[synth] clip {} part {} accepted first take (seed={}, {:.2}s; grading unavailable on this platform)",
-                    clip_id, part_idx, seed, duration
-                );
-                return Ok((audio_path, duration));
-            }
-        };
-        let grade = graded.unwrap_or_else(|| Grade {
-            coverage: 0.0,
-            prefix_words: 0,
-            suffix_words: 0,
-            repeated_target_words: 0,
-            transcript: String::new(),
-        });
-        eprintln!(
-            "[synth] clip {} part {} attempt {} (seed={}) {} cov={:.0}% pre={} suf={} rep={} ({:.2}s)",
-            clip_id,
-            part_idx,
-            attempt_idx,
-            seed,
-            if grade.is_clean_for(target_is_non_latin) {
-                "✓"
-            } else {
-                "✗"
-            },
-            grade.coverage * 100.0,
-            grade.prefix_words,
-            grade.suffix_words,
-            grade.repeated_target_words,
-            duration,
-        );
-
-        // Keep the best attempt as fallback (composite score, not raw coverage).
-        let take_it = best
-            .as_ref()
-            .map(|(_, g, _, _)| g.score() < grade.score())
-            .unwrap_or(true);
-        if take_it {
-            best = Some((audio_path.clone(), grade.clone(), seed, duration));
-        }
-
-        if grade.is_clean_for(target_is_non_latin) {
-            eprintln!(
-                "[synth] clip {} part {} accepted on attempt {} (seed={}, cov={:.0}%)",
-                clip_id,
-                part_idx,
-                attempt_idx,
-                seed,
-                grade.coverage * 100.0
-            );
-            return Ok((audio_path, duration));
-        }
-    }
-
-    if let Some((audio_path, grade, seed, duration)) = best {
-        eprintln!(
-            "[synth] clip {} part {} all attempts below threshold; returning best (seed={}, cov={:.0}%, score={:.2})",
-            clip_id,
-            part_idx,
-            seed,
-            grade.coverage * 100.0,
-            grade.score()
-        );
-        return Ok((audio_path, duration));
-    }
-    Err(last_error.unwrap_or_else(|| "all synth attempts failed".into()))
+    let result = env.result.unwrap_or_default();
+    let audio_path = result
+        .get("audioPath")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing audioPath in sidecar response".to_string())?
+        .to_string();
+    let duration = result
+        .get("durationSec")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    validate_synth_audio(&audio_path)?;
+    eprintln!(
+        "[synth] clip {} part {} synthesized via {} single-shot (seed={}, {:.2}s)",
+        clip_id,
+        part_idx,
+        engine.sidecar_command(),
+        seed,
+        duration
+    );
+    Ok((audio_path, duration))
 }
 
 /// Words per synthesis chunk. VoxCPM2's AR quality drifts past ~15-20 s of
@@ -2083,360 +1905,6 @@ fn strip_style_markers_for_grading(text: &str) -> String {
     strip_leading_parenthetical_marker(&without_brackets)
         .trim()
         .to_string()
-}
-
-/// Result of grading a synth take. Captures the four signals we use to decide
-/// accept/reject: how much of the target text appears, and whether the
-/// transcript is "shaped right" (no prefix junk, no trailing repetition).
-#[derive(Debug, Clone)]
-struct Grade {
-    /// Fraction of target words present in the transcript (via LCS).
-    coverage: f64,
-    /// Number of transcript words BEFORE the first aligned target word.
-    /// Detects reference-echo leak ("Capit, ruttering, quilt, JUST STAY…").
-    prefix_words: usize,
-    /// Number of transcript words AFTER the last aligned target word.
-    /// Detects trailing garbage (model failed to EOS cleanly).
-    suffix_words: usize,
-    /// Count of target words that appear 2+ times in the transcript.
-    /// Detects line repetition (model regenerated the line after first EOS).
-    repeated_target_words: usize,
-    /// Raw ASR transcript, kept for logging only.
-    #[allow(dead_code)]
-    transcript: String,
-}
-
-impl Grade {
-    /// Accept rule. Tuned against a 48-take sweep:
-    ///   - Coverage ≥ 0.75 lets through clean substitutions (e.g. "end" → "and").
-    ///   - prefix ≤ 1 allows one short attack word ("And…", "Oh…") but blocks
-    ///     reference-echo prefixes which are typically 3+ junk words.
-    ///   - suffix ≤ 2 allows a trailing pause/period word but blocks tail
-    ///     repetition or filler.
-    ///   - repeated == 0 blocks line-repetition takes entirely.
-    fn is_clean(&self) -> bool {
-        self.is_clean_for(false)
-    }
-
-    /// Accept rule with script-aware strictness. Non-Latin (e.g. Hindi)
-    /// targets use a lower coverage bar — the grading ASR (Omnilingual) mixes
-    /// Devanagari and Urdu script for Hindustani, and even skeleton-folded
-    /// matching (see tokens_match) drops some words — but a tighter suffix
-    /// bound: VoxCPM2's overshoot babble on Hindi decodes to only ~2 junk
-    /// tokens yet is seconds long audibly, so 2 trailing words is already a
-    /// broken take there. The prefix allowance is looser for non-Latin (≤2):
-    /// cross-script ASR reliably mishears a chunk's cold-start word as two
-    /// unalignable tokens (measured pre=2 on every seed of a clean Hindi
-    /// chunk), while real reference-echo prefixes are far longer (pre=31 on
-    /// the one bad take in the same ladder).
-    fn is_clean_for(&self, non_latin: bool) -> bool {
-        let (min_cov, max_prefix, max_suffix) = if non_latin { (0.6, 2, 1) } else { (0.75, 1, 2) };
-        self.coverage >= min_cov
-            && self.prefix_words <= max_prefix
-            && self.suffix_words <= max_suffix
-            && self.repeated_target_words == 0
-    }
-
-    /// Composite score for ladder-exhausted fallback. Weights chosen so that
-    /// a clean cov=75% take beats a leaked cov=100% take; a repetition take
-    /// is heavily penalised because it doubles the audio length audibly.
-    fn score(&self) -> f64 {
-        self.coverage
-            - 0.1 * self.prefix_words as f64
-            - 0.05 * self.suffix_words as f64
-            - 0.2 * self.repeated_target_words as f64
-    }
-}
-
-/// Run `speech transcribe --engine parakeet` and grade the transcript against
-/// the target. Returns None only if the ASR command itself fails — an empty
-/// transcript is graded as 0% coverage, not None.
-fn asr_grade(audio_path: &str, target: &str) -> Option<Grade> {
-    let out = Command::new("speech")
-        .args(["transcribe", "--engine", "parakeet", audio_path])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        eprintln!(
-            "[synth] parakeet failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-        return None;
-    }
-    let transcript = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .find_map(|l| l.strip_prefix("Result: ").map(|s| s.trim().to_string()))
-        .unwrap_or_default();
-    Some(grade_transcript(&transcript, target))
-}
-
-/// Grade via the sidecar's `transcribe` command (Omnilingual CTC-300M) —
-/// the Windows/Linux counterpart of asr_grade's `speech` CLI shell-out.
-fn asr_grade_sidecar(
-    manager: &SidecarManager,
-    audio_path: &str,
-    target: &str,
-    model_dir: &str,
-) -> Option<Grade> {
-    let payload = serde_json::json!({
-        "id": format!("grade-{}", uuid::Uuid::new_v4().simple()),
-        "command": "transcribe",
-        "audioPath": audio_path,
-        "modelDir": model_dir,
-    });
-    let raw = match manager.request(&payload) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("[synth] sidecar transcribe failed: {}", e);
-            return None;
-        }
-    };
-    let env: SidecarResponse = serde_json::from_value(raw).ok()?;
-    if !env.ok {
-        eprintln!(
-            "[synth] sidecar transcribe error: {}",
-            env.error.unwrap_or_else(|| "unknown".into())
-        );
-        return None;
-    }
-    let result = env.result.unwrap_or_default();
-    let transcript = result
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    Some(grade_transcript(&transcript, target))
-}
-
-/// Fold a token to a script-agnostic consonant skeleton. Omnilingual decodes
-/// Hindustani in mixed Devanagari/Urdu script (no language pin), so grading
-/// "जोड़े" against "جوڑے" requires both to reduce to the same key. Both
-/// scripts are phonetic: keep consonant classes, drop vowels/diacritics.
-/// ASCII passes through unchanged.
-fn fold_skeleton(token: &str) -> String {
-    let mut out = String::new();
-    let chars: Vec<char> = token.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        // Decomposed nukta forms (base + U+093C) change the consonant class:
-        // ड़/ढ़ are flaps (= Urdu ڑ → 'r'), ज़ → 'j', फ़ → 'f'. Consume the pair.
-        if chars.get(i + 1) == Some(&'\u{093C}') {
-            let k = match c {
-                'ड' | 'ढ' => Some('r'),
-                'ज' => Some('j'),
-                'फ' => Some('f'),
-                'क' | 'ख' => Some('k'),
-                'ग' => Some('g'),
-                _ => None,
-            };
-            if let Some(k) = k {
-                out.push(k);
-                i += 2;
-                continue;
-            }
-        }
-        let k: Option<char> = match c {
-            // Devanagari consonants (incl. precomposed nukta forms U+0958-095E;
-            // decomposed base+nukta also works — base maps, nukta drops below)
-            'क' | 'ख' | '\u{0958}' | '\u{0959}' => Some('k'),
-            'ग' | 'घ' | '\u{095A}' => Some('g'),
-            'च' | 'छ' => Some('c'),
-            'ज' | 'झ' | '\u{095B}' => Some('j'),
-            'ट' | 'ठ' | 'त' | 'थ' => Some('t'),
-            'ड' | 'ढ' | 'द' | 'ध' => Some('d'),
-            '\u{095C}' | '\u{095D}' => Some('r'),
-            'ण' | 'न' | 'ङ' | 'ञ' => Some('n'),
-            'प' => Some('p'),
-            'फ' => Some('p'),
-            '\u{095E}' => Some('f'),
-            'ब' | 'भ' => Some('b'),
-            'म' => Some('m'),
-            'य' => Some('y'),
-            'र' => Some('r'),
-            'ल' => Some('l'),
-            'व' => Some('v'),
-            'श' | 'ष' | 'स' => Some('s'),
-            'ह' => Some('h'),
-            // Devanagari vowels, matras, anusvara, virama, nukta → drop
-            '\u{0900}'..='\u{0903}'
-            | '\u{0904}'..='\u{0914}'
-            | '\u{093A}'..='\u{094F}'
-            | '\u{0962}'..='\u{0963}' => None,
-            // Urdu/Arabic consonants
-            'ک' | 'ق' | 'خ' => Some('k'),
-            'گ' | 'غ' => Some('g'),
-            'چ' => Some('c'),
-            'ج' | 'ز' | 'ذ' | 'ض' | 'ظ' | 'ژ' => Some('j'),
-            'ت' | 'ٹ' | 'ط' => Some('t'),
-            'د' | 'ڈ' => Some('d'),
-            'ڑ' => Some('r'),
-            'ن' => Some('n'),
-            // ں (nun ghunna) is nasalisation — drops like Devanagari anusvara.
-            'ں' => None,
-            'پ' => Some('p'),
-            'ف' => Some('f'),
-            'ب' => Some('b'),
-            'م' => Some('m'),
-            'ی' | 'ئ' => Some('y'),
-            'ر' => Some('r'),
-            'ل' => Some('l'),
-            'و' => Some('v'),
-            'س' | 'ش' | 'ص' | 'ث' => Some('s'),
-            'ہ' | 'ح' | 'ه' | 'ۂ' => Some('h'),
-            // ھ (heh doachashmee) marks aspiration in digraphs (ٹھ, کھ…) —
-            // drops so aspirated/unaspirated fold to the same class, matching
-            // how Devanagari ठ/ट both map to 't'.
-            'ھ' => None,
-            'ع' | 'ا' | 'آ' | 'أ' | 'إ' | 'ء' | 'ے' | 'ۓ' => None,
-            // Arabic tashkeel → drop
-            '\u{064B}'..='\u{0652}' => None,
-            other if other.is_ascii_alphanumeric() => Some(other),
-            _ => None,
-        };
-        if let Some(k) = k {
-            out.push(k);
-        }
-        i += 1;
-    }
-    out
-}
-
-/// Levenshtein distance over the (ASCII) folded skeletons.
-fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<u8> = a.bytes().collect();
-    let b: Vec<u8> = b.bytes().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    for (i, &ca) in a.iter().enumerate() {
-        let mut cur = vec![i + 1];
-        for (j, &cb) in b.iter().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            cur.push((prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1));
-        }
-        prev = cur;
-    }
-    prev[b.len()]
-}
-
-/// Token equivalence for grading. Exact match first; for non-ASCII tokens,
-/// compare consonant skeletons with a small edit-distance tolerance — the
-/// Urdu spelling of a Hindi word carries vowel letters (و/ی) that fold into
-/// the skeleton, so an off-by-one consonant must still count as the same
-/// word. ASCII-vs-ASCII never matches fuzzily (English grading unchanged).
-fn tokens_match(a: &str, b: &str) -> bool {
-    if a == b {
-        return true;
-    }
-    if a.is_ascii() && b.is_ascii() {
-        return false;
-    }
-    let fa = fold_skeleton(a);
-    let fb = fold_skeleton(b);
-    if fa.is_empty() || fb.is_empty() {
-        return false;
-    }
-    if fa == fb {
-        return true;
-    }
-    let min_len = fa.len().min(fb.len());
-    let tol = if min_len >= 6 {
-        2
-    } else {
-        usize::from(min_len >= 2)
-    };
-    edit_distance(&fa, &fb) <= tol
-}
-
-/// LCS-based grading: find the longest subsequence of `target` words that
-/// appears (in order, with skips allowed) inside `transcript`. The position
-/// of the first/last aligned transcript words tells us about prefix/suffix
-/// junk. Repetition is detected separately as "did any target word appear 2+
-/// times in the transcript?".
-fn grade_transcript(transcript: &str, target: &str) -> Grade {
-    let trans = canon_tokens(transcript);
-    let targ = canon_tokens(target);
-    if targ.is_empty() {
-        return Grade {
-            coverage: 0.0,
-            prefix_words: 0,
-            suffix_words: 0,
-            repeated_target_words: 0,
-            transcript: transcript.to_string(),
-        };
-    }
-    if trans.is_empty() {
-        return Grade {
-            coverage: 0.0,
-            prefix_words: 0,
-            suffix_words: 0,
-            repeated_target_words: 0,
-            transcript: transcript.to_string(),
-        };
-    }
-
-    let n = trans.len();
-    let m = targ.len();
-    // dp[i][j] = LCS length over trans[0..i] vs targ[0..j]. Equivalence is
-    // tokens_match (script-folded fuzzy), not string equality, so a transcript
-    // in Urdu script still aligns against a Devanagari target.
-    let mut dp = vec![vec![0u32; m + 1]; n + 1];
-    for i in 1..=n {
-        for j in 1..=m {
-            dp[i][j] = if tokens_match(&trans[i - 1], &targ[j - 1]) {
-                dp[i - 1][j - 1] + 1
-            } else {
-                dp[i - 1][j].max(dp[i][j - 1])
-            };
-        }
-    }
-    let matched = dp[n][m] as usize;
-    if matched == 0 {
-        return Grade {
-            coverage: 0.0,
-            prefix_words: 0,
-            suffix_words: trans.len(),
-            repeated_target_words: 0,
-            transcript: transcript.to_string(),
-        };
-    }
-
-    // Backtrack to find FIRST and LAST aligned transcript indices.
-    let mut aligned: Vec<usize> = Vec::with_capacity(matched);
-    let (mut i, mut j) = (n, m);
-    while i > 0 && j > 0 {
-        if tokens_match(&trans[i - 1], &targ[j - 1]) && dp[i][j] == dp[i - 1][j - 1] + 1 {
-            aligned.push(i - 1);
-            i -= 1;
-            j -= 1;
-        } else if dp[i - 1][j] >= dp[i][j - 1] {
-            i -= 1;
-        } else {
-            j -= 1;
-        }
-    }
-    aligned.reverse();
-    let first = aligned[0];
-    let last = aligned[aligned.len() - 1] + 1;
-
-    // Repeated target words: count target words appearing 2+ times in
-    // transcript. Uses a small set lookup since target is short.
-    let targ_set: std::collections::HashSet<&String> = targ.iter().collect();
-    let mut counts: std::collections::HashMap<&String, usize> = std::collections::HashMap::new();
-    for w in &trans {
-        if targ_set.contains(w) {
-            *counts.entry(w).or_insert(0) += 1;
-        }
-    }
-    let repeated = counts.values().filter(|&&c| c >= 2).count();
-
-    Grade {
-        coverage: matched as f64 / m as f64,
-        prefix_words: first,
-        suffix_words: trans.len() - last,
-        repeated_target_words: repeated,
-        transcript: transcript.to_string(),
-    }
 }
 
 fn canon_tokens(s: &str) -> Vec<String> {
@@ -3535,7 +3003,6 @@ mod tests {
 
     #[test]
     fn qwen_synth_budget_is_bounded_for_short_lines() {
-        assert_eq!(synth_seed_ladder(TtsEngine::CosyVoice).len(), 6);
         assert_eq!(synth_max_tokens(TtsEngine::Qwen3, 2), 40);
         assert_eq!(synth_max_tokens(TtsEngine::Qwen3, 6), 44);
         assert_eq!(synth_max_tokens(TtsEngine::Qwen3, 20), 96);
@@ -3776,94 +3243,6 @@ mod tests {
         assert!(trim_long_form_chunk_edges(TtsEngine::IndicMio));
     }
 
-    #[test]
-    fn tokens_match_folds_devanagari_vs_urdu_script() {
-        // Omnilingual decodes Hindustani in mixed script; the same spoken word
-        // must align across spellings via the consonant skeleton.
-        assert!(tokens_match("जोड़े", "جوڑے"));
-        assert!(tokens_match("लाइन", "لائن"));
-        assert!(tokens_match("नीचे", "نیچے"));
-        // ASCII never matches fuzzily.
-        assert!(!tokens_match("line", "lane"));
-    }
-
-    #[test]
-    fn grade_hindi_mixed_script_transcript_flags_babble_tail() {
-        // Real Omnilingual transcript of a take whose last second was AR
-        // babble ("یان کھن"); target is the chunk text in Devanagari.
-        let target = "गेम अपने आप सेव नहीं होता कि ठीक बीच में एक हॉरिजॉन्टल लाइन जोड़े।";
-        let transcript = "گیم اپنے سیو نہیں ہوتا کہ ٹھیک بیچ میں ایک ہاریجانٹل لائن جوڑے یان کھن";
-        let g = grade_transcript(transcript, target);
-        assert!(
-            g.coverage >= 0.6,
-            "cross-script coverage too low: {}",
-            g.coverage
-        );
-        assert!(
-            g.suffix_words >= 2,
-            "babble tail not detected: suffix={}",
-            g.suffix_words
-        );
-        assert!(
-            !g.is_clean_for(true),
-            "babble take must be rejected for non-Latin targets"
-        );
-    }
-
-    #[test]
-    fn grade_clean_take_passes() {
-        let g = grade_transcript(
-            "I knew you would make it, no matter what.",
-            "I knew you would make it, no matter what.",
-        );
-        assert_eq!(g.coverage, 1.0);
-        assert_eq!(g.prefix_words, 0);
-        assert_eq!(g.suffix_words, 0);
-        assert_eq!(g.repeated_target_words, 0);
-        assert!(g.is_clean());
-    }
-
-    #[test]
-    fn grade_detects_reference_leak_prefix() {
-        // Clip 1 from the sweep: "Can be." prefix + line repeated twice.
-        let g = grade_transcript(
-            "Can be. I never thought we'd make it this far. Ruttering. I never thought we'd make it this far.",
-            "I never thought we'd make it this far.",
-        );
-        assert_eq!(g.coverage, 1.0); // all target words present
-        assert!(
-            g.prefix_words >= 2,
-            "expected prefix junk, got {}",
-            g.prefix_words
-        );
-        assert!(
-            g.repeated_target_words >= 4,
-            "expected repetition, got {}",
-            g.repeated_target_words
-        );
-        assert!(!g.is_clean());
-    }
-
-    #[test]
-    fn grade_detects_short_take() {
-        let g = grade_transcript("Tonight.", "Then we end this together. Tonight.");
-        assert!(g.coverage < 0.5);
-        assert!(!g.is_clean());
-    }
-
-    #[test]
-    fn grade_accepts_minor_substitution() {
-        // "end" -> "and" — one-word substitution still passes if coverage stays
-        // above the 0.75 threshold.
-        let g = grade_transcript(
-            "Then we and this together. Tonight.",
-            "Then we end this together. Tonight.",
-        );
-        assert!(g.coverage >= 0.75, "expected >=0.75, got {}", g.coverage);
-        assert_eq!(g.prefix_words, 0);
-        assert!(g.is_clean(), "should accept minor substitution");
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     fn colocate_metallib_simulates_bundle_layout() {
@@ -3933,20 +3312,4 @@ mod tests {
         assert!(err < 1e-3, "mean abs error {err} too high");
     }
 
-    #[test]
-    fn score_prefers_clean_low_cov_over_leaked_high_cov() {
-        // The whole point of the composite score: when ladder exhausts, prefer
-        // a clean cov=75% take over a cov=100% leak.
-        let clean = grade_transcript("I knew you would make.", "I knew you would make it.");
-        let leaked = grade_transcript(
-            "Capit ruttering quilt I knew you would make it",
-            "I knew you would make it.",
-        );
-        assert!(
-            clean.score() > leaked.score(),
-            "clean.score={} leaked.score={}",
-            clean.score(),
-            leaked.score()
-        );
-    }
 }

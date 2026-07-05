@@ -1,9 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ScriptEditor } from "./ScriptEditor";
 import { EMOTION_TAGS } from "../types/project";
 import { useProjectStore } from "../state/projectStore";
 import type { TtsEngineInfo } from "../ipc/commands";
+import { useDictationRecorder } from "../hooks/useDictationRecorder";
+
+vi.mock("../hooks/useDictationRecorder", () => ({
+  useDictationRecorder: vi.fn(),
+}));
+
+const defaultRecorder = {
+  recording: false,
+  busy: false,
+  error: null,
+  setError: vi.fn(),
+  start: vi.fn(),
+  cancel: vi.fn(),
+  stopAndTranscribe: vi.fn(),
+};
+
+function mockRecorder(patch: Partial<typeof defaultRecorder> = {}) {
+  vi.mocked(useDictationRecorder).mockReturnValue({ ...defaultRecorder, ...patch });
+}
 
 function engineInfo(patch: Partial<TtsEngineInfo> & Pick<TtsEngineInfo, "id" | "displayName">): TtsEngineInfo {
   return {
@@ -30,6 +49,7 @@ function engineInfo(patch: Partial<TtsEngineInfo> & Pick<TtsEngineInfo, "id" | "
 
 describe("ScriptEditor", () => {
   beforeEach(() => {
+    mockRecorder();
     useProjectStore.setState({
       model: {
         engine: "voxcpm2",
@@ -70,7 +90,8 @@ describe("ScriptEditor", () => {
 
   it("renders one button per emotion tag", () => {
     render(<ScriptEditor value="" onChange={() => {}} />);
-    expect(screen.getAllByRole("button")).toHaveLength(EMOTION_TAGS.length);
+    const palette = within(screen.getByTestId("emotion-markers"));
+    expect(palette.getAllByRole("button")).toHaveLength(EMOTION_TAGS.length);
   });
 
   it("uses Indic-Mio suffix tags when the active engine asks for suffix markers", () => {
@@ -140,7 +161,8 @@ describe("ScriptEditor", () => {
       },
     });
     render(<ScriptEditor value="" onChange={() => {}} />);
-    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+    const palette = within(screen.getByTestId("emotion-markers"));
+    expect(palette.getAllByRole("button").map((button) => button.textContent)).toEqual([
       "whisper",
       "excited",
     ]);
@@ -164,6 +186,47 @@ describe("ScriptEditor", () => {
       },
     });
     render(<ScriptEditor value="Hello" onChange={() => {}} />);
-    expect(screen.queryAllByRole("button")).toHaveLength(0);
+    const palette = within(screen.getByTestId("emotion-markers"));
+    expect(palette.queryAllByRole("button")).toHaveLength(0);
+  });
+
+  it("starts recording when the mic is clicked on an idle editor", () => {
+    const start = vi.fn();
+    mockRecorder({ recording: false, start });
+    render(<ScriptEditor value="" onChange={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /dictate/i }));
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it("appends the transcript to an existing line when recording stops", async () => {
+    const onChange = vi.fn();
+    const stopAndTranscribe = vi.fn().mockResolvedValue({
+      audioPath: "/tmp/a.wav",
+      durationSec: 1,
+      elapsedSec: 0.5,
+      text: "and then we leave.",
+    });
+    mockRecorder({ recording: true, stopAndTranscribe });
+    render(<ScriptEditor value="(calm) Stay here" onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: /stop/i }));
+    await waitFor(() =>
+      expect(onChange).toHaveBeenCalledWith("(calm) Stay here and then we leave."),
+    );
+  });
+
+  it("fills an empty line with the transcript verbatim", async () => {
+    const onChange = vi.fn();
+    const stopAndTranscribe = vi.fn().mockResolvedValue({
+      audioPath: "/tmp/a.wav",
+      durationSec: 1,
+      elapsedSec: 0.5,
+      text: "Fresh dictated line.",
+    });
+    mockRecorder({ recording: true, stopAndTranscribe });
+    render(<ScriptEditor value="" onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: /stop/i }));
+    await waitFor(() =>
+      expect(onChange).toHaveBeenCalledWith("Fresh dictated line."),
+    );
   });
 });

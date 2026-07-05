@@ -1,5 +1,5 @@
-import { Plus, Video, Mic, AudioWaveform, Trash2 } from "lucide-react";
-import { useProjectStore } from "../state/projectStore";
+import { Plus, Video, Mic, AudioWaveform, Trash2, ListPlus } from "lucide-react";
+import { useProjectStore, newClip } from "../state/projectStore";
 import type { SpeakerTrack, Track } from "../types/project";
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
@@ -27,6 +27,7 @@ export function TrackList() {
   const renameTrack = useProjectStore((s) => s.renameTrack);
   const removeTrack = useProjectStore((s) => s.removeTrack);
   const addTrack = useProjectStore((s) => s.addTrack);
+  const addClip = useProjectStore((s) => s.addClip);
 
   function addSpeaker() {
     const idx = project.tracks.filter((t) => t.kind === "speaker").length + 1;
@@ -38,6 +39,16 @@ export function TrackList() {
     };
     addTrack(track);
     select({ kind: "track", id: track.id });
+  }
+
+  function addLine(track: SpeakerTrack) {
+    // Append a blank line after the track's last clip (or at 0 if empty),
+    // then select it so the inspector opens ready for typing.
+    const lastEnd = track.clips.reduce((max, c) => Math.max(max, c.endSec), 0);
+    const startSec = track.clips.length > 0 ? lastEnd + 0.5 : 0;
+    const clip = newClip({ trackId: track.id, startSec, endSec: startSec + 2, text: "" });
+    addClip(clip);
+    select({ kind: "clip", id: clip.id });
   }
 
   return (
@@ -102,6 +113,21 @@ export function TrackList() {
                   {metaForTrack(trackItem, m, voiceName)}
                 </div>
               </div>
+              {trackItem.kind === "speaker" && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    addLine(trackItem);
+                  }}
+                  title={m.tracks.addLineTitle}
+                  aria-label={m.tracks.addLineAria}
+                  className="h-6 w-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-primary"
+                >
+                  <ListPlus className="h-3 w-3" />
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 size="icon"
