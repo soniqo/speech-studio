@@ -66,6 +66,12 @@ const en = {
     demoVideoTrack: "Scene 04 — final cut",
     narratorVoice: "Narrator (Anna)",
     antagonistVoice: "Antagonist (Marek)",
+    hindiDemoProject: "Hindi Demo — Voice Clone",
+    hindiDemoVideoTrack: "Hindi voice clone test",
+    hindiVoice: "Hindi Reference Voice (Male)",
+    hindiVoice2: "Hindi Reference Voice (Female)",
+    hindiSpeakerTrack: "Hindi Narration",
+    hindiSpeakerTrack2: "Hindi Narration 2",
   },
   common: {
     none: "— None —",
@@ -123,6 +129,9 @@ const en = {
     exportTitle: (count: number) =>
       `Export a WAV mix of ${count} clip${count === 1 ? "" : "s"}`,
     exportButton: "Export",
+    save: "Save",
+    saved: "Saved",
+    saveTitle: "Save the project now (changes also autosave)",
   },
   projects: {
     title: "Projects — save, open, or start fresh",
@@ -130,6 +139,7 @@ const en = {
     saving: "Saving…",
     newProject: "New project",
     demoScene: "Demo scene (built-in)",
+    hindiDemoScene: "Hindi voice clone demo",
     allSaved: "All changes saved automatically",
     savedProjects: "Saved projects",
     noneYet: "None yet — Save to create one.",
@@ -140,6 +150,7 @@ const en = {
   rail: {
     tracks: "tracks",
     voices: "voices",
+    dictation: "dictation",
   },
   tracks: {
     title: "Tracks",
@@ -153,6 +164,8 @@ const en = {
     noVoice: "No voice assigned",
     deleteTitle: "Delete track and its clips",
     deleteAria: "Delete track",
+    addLineTitle: "Add a script line to this track",
+    addLineAria: "Add script line",
   },
   voices: {
     title: "Voices",
@@ -181,6 +194,31 @@ const en = {
       clipClone: "clip clone",
       trackClone: "track clone",
     },
+  },
+  dictation: {
+    title: "Dictation",
+    loadingModel: "ASR",
+    modelPending: "Loading transcription model list",
+    modelMeta: (runtime: string, size: string) => `${runtime.toUpperCase()} · ${size}`,
+    record: "Record",
+    recordTitle: "Start microphone recording",
+    stop: "Stop",
+    stopTitle: "Stop recording and transcribe",
+    transcribing: "Transcribing",
+    unsupported: "Microphone recording is not available in this WebView.",
+    micFailed: (error: string) => `Microphone failed: ${error}`,
+    tooShort: "Recording is too short.",
+    transcribeFailed: (error: string) => `Transcription failed: ${error}`,
+    empty: "No dictation captures yet.",
+    captureMeta: (duration: string, elapsed: string) =>
+      `${duration}s audio · ${elapsed}s ASR`,
+    playCapture: "Play recording",
+    stopPlayback: "Stop recording playback",
+    insertIntoFlow: "Insert transcript into timeline",
+    insertedClip: "Transcript inserted into the selected clip.",
+    insertedTimeline: "Transcript added to the timeline.",
+    copyText: "Copy transcript",
+    emptyTranscript: "(empty transcript)",
   },
   emptyState: {
     title: "No tracks yet",
@@ -218,6 +256,8 @@ const en = {
     name: "Name",
     voice: "Voice",
     source: "Source",
+    lines: (count: number) => `Script lines (${count})`,
+    addLine: "Add script line",
     voicePanel: "Voice",
     referenceAudio: "Reference audio",
     referenceTranscript: "Reference transcript",
@@ -244,11 +284,18 @@ const en = {
   },
   script: {
     label: "Script",
-    placeholder: "Write the line. Pick an emotion below to set the tone.",
+    placeholder: "Write the line, or dictate it with the mic. Pick an emotion below to set the tone.",
     removeMarker: (marker: string) => `Remove ${marker} marker`,
     setMarker: (marker: string) => `Set this line's tone to ${marker}`,
+    dictate: "Dictate",
+    dictateStop: "Stop",
+    dictateTranscribing: "…",
+    dictateTitle: "Dictate this line with the microphone",
+    dictateStopTitle: "Stop recording and transcribe into the line",
     styleHints: {
       instruction: "Markers steer this line's tone.",
+      controlledVocabulary:
+        "This engine only accepts a fixed style vocabulary; emotion markers are approximations.",
       intensity:
         "Chatterbox applies markers as intensity only — more vs. less expressive, not a specific emotion.",
       suffixTag:
@@ -285,6 +332,12 @@ const ru: typeof en = {
     demoVideoTrack: "Сцена 04 — финальный монтаж",
     narratorVoice: "Рассказчица (Anna)",
     antagonistVoice: "Антагонист (Marek)",
+    hindiDemoProject: "Демо на хинди — клон голоса",
+    hindiDemoVideoTrack: "Тест клонирования голоса на хинди",
+    hindiVoice: "Референсный голос на хинди (мужской)",
+    hindiVoice2: "Референсный голос на хинди (женский)",
+    hindiSpeakerTrack: "Диктор на хинди",
+    hindiSpeakerTrack2: "Диктор на хинди 2",
   },
   common: {
     none: "— Не выбрано —",
@@ -341,6 +394,9 @@ const ru: typeof en = {
     exportTitle: (count) =>
       `Экспортировать WAV-микс из ${count} ${ruPlural(count, "клипа", "клипов", "клипов")}`,
     exportButton: "Экспорт",
+    save: "Сохранить",
+    saved: "Сохранено",
+    saveTitle: "Сохранить проект сейчас (изменения также сохраняются автоматически)",
   },
   projects: {
     title: "Проекты: сохранить, открыть или начать заново",
@@ -348,6 +404,7 @@ const ru: typeof en = {
     saving: "Сохранение…",
     newProject: "Новый проект",
     demoScene: "Демо-сцена (встроенная)",
+    hindiDemoScene: "Демо клона голоса на хинди",
     allSaved: "Все изменения сохраняются автоматически",
     savedProjects: "Сохранённые проекты",
     noneYet: "Пока нет проектов. Внесите изменения, чтобы создать первый.",
@@ -358,6 +415,7 @@ const ru: typeof en = {
   rail: {
     tracks: "дорожки",
     voices: "голоса",
+    dictation: "диктовка",
   },
   tracks: {
     title: "Дорожки",
@@ -371,6 +429,8 @@ const ru: typeof en = {
     noVoice: "Голос не назначен",
     deleteTitle: "Удалить дорожку и её клипы",
     deleteAria: "Удалить дорожку",
+    addLineTitle: "Добавить строку сценария на эту дорожку",
+    addLineAria: "Добавить строку сценария",
   },
   voices: {
     title: "Голоса",
@@ -400,6 +460,30 @@ const ru: typeof en = {
       clipClone: "клон из клипа",
       trackClone: "клон из дорожки",
     },
+  },
+  dictation: {
+    title: "Диктовка",
+    loadingModel: "ASR",
+    modelPending: "Загружается список моделей распознавания",
+    modelMeta: (runtime, size) => `${runtime.toUpperCase()} · ${size}`,
+    record: "Запись",
+    recordTitle: "Начать запись с микрофона",
+    stop: "Стоп",
+    stopTitle: "Остановить запись и распознать",
+    transcribing: "Распознаём",
+    unsupported: "Запись с микрофона недоступна в этом WebView.",
+    micFailed: (error) => `Не удалось включить микрофон: ${error}`,
+    tooShort: "Запись слишком короткая.",
+    transcribeFailed: (error) => `Не удалось распознать: ${error}`,
+    empty: "Пока нет записей диктовки.",
+    captureMeta: (duration, elapsed) => `${duration} с аудио · ${elapsed} с ASR`,
+    playCapture: "Прослушать запись",
+    stopPlayback: "Остановить запись",
+    insertIntoFlow: "Вставить текст в таймлайн",
+    insertedClip: "Текст вставлен в выбранный клип.",
+    insertedTimeline: "Текст добавлен в таймлайн.",
+    copyText: "Скопировать текст",
+    emptyTranscript: "(пустой транскрипт)",
   },
   emptyState: {
     title: "Пока нет дорожек",
@@ -437,6 +521,8 @@ const ru: typeof en = {
     name: "Название",
     voice: "Голос",
     source: "Источник",
+    lines: (count) => `Строки сценария (${count})`,
+    addLine: "Добавить строку сценария",
     voicePanel: "Голос",
     referenceAudio: "Референсное аудио",
     referenceTranscript: "Транскрипт референса",
@@ -463,11 +549,18 @@ const ru: typeof en = {
   },
   script: {
     label: "Сценарий",
-    placeholder: "Напишите реплику. Ниже можно выбрать эмоцию для интонации.",
+    placeholder: "Напишите реплику или надиктуйте её микрофоном. Ниже можно выбрать эмоцию для интонации.",
     removeMarker: (marker) => `Убрать маркер ${marker}`,
     setMarker: (marker) => `Задать интонацию ${marker}`,
+    dictate: "Диктовка",
+    dictateStop: "Стоп",
+    dictateTranscribing: "…",
+    dictateTitle: "Надиктовать реплику микрофоном",
+    dictateStopTitle: "Остановить запись и распознать в реплику",
     styleHints: {
       instruction: "Маркеры управляют интонацией этой реплики.",
+      controlledVocabulary:
+        "Этот движок принимает только фиксированный словарь стилей; эмоции передаются приблизительно.",
       intensity:
         "Chatterbox применяет маркеры только как уровень выразительности, а не как конкретную эмоцию.",
       suffixTag:

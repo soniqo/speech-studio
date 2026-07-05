@@ -1,0 +1,36 @@
+export const LANGUAGE_LABELS: Record<string, string> = {
+  ar: "العربية",
+  my: "မြန်မာ",
+  zh: "中文",
+  da: "Dansk",
+  nl: "Nederlands",
+  en: "English",
+  fi: "Suomi",
+  fr: "Français",
+  de: "Deutsch",
+  el: "Ελληνικά",
+  he: "עברית",
+  hi: "हिन्दी",
+  id: "Bahasa Indonesia",
+  it: "Italiano",
+  ja: "日本語",
+  km: "ខ្មែរ",
+  ko: "한국어",
+  lo: "ລາວ",
+  ms: "Bahasa Melayu",
+  no: "Norsk",
+  pl: "Polski",
+  pt: "Português",
+  ru: "Русский",
+  es: "Español",
+  sw: "Kiswahili",
+  sv: "Svenska",
+  tl: "Tagalog",
+  th: "ไทย",
+  tr: "Türkçe",
+  vi: "Tiếng Việt",
+};
+
+export function languageLabel(id: string): string {
+  return LANGUAGE_LABELS[id] ?? id;
+}

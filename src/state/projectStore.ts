@@ -140,6 +140,18 @@ function findClipTrack(project: Project, clipId: string): SpeakerTrack | undefin
   return undefined;
 }
 
+function normalizeModelLanguage(
+  engine: TtsEngineInfo | undefined,
+  currentLanguage: string,
+): string {
+  if (!engine?.requiresLanguage || engine.languages.length === 0) {
+    return currentLanguage;
+  }
+  return engine.languages.includes(currentLanguage)
+    ? currentLanguage
+    : engine.languages[0];
+}
+
 export const useProjectStore = create<ProjectStore>((set) => ({
   locale: detectInitialLocale(),
   setLocale: (locale) =>
@@ -205,18 +217,32 @@ export const useProjectStore = create<ProjectStore>((set) => ({
         : s,
     ),
   setTtsEngine: (engine) =>
-    set((s) => ({
-      model: {
-        ...s.model,
-        engine,
-        language: engine === "indic-mio" ? "hi" : s.model.language,
-        error: undefined,
-      },
-    })),
+    set((s) => {
+      const nextEngine = s.model.engines.find((candidate) => candidate.id === engine);
+      const language = normalizeModelLanguage(nextEngine, s.model.language);
+      return {
+        model: {
+          ...s.model,
+          engine,
+          language,
+          error: undefined,
+        },
+      };
+    }),
   setTtsLanguage: (language) =>
-    set((s) => ({ model: { ...s.model, language, error: undefined } })),
+    set((s) => {
+      const active = s.model.engines.find((candidate) => candidate.id === s.model.engine);
+      if (!active?.requiresLanguage || !active.languages.includes(language)) {
+        return s;
+      }
+      return { model: { ...s.model, language, error: undefined } };
+    }),
   setAvailableTtsEngines: (engines) =>
-    set((s) => ({ model: { ...s.model, engines } })),
+    set((s) => {
+      const active = engines.find((candidate) => candidate.id === s.model.engine);
+      const language = normalizeModelLanguage(active, s.model.language);
+      return { model: { ...s.model, engines, language } };
+    }),
 
   demoProgress: null,
   setDemoProgress: (p) => set(() => ({ demoProgress: p })),

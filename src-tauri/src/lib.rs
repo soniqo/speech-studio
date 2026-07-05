@@ -1,11 +1,14 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
-    Mutex,
+    LazyLock, Mutex,
 };
+use std::time::Instant;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
@@ -382,85 +385,259 @@ enum TtsEngine {
     FishAudio,
 }
 
-impl TtsEngine {
-    fn sidecar_command(self) -> &'static str {
-        match self {
-            Self::VoxCPM2 => "synthesize_voxcpm2",
-            Self::CosyVoice => "synthesize_cosyvoice",
-            Self::Qwen3 => "synthesize_icl",
-            Self::Chatterbox => "synthesize_chatterbox",
-            Self::OmniVoice => "synthesize_omnivoice",
-            Self::IndicMio => "synthesize_indic_mio",
-            Self::FishAudio => "synthesize_fish_audio",
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct TtsEngineInfo {
+    id: TtsEngine,
+    #[serde(rename = "displayName")]
+    display_name: String,
+    #[serde(rename = "modelName")]
+    model_name: String,
+    #[serde(rename = "modelId")]
+    model_id: String,
+    #[serde(rename = "modelSize")]
+    model_size: String,
+    runtime: String,
+    precision: String,
+    languages: Vec<String>,
+    #[serde(
+        rename = "benchmarkLanguages",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    benchmark_languages: Vec<String>,
+    #[serde(rename = "voiceProfileModes")]
+    voice_profile_modes: Vec<String>,
+    #[serde(rename = "requiresReferenceAudio")]
+    requires_reference_audio: bool,
+    #[serde(rename = "requiresReferenceTranscript")]
+    requires_reference_transcript: bool,
+    #[serde(rename = "requiresLanguage")]
+    requires_language: bool,
+    #[serde(rename = "styleMode")]
+    style_mode: String,
+    #[serde(rename = "supportsInstruct")]
+    supports_instruct: bool,
+    #[serde(rename = "supportedMarkers")]
+    supported_markers: Vec<String>,
+    #[serde(rename = "needsTrim")]
+    needs_trim: bool,
+    #[serde(rename = "sampleRate")]
+    sample_rate: u32,
+    #[serde(rename = "usePolicy")]
+    use_policy: String,
+    readiness: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TtsEngineRegistryEntry {
+    #[serde(flatten)]
+    info: TtsEngineInfo,
+    sidecar_command: String,
+    macos_only: bool,
+    #[serde(default)]
+    platform_overrides: HashMap<String, ModelPlatformOverride>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum AsrModel {
+    ParakeetTdtV3,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AsrModelInfo {
+    id: AsrModel,
+    #[serde(rename = "displayName")]
+    display_name: String,
+    #[serde(rename = "modelName")]
+    model_name: String,
+    #[serde(rename = "modelId")]
+    model_id: String,
+    #[serde(rename = "modelSize")]
+    model_size: String,
+    languages: Vec<String>,
+    runtime: String,
+    #[serde(rename = "sampleRate")]
+    sample_rate: u32,
+    #[serde(rename = "maxSegmentSec")]
+    max_segment_sec: u32,
+    streaming: bool,
+    readiness: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AsrModelRegistryEntry {
+    #[serde(flatten)]
+    info: AsrModelInfo,
+    sidecar_command: String,
+    #[serde(default)]
+    platform_overrides: HashMap<String, ModelPlatformOverride>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelPlatformOverride {
+    model_name: Option<String>,
+    model_id: Option<String>,
+    runtime: Option<String>,
+    precision: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelRegistry {
+    version: u32,
+    tts_engines: Vec<TtsEngineRegistryEntry>,
+    asr_models: Vec<AsrModelRegistryEntry>,
+}
+
+impl TtsEngineInfo {
+    fn apply_platform_override(&mut self, item: &ModelPlatformOverride) {
+        if let Some(value) = &item.model_name {
+            self.model_name = value.clone();
         }
+        if let Some(value) = &item.model_id {
+            self.model_id = value.clone();
+        }
+        if let Some(value) = &item.runtime {
+            self.runtime = value.clone();
+        }
+        if let Some(value) = &item.precision {
+            self.precision = value.clone();
+        }
+    }
+}
+
+impl AsrModelInfo {
+    fn apply_platform_override(&mut self, item: &ModelPlatformOverride) {
+        if let Some(value) = &item.model_name {
+            self.model_name = value.clone();
+        }
+        if let Some(value) = &item.model_id {
+            self.model_id = value.clone();
+        }
+        if let Some(value) = &item.runtime {
+            self.runtime = value.clone();
+        }
+    }
+}
+
+fn platform_registry_key() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
+static MODEL_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(|| {
+    let mut registry: ModelRegistry =
+        serde_json::from_str(include_str!("../../model-registry.json"))
+            .expect("model-registry.json must be valid");
+    assert_eq!(registry.version, 1, "unsupported model registry version");
+
+    let platform = platform_registry_key();
+    for entry in &mut registry.tts_engines {
+        if let Some(item) = entry.platform_overrides.get(platform) {
+            entry.info.apply_platform_override(item);
+        }
+    }
+    for entry in &mut registry.asr_models {
+        if let Some(item) = entry.platform_overrides.get(platform) {
+            entry.info.apply_platform_override(item);
+        }
+    }
+    registry
+});
+
+impl AsrModel {
+    fn registry_entry(self) -> &'static AsrModelRegistryEntry {
+        MODEL_REGISTRY
+            .asr_models
+            .iter()
+            .find(|entry| entry.info.id == self)
+            .expect("AsrModel missing from ASR_MODEL_REGISTRY")
+    }
+
+    fn sidecar_command(self) -> &'static str {
+        self.registry_entry().sidecar_command.as_str()
+    }
+}
+
+impl TtsEngine {
+    fn registry_entry(self) -> &'static TtsEngineRegistryEntry {
+        MODEL_REGISTRY
+            .tts_engines
+            .iter()
+            .find(|entry| entry.info.id == self)
+            .expect("TtsEngine missing from TTS_ENGINE_REGISTRY")
+    }
+
+    fn sidecar_command(self) -> &'static str {
+        self.registry_entry().sidecar_command.as_str()
     }
 
     fn display_name(self) -> &'static str {
-        match self {
-            Self::VoxCPM2 => "VoxCPM2",
-            Self::CosyVoice => "CosyVoice 3",
-            Self::Qwen3 => "Qwen3-TTS",
-            Self::Chatterbox => "Chatterbox",
-            Self::OmniVoice => "OmniVoice",
-            Self::IndicMio => "Indic-Mio",
-            Self::FishAudio => "Fish Audio S2 Pro",
-        }
+        self.registry_entry().info.display_name.as_str()
     }
 
     fn requires_reference_transcript(self) -> bool {
-        matches!(self, Self::CosyVoice | Self::Qwen3 | Self::FishAudio)
+        self.registry_entry().info.requires_reference_transcript
     }
 
-    /// Whether synthesis needs a caller-chosen language. Chatterbox prepends a
-    /// `[lang]` token, so the Studio shows a language picker for it; the other
-    /// engines infer language from the text.
+    /// Whether synthesis needs a caller-chosen language. The Studio shows a
+    /// language picker only for engines that declare this in the registry.
     fn requires_language(self) -> bool {
-        matches!(self, Self::Chatterbox | Self::OmniVoice)
+        self.registry_entry().info.requires_language
     }
 
     /// How the engine applies inline emotion markers — drives the editor hint:
     /// - `instruction`: marker → an engine-specific style instruction.
+    /// - `controlled-vocabulary`: marker → fixed engine vocabulary only.
     /// - `intensity`: marker → an expressiveness level only (Chatterbox; not a
     ///   specific emotion).
     /// - `suffix-tag`: marker is appended as an engine-specific suffix tag.
     /// - `bracket-tag`: marker is appended as an engine-specific bracket tag.
     /// - `none`: markers are stripped and ignored.
     fn style_mode(self) -> &'static str {
-        match self {
-            Self::VoxCPM2 | Self::CosyVoice | Self::OmniVoice => "instruction",
-            Self::Chatterbox => "intensity",
-            Self::IndicMio => "suffix-tag",
-            Self::FishAudio => "bracket-tag",
-            Self::Qwen3 => "none",
-        }
+        self.registry_entry().info.style_mode.as_str()
     }
 }
 
 fn normalize_sidecar_language(engine: TtsEngine, language: Option<&str>) -> Option<String> {
     let trimmed = language.map(str::trim).filter(|value| !value.is_empty());
     match engine {
+        TtsEngine::CosyVoice => trimmed.map(|value| match value.to_ascii_lowercase().as_str() {
+            "zh" | "zho" | "cmn" | "chinese" => "chinese".to_string(),
+            "en" | "eng" | "english" => "english".to_string(),
+            "ja" | "jpn" | "japanese" => "japanese".to_string(),
+            "ko" | "kor" | "korean" => "korean".to_string(),
+            "de" | "deu" | "ger" | "german" => "german".to_string(),
+            "es" | "spa" | "spanish" => "spanish".to_string(),
+            "fr" | "fra" | "fre" | "french" => "french".to_string(),
+            "it" | "ita" | "italian" => "italian".to_string(),
+            "ru" | "rus" | "russian" => "russian".to_string(),
+            _ => value.to_string(),
+        }),
         // The UI keeps BCP-47-ish ids because Chatterbox expects `[hi]`, but
         // OmniVoice gives cleaner Hindi output with the spelled language item.
-        TtsEngine::OmniVoice | TtsEngine::IndicMio => trimmed.map(|value| {
-            match value.to_ascii_lowercase().as_str() {
+        TtsEngine::OmniVoice | TtsEngine::IndicMio => {
+            trimmed.map(|value| match value.to_ascii_lowercase().as_str() {
                 "hi" | "hin" => "hindi".to_string(),
                 _ => value.to_string(),
-            }
-        }),
+            })
+        }
         _ => trimmed.map(str::to_string),
     }
 }
 
 fn engine_is_supported(engine: TtsEngine) -> bool {
-    match engine {
-        TtsEngine::VoxCPM2 => true,
-        TtsEngine::CosyVoice => cfg!(target_os = "macos"),
-        TtsEngine::Qwen3 => cfg!(target_os = "macos"),
-        TtsEngine::Chatterbox => cfg!(target_os = "macos"),
-        TtsEngine::OmniVoice => cfg!(target_os = "macos"),
-        TtsEngine::IndicMio => cfg!(target_os = "macos"),
-        TtsEngine::FishAudio => cfg!(target_os = "macos"),
-    }
+    let entry = engine.registry_entry();
+    !entry.macos_only || cfg!(target_os = "macos")
 }
 
 fn ensure_engine_supported(engine: TtsEngine) -> Result<(), String> {
@@ -497,41 +674,31 @@ fn humanize_sidecar_error(engine: TtsEngine, error: String) -> String {
     error
 }
 
-#[derive(Serialize)]
-struct TtsEngineInfo {
-    id: TtsEngine,
-    #[serde(rename = "displayName")]
-    display_name: &'static str,
-    #[serde(rename = "requiresReferenceTranscript")]
-    requires_reference_transcript: bool,
-    #[serde(rename = "requiresLanguage")]
-    requires_language: bool,
-    #[serde(rename = "styleMode")]
-    style_mode: &'static str,
+fn tts_engine_info(engine: TtsEngine) -> TtsEngineInfo {
+    engine.registry_entry().info.clone()
 }
 
-fn tts_engine_info(engine: TtsEngine) -> TtsEngineInfo {
-    TtsEngineInfo {
-        id: engine,
-        display_name: engine.display_name(),
-        requires_reference_transcript: engine.requires_reference_transcript(),
-        requires_language: engine.requires_language(),
-        style_mode: engine.style_mode(),
-    }
+fn asr_model_info(model: AsrModel) -> AsrModelInfo {
+    model.registry_entry().info.clone()
 }
 
 #[tauri::command]
 async fn available_tts_engines() -> Vec<TtsEngineInfo> {
-    let mut engines = vec![tts_engine_info(TtsEngine::VoxCPM2)];
-    if cfg!(target_os = "macos") {
-        engines.push(tts_engine_info(TtsEngine::CosyVoice));
-        engines.push(tts_engine_info(TtsEngine::Qwen3));
-        engines.push(tts_engine_info(TtsEngine::Chatterbox));
-        engines.push(tts_engine_info(TtsEngine::OmniVoice));
-        engines.push(tts_engine_info(TtsEngine::IndicMio));
-        engines.push(tts_engine_info(TtsEngine::FishAudio));
-    }
-    engines
+    MODEL_REGISTRY
+        .tts_engines
+        .iter()
+        .filter(|entry| engine_is_supported(entry.info.id))
+        .map(|entry| entry.info.clone())
+        .collect()
+}
+
+#[tauri::command]
+async fn available_asr_models() -> Vec<AsrModelInfo> {
+    MODEL_REGISTRY
+        .asr_models
+        .iter()
+        .map(|entry| entry.info.clone())
+        .collect()
 }
 
 #[tauri::command]
@@ -552,10 +719,12 @@ struct InitModelArgs {
 #[tauri::command]
 async fn init_model(manager: State<'_, SidecarManager>, args: InitModelArgs) -> Result<(), String> {
     ensure_engine_supported(args.engine)?;
+    let info = tts_engine_info(args.engine);
     let payload = serde_json::json!({
         "id": format!("init-{}", uuid::Uuid::new_v4()),
         "command": "init_model",
         "engine": args.engine,
+        "modelId": info.model_id,
     });
     let raw = manager.request(&payload)?;
     let env: SidecarResponse = serde_json::from_value(raw).map_err(|e| e.to_string())?;
@@ -660,9 +829,7 @@ fn reference_access_error(action: &str, path: &Path, err: &std::io::Error) -> St
         std::io::ErrorKind::NotFound => {
             "The file is no longer at that path. Re-add the reference from its current location."
         }
-        _ => {
-            "Copy or export the reference audio to a normal local folder, then add it again."
-        }
+        _ => "Copy or export the reference audio to a normal local folder, then add it again.",
     };
     format!(
         "Cannot {action} reference audio \"{}\": {err}. {hint}",
@@ -906,8 +1073,8 @@ struct SynthesizeArgs {
     reference_audio_path: String,
     #[serde(rename = "referenceText")]
     reference_text: String,
-    /// Synthesis language id (Chatterbox `[lang]` token, e.g. "en"/"ar"/"hi").
-    /// Optional; engines that infer language from text ignore it.
+    /// Synthesis language id for engines with `requiresLanguage=true`.
+    /// Optional; engines that infer or default language do not receive it.
     #[serde(default)]
     language: Option<String>,
 }
@@ -924,38 +1091,6 @@ struct SynthesizeResult {
     /// the selected engine was not loaded yet.
     #[serde(rename = "elapsedSec")]
     elapsed_sec: f64,
-}
-
-/// How ASR-graded retry runs on this platform. macOS shells out to the
-/// `speech` CLI (Parakeet, ships with the speech-swift toolchain). Windows and
-/// Linux grade through the sidecar's `transcribe` command (Omnilingual
-/// CTC-300M, multilingual), enabled by pointing SONIQO_STT_MODEL_DIR at a
-/// directory holding omnilingual-ctc-300m.tflite + tokenizer.model. With
-/// neither available we accept the first successful take.
-enum Grader {
-    SpeechCli,
-    Sidecar(String),
-    None,
-}
-
-fn resolve_grader() -> Grader {
-    if cfg!(target_os = "macos") {
-        return Grader::SpeechCli;
-    }
-    if let Ok(dir) = std::env::var("SONIQO_STT_MODEL_DIR") {
-        if std::path::Path::new(&dir)
-            .join("omnilingual-ctc-300m.tflite")
-            .exists()
-            && std::path::Path::new(&dir).join("tokenizer.model").exists()
-        {
-            return Grader::Sidecar(dir);
-        }
-        eprintln!(
-            "[synth] SONIQO_STT_MODEL_DIR set but model files missing: {}",
-            dir
-        );
-    }
-    Grader::None
 }
 
 /// Split text into sentences on terminal punctuation, including the
@@ -1058,6 +1193,18 @@ fn chunk_text_for_synthesis(text: &str, max_words: usize) -> Vec<String> {
     chunks
 }
 
+fn synth_max_tokens(engine: TtsEngine, target_word_count: usize) -> usize {
+    if engine == TtsEngine::Qwen3 {
+        // Qwen3 frames are ~80 ms each. The generic cap lets short lines run
+        // to 96 frames (~7.7 s of audio, ~12 s wall time) whenever EOS fails.
+        // Keep enough headroom for slow speech, but prevent minute-long retry
+        // ladders for one short utterance.
+        (target_word_count.saturating_mul(4) + 20).clamp(40, 96)
+    } else {
+        (target_word_count.saturating_mul(12) + 40).clamp(60, 320)
+    }
+}
+
 /// One synthesis pass (seed/cfg retry ladder + optional ASR grading) for a
 /// single piece of text. Returns (audio_path, duration_sec) of the accepted
 /// take. Extracted from synthesize_clip so long-form chunking can call it
@@ -1075,15 +1222,9 @@ fn synth_one_line(
     invocation_salt: &str,
     part_idx: usize,
 ) -> Result<(String, f64), String> {
-    // Seed ladder: both backends are deterministic per seed. VoxCPM2 also
-    // consumes cfgValue; CosyVoice ignores that optional field.
-    const SEED_LADDER: &[u64] = &[1000, 1001, 1002, 1010, 1011, 1012];
-    const CFG_LADDER: &[f32] = &[2.0, 2.5, 3.0];
-
     // Token budget: ~12 steps/word + headroom (each step ≈ 50 ms of audio).
-    let grade_target = strip_style_markers_for_grading(text);
-    let target_word_count = canon_tokens(&grade_target).len();
-    let max_tokens = (target_word_count.saturating_mul(12) + 40).clamp(60, 320);
+    let target_word_count = canon_tokens(&strip_style_markers_for_grading(text)).len();
+    let max_tokens = synth_max_tokens(engine, target_word_count);
     // Floor under the model's stop signal: VoxCPM2 fires its stop token
     // prematurely on long non-Latin-script lines (a 19-word Hindi sentence
     // stops at ~40 steps ≈ 6 s, cutting the sentence). The model speaks
@@ -1095,161 +1236,68 @@ fn synth_one_line(
     // so short chunks can still end naturally. A flat floor of 32 forced a
     // 6-word chunk (natural ≈ 15 steps) to ramble to 74 steps / 11.8 s.
     let min_stop_steps = (target_word_count.saturating_mul(5) / 2).clamp(8, max_tokens - 16);
-
-    let grader = resolve_grader();
-    // Non-Latin targets get a stricter accept rule (see below): the babble
-    // tail VoxCPM2 leaves on Hindi overshoots is short in ASR tokens (~2) but
-    // seconds long audibly, so the Latin-tuned suffix allowance is too loose.
-    let target_is_non_latin = grade_target
-        .chars()
-        .any(|c| !c.is_ascii() && c.is_alphabetic());
     let sidecar_language = normalize_sidecar_language(engine, language);
+    let model_id = engine.registry_entry().info.model_id.as_str();
 
-    let mut best: Option<(String, Grade, u64, f64)> = None;
-    let mut last_error: Option<String> = None;
-
-    for (attempt_idx, &seed) in SEED_LADDER.iter().enumerate() {
-        let cfg = CFG_LADDER[attempt_idx.min(CFG_LADDER.len() - 1)];
-        let payload = serde_json::json!({
-            "id": format!("synth-{}-p{}-s{}-{}", clip_id, part_idx, seed, invocation_salt),
-            "command": engine.sidecar_command(),
-            "engine": engine,
-            "text": text,
-            "voiceId": voice_id,
-            "referenceAudioPath": reference_audio_path,
-            "referenceText": reference_text,
-            "language": sidecar_language.as_deref(),
-            "seed": seed,
-            "cfgValue": cfg,
-            "maxTokens": max_tokens,
-            "minStopSteps": min_stop_steps,
-        });
-
-        let raw = match manager.request(&payload) {
-            Ok(v) => v,
-            Err(e) => {
-                last_error = Some(format!("attempt {} (seed={}): {}", attempt_idx, seed, e));
-                eprintln!("[synth] {}", last_error.as_ref().unwrap());
-                continue;
-            }
-        };
-        let env: SidecarResponse = match serde_json::from_value(raw) {
-            Ok(e) => e,
-            Err(e) => {
-                last_error = Some(format!("parse response: {}", e));
-                eprintln!("[synth] {}", last_error.as_ref().unwrap());
-                continue;
-            }
-        };
-        if !env.ok {
-            last_error = Some(humanize_sidecar_error(
-                engine,
-                env.error.unwrap_or_else(|| "sidecar error".into()),
-            ));
-            eprintln!(
-                "[synth] clip {} part {} attempt {} (seed={}) failed: {}",
-                clip_id,
-                part_idx,
-                attempt_idx,
-                seed,
-                last_error.as_ref().unwrap()
-            );
-            continue;
-        }
-        let result = env.result.unwrap_or_default();
-        let audio_path = match result.get("audioPath").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => continue,
-        };
-        let duration = result
-            .get("durationSec")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        if let Err(e) = validate_synth_audio(&audio_path) {
-            last_error = Some(format!("attempt {} (seed={}): {}", attempt_idx, seed, e));
-            eprintln!(
-                "[synth] clip {} part {} attempt {} (seed={}) rejected: {}",
-                clip_id,
-                part_idx,
-                attempt_idx,
-                seed,
-                last_error.as_ref().unwrap()
-            );
-            continue;
-        }
-
-        // No ASR grader on this platform — accept the first successful take
-        // rather than burning the whole seed ladder (each take is a full synth).
-        let graded = match &grader {
-            Grader::SpeechCli => asr_grade(&audio_path, &grade_target),
-            Grader::Sidecar(dir) => asr_grade_sidecar(manager, &audio_path, &grade_target, dir),
-            Grader::None => {
-                eprintln!(
-                    "[synth] clip {} part {} accepted first take (seed={}, {:.2}s; grading unavailable on this platform)",
-                    clip_id, part_idx, seed, duration
-                );
-                return Ok((audio_path, duration));
-            }
-        };
-        let grade = graded.unwrap_or_else(|| Grade {
-            coverage: 0.0,
-            prefix_words: 0,
-            suffix_words: 0,
-            repeated_target_words: 0,
-            transcript: String::new(),
-        });
-        eprintln!(
-            "[synth] clip {} part {} attempt {} (seed={}) {} cov={:.0}% pre={} suf={} rep={} ({:.2}s)",
-            clip_id,
-            part_idx,
-            attempt_idx,
-            seed,
-            if grade.is_clean_for(target_is_non_latin) {
-                "✓"
-            } else {
-                "✗"
-            },
-            grade.coverage * 100.0,
-            grade.prefix_words,
-            grade.suffix_words,
-            grade.repeated_target_words,
-            duration,
-        );
-
-        // Keep the best attempt as fallback (composite score, not raw coverage).
-        let take_it = best
-            .as_ref()
-            .map(|(_, g, _, _)| g.score() < grade.score())
-            .unwrap_or(true);
-        if take_it {
-            best = Some((audio_path.clone(), grade.clone(), seed, duration));
-        }
-
-        if grade.is_clean_for(target_is_non_latin) {
-            eprintln!(
-                "[synth] clip {} part {} accepted on attempt {} (seed={}, cov={:.0}%)",
-                clip_id,
-                part_idx,
-                attempt_idx,
-                seed,
-                grade.coverage * 100.0
-            );
-            return Ok((audio_path, duration));
-        }
+    // Single-shot for every engine. The 16-bit (fp16/bf16) models produce
+    // intelligible speech in one pass, so there is no seed/cfg retry ladder and
+    // no ASR grading gate — only a non-empty/non-silent audio guard. The old
+    // ladder graded takes with Parakeet on macOS, which cannot read non-Latin
+    // scripts: it scored good Hindi/CJK audio near 0% and burned every seed for
+    // nothing, and for Indic-Mio it re-ran the heavy WavLM speaker encoder on
+    // each attempt. cfgValue and minStopSteps are read only by the engines that
+    // use them (VoxCPM2, CosyVoice, …); the others ignore them.
+    //
+    // Seed varies per synthesis (derived from the per-call invocation_salt), so
+    // every Regenerate rolls a fresh take. That is the manual escape hatch for
+    // an unlucky single-shot render (e.g. a doubled onset word on one seed):
+    // the user re-rolls instead of an ASR gate auto-retrying. Matches how
+    // Voicebox handles it (regenerate → new random seed, no grading). A cached
+    // take keeps its salt, so it stays put until explicitly regenerated.
+    let seed = short_hash(invocation_salt) as u64;
+    let payload = serde_json::json!({
+        "id": format!("synth-{}-p{}-s{}-{}", clip_id, part_idx, seed, invocation_salt),
+        "command": engine.sidecar_command(),
+        "engine": engine,
+        "modelId": model_id,
+        "text": text,
+        "voiceId": voice_id,
+        "referenceAudioPath": reference_audio_path,
+        "referenceText": reference_text,
+        "language": sidecar_language.as_deref(),
+        "seed": seed,
+        "cfgValue": 2.0,
+        "maxTokens": max_tokens,
+        "minStopSteps": min_stop_steps,
+    });
+    let raw = manager.request(&payload)?;
+    let env: SidecarResponse = serde_json::from_value(raw).map_err(|e| e.to_string())?;
+    if !env.ok {
+        return Err(humanize_sidecar_error(
+            engine,
+            env.error.unwrap_or_else(|| "sidecar error".into()),
+        ));
     }
-
-    if let Some((audio_path, grade, seed, duration)) = best {
-        eprintln!(
-            "[synth] clip {} part {} all attempts below threshold; returning best (seed={}, cov={:.0}%, score={:.2})",
-            clip_id,
-            part_idx,
-            seed,
-            grade.coverage * 100.0,
-            grade.score()
-        );
-        return Ok((audio_path, duration));
-    }
-    Err(last_error.unwrap_or_else(|| "all synth attempts failed".into()))
+    let result = env.result.unwrap_or_default();
+    let audio_path = result
+        .get("audioPath")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing audioPath in sidecar response".to_string())?
+        .to_string();
+    let duration = result
+        .get("durationSec")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    validate_synth_audio(&audio_path)?;
+    eprintln!(
+        "[synth] clip {} part {} synthesized via {} single-shot (seed={}, {:.2}s)",
+        clip_id,
+        part_idx,
+        engine.sidecar_command(),
+        seed,
+        duration
+    );
+    Ok((audio_path, duration))
 }
 
 /// Words per synthesis chunk. VoxCPM2's AR quality drifts past ~15-20 s of
@@ -1261,7 +1309,7 @@ const MAX_CHUNK_WORDS: usize = 14;
 const CHUNK_GAP_SEC: f64 = 0.28;
 
 fn trim_long_form_chunk_edges(engine: TtsEngine) -> bool {
-    !matches!(engine, TtsEngine::FishAudio)
+    engine.registry_entry().info.needs_trim
 }
 
 /// Trim leading/trailing low-energy tails from a rendered chunk. The model
@@ -1859,360 +1907,6 @@ fn strip_style_markers_for_grading(text: &str) -> String {
         .to_string()
 }
 
-/// Result of grading a synth take. Captures the four signals we use to decide
-/// accept/reject: how much of the target text appears, and whether the
-/// transcript is "shaped right" (no prefix junk, no trailing repetition).
-#[derive(Debug, Clone)]
-struct Grade {
-    /// Fraction of target words present in the transcript (via LCS).
-    coverage: f64,
-    /// Number of transcript words BEFORE the first aligned target word.
-    /// Detects reference-echo leak ("Capit, ruttering, quilt, JUST STAY…").
-    prefix_words: usize,
-    /// Number of transcript words AFTER the last aligned target word.
-    /// Detects trailing garbage (model failed to EOS cleanly).
-    suffix_words: usize,
-    /// Count of target words that appear 2+ times in the transcript.
-    /// Detects line repetition (model regenerated the line after first EOS).
-    repeated_target_words: usize,
-    /// Raw ASR transcript, kept for logging only.
-    #[allow(dead_code)]
-    transcript: String,
-}
-
-impl Grade {
-    /// Accept rule. Tuned against a 48-take sweep:
-    ///   - Coverage ≥ 0.75 lets through clean substitutions (e.g. "end" → "and").
-    ///   - prefix ≤ 1 allows one short attack word ("And…", "Oh…") but blocks
-    ///     reference-echo prefixes which are typically 3+ junk words.
-    ///   - suffix ≤ 2 allows a trailing pause/period word but blocks tail
-    ///     repetition or filler.
-    ///   - repeated == 0 blocks line-repetition takes entirely.
-    fn is_clean(&self) -> bool {
-        self.is_clean_for(false)
-    }
-
-    /// Accept rule with script-aware strictness. Non-Latin (e.g. Hindi)
-    /// targets use a lower coverage bar — the grading ASR (Omnilingual) mixes
-    /// Devanagari and Urdu script for Hindustani, and even skeleton-folded
-    /// matching (see tokens_match) drops some words — but a tighter suffix
-    /// bound: VoxCPM2's overshoot babble on Hindi decodes to only ~2 junk
-    /// tokens yet is seconds long audibly, so 2 trailing words is already a
-    /// broken take there. The prefix allowance is looser for non-Latin (≤2):
-    /// cross-script ASR reliably mishears a chunk's cold-start word as two
-    /// unalignable tokens (measured pre=2 on every seed of a clean Hindi
-    /// chunk), while real reference-echo prefixes are far longer (pre=31 on
-    /// the one bad take in the same ladder).
-    fn is_clean_for(&self, non_latin: bool) -> bool {
-        let (min_cov, max_prefix, max_suffix) = if non_latin { (0.6, 2, 1) } else { (0.75, 1, 2) };
-        self.coverage >= min_cov
-            && self.prefix_words <= max_prefix
-            && self.suffix_words <= max_suffix
-            && self.repeated_target_words == 0
-    }
-
-    /// Composite score for ladder-exhausted fallback. Weights chosen so that
-    /// a clean cov=75% take beats a leaked cov=100% take; a repetition take
-    /// is heavily penalised because it doubles the audio length audibly.
-    fn score(&self) -> f64 {
-        self.coverage
-            - 0.1 * self.prefix_words as f64
-            - 0.05 * self.suffix_words as f64
-            - 0.2 * self.repeated_target_words as f64
-    }
-}
-
-/// Run `speech transcribe --engine parakeet` and grade the transcript against
-/// the target. Returns None only if the ASR command itself fails — an empty
-/// transcript is graded as 0% coverage, not None.
-fn asr_grade(audio_path: &str, target: &str) -> Option<Grade> {
-    let out = Command::new("speech")
-        .args(["transcribe", "--engine", "parakeet", audio_path])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        eprintln!(
-            "[synth] parakeet failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-        return None;
-    }
-    let transcript = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .find_map(|l| l.strip_prefix("Result: ").map(|s| s.trim().to_string()))
-        .unwrap_or_default();
-    Some(grade_transcript(&transcript, target))
-}
-
-/// Grade via the sidecar's `transcribe` command (Omnilingual CTC-300M) —
-/// the Windows/Linux counterpart of asr_grade's `speech` CLI shell-out.
-fn asr_grade_sidecar(
-    manager: &SidecarManager,
-    audio_path: &str,
-    target: &str,
-    model_dir: &str,
-) -> Option<Grade> {
-    let payload = serde_json::json!({
-        "id": format!("grade-{}", uuid::Uuid::new_v4().simple()),
-        "command": "transcribe",
-        "audioPath": audio_path,
-        "modelDir": model_dir,
-    });
-    let raw = match manager.request(&payload) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("[synth] sidecar transcribe failed: {}", e);
-            return None;
-        }
-    };
-    let env: SidecarResponse = serde_json::from_value(raw).ok()?;
-    if !env.ok {
-        eprintln!(
-            "[synth] sidecar transcribe error: {}",
-            env.error.unwrap_or_else(|| "unknown".into())
-        );
-        return None;
-    }
-    let result = env.result.unwrap_or_default();
-    let transcript = result
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    Some(grade_transcript(&transcript, target))
-}
-
-/// Fold a token to a script-agnostic consonant skeleton. Omnilingual decodes
-/// Hindustani in mixed Devanagari/Urdu script (no language pin), so grading
-/// "जोड़े" against "جوڑے" requires both to reduce to the same key. Both
-/// scripts are phonetic: keep consonant classes, drop vowels/diacritics.
-/// ASCII passes through unchanged.
-fn fold_skeleton(token: &str) -> String {
-    let mut out = String::new();
-    let chars: Vec<char> = token.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        // Decomposed nukta forms (base + U+093C) change the consonant class:
-        // ड़/ढ़ are flaps (= Urdu ڑ → 'r'), ज़ → 'j', फ़ → 'f'. Consume the pair.
-        if chars.get(i + 1) == Some(&'\u{093C}') {
-            let k = match c {
-                'ड' | 'ढ' => Some('r'),
-                'ज' => Some('j'),
-                'फ' => Some('f'),
-                'क' | 'ख' => Some('k'),
-                'ग' => Some('g'),
-                _ => None,
-            };
-            if let Some(k) = k {
-                out.push(k);
-                i += 2;
-                continue;
-            }
-        }
-        let k: Option<char> = match c {
-            // Devanagari consonants (incl. precomposed nukta forms U+0958-095E;
-            // decomposed base+nukta also works — base maps, nukta drops below)
-            'क' | 'ख' | '\u{0958}' | '\u{0959}' => Some('k'),
-            'ग' | 'घ' | '\u{095A}' => Some('g'),
-            'च' | 'छ' => Some('c'),
-            'ज' | 'झ' | '\u{095B}' => Some('j'),
-            'ट' | 'ठ' | 'त' | 'थ' => Some('t'),
-            'ड' | 'ढ' | 'द' | 'ध' => Some('d'),
-            '\u{095C}' | '\u{095D}' => Some('r'),
-            'ण' | 'न' | 'ङ' | 'ञ' => Some('n'),
-            'प' => Some('p'),
-            'फ' => Some('p'),
-            '\u{095E}' => Some('f'),
-            'ब' | 'भ' => Some('b'),
-            'म' => Some('m'),
-            'य' => Some('y'),
-            'र' => Some('r'),
-            'ल' => Some('l'),
-            'व' => Some('v'),
-            'श' | 'ष' | 'स' => Some('s'),
-            'ह' => Some('h'),
-            // Devanagari vowels, matras, anusvara, virama, nukta → drop
-            '\u{0900}'..='\u{0903}'
-            | '\u{0904}'..='\u{0914}'
-            | '\u{093A}'..='\u{094F}'
-            | '\u{0962}'..='\u{0963}' => None,
-            // Urdu/Arabic consonants
-            'ک' | 'ق' | 'خ' => Some('k'),
-            'گ' | 'غ' => Some('g'),
-            'چ' => Some('c'),
-            'ج' | 'ز' | 'ذ' | 'ض' | 'ظ' | 'ژ' => Some('j'),
-            'ت' | 'ٹ' | 'ط' => Some('t'),
-            'د' | 'ڈ' => Some('d'),
-            'ڑ' => Some('r'),
-            'ن' => Some('n'),
-            // ں (nun ghunna) is nasalisation — drops like Devanagari anusvara.
-            'ں' => None,
-            'پ' => Some('p'),
-            'ف' => Some('f'),
-            'ب' => Some('b'),
-            'م' => Some('m'),
-            'ی' | 'ئ' => Some('y'),
-            'ر' => Some('r'),
-            'ل' => Some('l'),
-            'و' => Some('v'),
-            'س' | 'ش' | 'ص' | 'ث' => Some('s'),
-            'ہ' | 'ح' | 'ه' | 'ۂ' => Some('h'),
-            // ھ (heh doachashmee) marks aspiration in digraphs (ٹھ, کھ…) —
-            // drops so aspirated/unaspirated fold to the same class, matching
-            // how Devanagari ठ/ट both map to 't'.
-            'ھ' => None,
-            'ع' | 'ا' | 'آ' | 'أ' | 'إ' | 'ء' | 'ے' | 'ۓ' => None,
-            // Arabic tashkeel → drop
-            '\u{064B}'..='\u{0652}' => None,
-            other if other.is_ascii_alphanumeric() => Some(other),
-            _ => None,
-        };
-        if let Some(k) = k {
-            out.push(k);
-        }
-        i += 1;
-    }
-    out
-}
-
-/// Levenshtein distance over the (ASCII) folded skeletons.
-fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<u8> = a.bytes().collect();
-    let b: Vec<u8> = b.bytes().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    for (i, &ca) in a.iter().enumerate() {
-        let mut cur = vec![i + 1];
-        for (j, &cb) in b.iter().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            cur.push((prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1));
-        }
-        prev = cur;
-    }
-    prev[b.len()]
-}
-
-/// Token equivalence for grading. Exact match first; for non-ASCII tokens,
-/// compare consonant skeletons with a small edit-distance tolerance — the
-/// Urdu spelling of a Hindi word carries vowel letters (و/ی) that fold into
-/// the skeleton, so an off-by-one consonant must still count as the same
-/// word. ASCII-vs-ASCII never matches fuzzily (English grading unchanged).
-fn tokens_match(a: &str, b: &str) -> bool {
-    if a == b {
-        return true;
-    }
-    if a.is_ascii() && b.is_ascii() {
-        return false;
-    }
-    let fa = fold_skeleton(a);
-    let fb = fold_skeleton(b);
-    if fa.is_empty() || fb.is_empty() {
-        return false;
-    }
-    if fa == fb {
-        return true;
-    }
-    let min_len = fa.len().min(fb.len());
-    let tol = if min_len >= 6 {
-        2
-    } else {
-        usize::from(min_len >= 2)
-    };
-    edit_distance(&fa, &fb) <= tol
-}
-
-/// LCS-based grading: find the longest subsequence of `target` words that
-/// appears (in order, with skips allowed) inside `transcript`. The position
-/// of the first/last aligned transcript words tells us about prefix/suffix
-/// junk. Repetition is detected separately as "did any target word appear 2+
-/// times in the transcript?".
-fn grade_transcript(transcript: &str, target: &str) -> Grade {
-    let trans = canon_tokens(transcript);
-    let targ = canon_tokens(target);
-    if targ.is_empty() {
-        return Grade {
-            coverage: 0.0,
-            prefix_words: 0,
-            suffix_words: 0,
-            repeated_target_words: 0,
-            transcript: transcript.to_string(),
-        };
-    }
-    if trans.is_empty() {
-        return Grade {
-            coverage: 0.0,
-            prefix_words: 0,
-            suffix_words: 0,
-            repeated_target_words: 0,
-            transcript: transcript.to_string(),
-        };
-    }
-
-    let n = trans.len();
-    let m = targ.len();
-    // dp[i][j] = LCS length over trans[0..i] vs targ[0..j]. Equivalence is
-    // tokens_match (script-folded fuzzy), not string equality, so a transcript
-    // in Urdu script still aligns against a Devanagari target.
-    let mut dp = vec![vec![0u32; m + 1]; n + 1];
-    for i in 1..=n {
-        for j in 1..=m {
-            dp[i][j] = if tokens_match(&trans[i - 1], &targ[j - 1]) {
-                dp[i - 1][j - 1] + 1
-            } else {
-                dp[i - 1][j].max(dp[i][j - 1])
-            };
-        }
-    }
-    let matched = dp[n][m] as usize;
-    if matched == 0 {
-        return Grade {
-            coverage: 0.0,
-            prefix_words: 0,
-            suffix_words: trans.len(),
-            repeated_target_words: 0,
-            transcript: transcript.to_string(),
-        };
-    }
-
-    // Backtrack to find FIRST and LAST aligned transcript indices.
-    let mut aligned: Vec<usize> = Vec::with_capacity(matched);
-    let (mut i, mut j) = (n, m);
-    while i > 0 && j > 0 {
-        if tokens_match(&trans[i - 1], &targ[j - 1]) && dp[i][j] == dp[i - 1][j - 1] + 1 {
-            aligned.push(i - 1);
-            i -= 1;
-            j -= 1;
-        } else if dp[i - 1][j] >= dp[i][j - 1] {
-            i -= 1;
-        } else {
-            j -= 1;
-        }
-    }
-    aligned.reverse();
-    let first = aligned[0];
-    let last = aligned[aligned.len() - 1] + 1;
-
-    // Repeated target words: count target words appearing 2+ times in
-    // transcript. Uses a small set lookup since target is short.
-    let targ_set: std::collections::HashSet<&String> = targ.iter().collect();
-    let mut counts: std::collections::HashMap<&String, usize> = std::collections::HashMap::new();
-    for w in &trans {
-        if targ_set.contains(w) {
-            *counts.entry(w).or_insert(0) += 1;
-        }
-    }
-    let repeated = counts.values().filter(|&&c| c >= 2).count();
-
-    Grade {
-        coverage: matched as f64 / m as f64,
-        prefix_words: first,
-        suffix_words: trans.len() - last,
-        repeated_target_words: repeated,
-        transcript: transcript.to_string(),
-    }
-}
-
 fn canon_tokens(s: &str) -> Vec<String> {
     s.to_lowercase()
         .chars()
@@ -2240,11 +1934,9 @@ fn canon_tokens(s: &str) -> Vec<String> {
 
 // ---------- demo seed ----------
 //
-// The demo uses real Qwen3-TTS ICL synthesis. Since Qwen3-TTS needs a
-// reference audio + reference transcript per voice, and we don't ship any
-// audio in this repo, we bootstrap the references by calling macOS `say`
-// (Samantha / Daniel) into a temp WAV. Then we synthesize each demo line
-// through the sidecar, which loads the Qwen3-TTS model on first call.
+// The demo embeds human reference WAVs. Engines such as Qwen3-TTS and Fish
+// Audio need the reference transcript to match that WAV closely, otherwise
+// prompt words can leak into the synthesized take.
 //
 // First-ever invocation: downloads ~300MB of model weights from HuggingFace,
 // then ~2-5s per line. Subsequent invocations reuse the warm model.
@@ -2277,6 +1969,9 @@ struct DemoSeed {
     clips: Vec<DemoClipSeed>,
 }
 
+const DEMO_ANNA_REFERENCE_TEXT: &str = "The Hispaniola was rolling scuppers under in the ocean swell. The booms were tearing at the blocks. The rudder was banging.";
+const DEMO_MAREK_REFERENCE_TEXT: &str = "It is a pretty little spot there, a green grass plateau running along by the water's edge and overhung by willows.";
+
 fn short_hash(s: &str) -> u32 {
     // FNV-1a 32-bit. Stable across runs without pulling another crate.
     let mut h: u32 = 0x811c9dc5;
@@ -2301,6 +1996,15 @@ fn clip_cache_dir() -> std::path::PathBuf {
     dir
 }
 
+fn dictation_cache_dir() -> std::path::PathBuf {
+    let dir = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("audio.soniqo.studio")
+        .join("dictation");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 fn wav_duration_sec(path: &std::path::Path) -> Result<f64, String> {
     use std::io::Read;
     let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -2316,6 +2020,132 @@ fn wav_duration_sec(path: &std::path::Path) -> Result<f64, String> {
     let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let audio_bytes = metadata.len().saturating_sub(44);
     Ok(audio_bytes as f64 / byte_rate as f64)
+}
+
+#[derive(Deserialize)]
+struct SaveDictationAudioArgs {
+    #[serde(rename = "wavBase64")]
+    wav_base64: String,
+}
+
+#[derive(Serialize)]
+struct SaveDictationAudioResult {
+    #[serde(rename = "audioPath")]
+    audio_path: String,
+    #[serde(rename = "durationSec")]
+    duration_sec: f64,
+}
+
+#[tauri::command]
+async fn save_dictation_audio(
+    args: SaveDictationAudioArgs,
+) -> Result<SaveDictationAudioResult, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(args.wav_base64.trim())
+        .map_err(|e| format!("invalid dictation audio payload: {e}"))?;
+    const MAX_DICTATION_WAV_BYTES: usize = 100 * 1024 * 1024;
+    if bytes.len() > MAX_DICTATION_WAV_BYTES {
+        return Err("dictation recording is too large".into());
+    }
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("dictation audio must be a WAV file".into());
+    }
+
+    let path =
+        dictation_cache_dir().join(format!("dictation-{}.wav", uuid::Uuid::new_v4().simple()));
+    std::fs::write(&path, &bytes).map_err(|e| format!("could not write dictation audio: {e}"))?;
+    let duration_sec = wav_duration_sec(&path).unwrap_or(0.0);
+    Ok(SaveDictationAudioResult {
+        audio_path: path.to_string_lossy().to_string(),
+        duration_sec,
+    })
+}
+
+#[derive(Deserialize)]
+struct TranscribeAudioArgs {
+    #[serde(rename = "audioPath")]
+    audio_path: String,
+    model: Option<AsrModel>,
+    language: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TranscribeAudioResult {
+    text: String,
+    #[serde(rename = "modelName")]
+    model_name: String,
+    #[serde(rename = "modelId")]
+    model_id: String,
+    #[serde(rename = "durationSec")]
+    duration_sec: f64,
+    #[serde(rename = "elapsedSec")]
+    elapsed_sec: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
+}
+
+#[tauri::command]
+async fn transcribe_audio(
+    manager: State<'_, SidecarManager>,
+    args: TranscribeAudioArgs,
+) -> Result<TranscribeAudioResult, String> {
+    let model = args.model.unwrap_or(AsrModel::ParakeetTdtV3);
+    let info = asr_model_info(model);
+    let audio_path = PathBuf::from(&args.audio_path);
+    let metadata = std::fs::metadata(&audio_path)
+        .map_err(|e| format!("cannot read dictation audio {}: {e}", audio_path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "dictation audio path is not a file: {}",
+            audio_path.display()
+        ));
+    }
+
+    let started = Instant::now();
+    let payload = serde_json::json!({
+        "id": format!("asr-{}", uuid::Uuid::new_v4().simple()),
+        "command": model.sidecar_command(),
+        "audioPath": audio_path.to_string_lossy(),
+        "language": args.language,
+    });
+    let raw = manager.request(&payload)?;
+    let env: SidecarResponse = serde_json::from_value(raw).map_err(|e| e.to_string())?;
+    if !env.ok {
+        return Err(env
+            .error
+            .unwrap_or_else(|| format!("{} transcription failed", info.display_name)));
+    }
+
+    let result = env.result.unwrap_or_default();
+    let text = result
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let language = result
+        .get("language")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let duration_sec = result
+        .get("durationSec")
+        .and_then(|v| v.as_f64())
+        .or_else(|| wav_duration_sec(&audio_path).ok())
+        .unwrap_or(0.0);
+    let elapsed_sec = result
+        .get("elapsedSec")
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| started.elapsed().as_secs_f64());
+
+    Ok(TranscribeAudioResult {
+        text,
+        model_name: info.model_name,
+        model_id: info.model_id,
+        duration_sec,
+        elapsed_sec,
+        language,
+    })
 }
 
 #[derive(Serialize, Clone)]
@@ -2344,9 +2174,38 @@ fn emit_progress(
     );
 }
 
+fn demo_clip_seeds(cache_prefix: &str, lines: &[(usize, &str)]) -> Vec<DemoClipSeed> {
+    let cache_dir = clip_cache_dir();
+    let mut clips = Vec::with_capacity(lines.len());
+    for (idx, (speaker_idx, text)) in lines.iter().enumerate() {
+        let stable_id = format!(
+            "{}-s{}-l{}-{:x}",
+            cache_prefix,
+            speaker_idx,
+            idx,
+            short_hash(text)
+        );
+        let cached_path = cache_dir.join(format!("{}.wav", stable_id));
+        let (audio_path, duration_sec) = if cached_path.exists() {
+            let dur = wav_duration_sec(&cached_path).ok();
+            (Some(cached_path.to_string_lossy().to_string()), dur)
+        } else {
+            (None, None)
+        };
+
+        clips.push(DemoClipSeed {
+            speaker_index: *speaker_idx,
+            audio_path,
+            duration_sec,
+            text: (*text).to_string(),
+        });
+    }
+    clips
+}
+
 #[tauri::command]
 async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
-    eprintln!("[seed_demo] start (lazy mode: no Qwen3 synth, only `say` references)");
+    eprintln!("[seed_demo] start (lazy mode: bundled references only)");
     emit_progress(&app, "references", 0, 1, "Preparing reference voices…");
     let dir = std::env::temp_dir().join("soniqo-demo");
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {}", e))?;
@@ -2358,17 +2217,17 @@ async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
     // clips, ~450 KB each, embedded via include_bytes!):
     //   Anna  → female reader, ~10s, literary narration.
     //   Marek → male reader, ~9s, calm narration.
-    // Reference text was produced by Parakeet ASR over the same WAV — close
-    // enough to verbatim for ICL.
+    // Reference text must be exact for Qwen3-TTS ICL. A stale Anna transcript
+    // leaked prompt words into the synthesized take, while Marek stayed clean.
     let ref_specs: [(&[u8], &str, &str); 2] = [
         (
             include_bytes!("../resources/voices/anna.wav"),
-            "The Hispaniola was rolling scuppers under in the ocean swell. The booms were tearing at the blocks, ruddering.",
+            DEMO_ANNA_REFERENCE_TEXT,
             "ref-anna.wav",
         ),
         (
             include_bytes!("../resources/voices/marek.wav"),
-            "It is a pretty little spot there, a green grass plateau running along by the water's edge and overhung by willows.",
+            DEMO_MAREK_REFERENCE_TEXT,
             "ref-marek.wav",
         ),
     ];
@@ -2390,9 +2249,7 @@ async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
             reference_text: (*ref_text).to_string(),
         });
     }
-    eprintln!(
-        "[seed_demo] references ready, starting Qwen3-TTS synthesis (first call downloads model)"
-    );
+    eprintln!("[seed_demo] references ready; synthesis is on demand");
 
     // Step 2 — demo lines, each wrapped in a VoxCPM2 style marker. The
     // sidecar's extractFirstEmotionTag pulls the tag name out and passes it
@@ -2413,25 +2270,54 @@ async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
     // attach its path so the user can immediately play it; otherwise leave
     // audio_path = None and let the user trigger synthesis explicitly via
     // Regenerate. No Qwen3 calls happen here — Load demo is ~instant.
-    let cache_dir = clip_cache_dir();
-    let mut clips = Vec::with_capacity(lines.len());
-    for (idx, (speaker_idx, text)) in lines.iter().enumerate() {
-        let stable_id = format!("demo-s{}-l{}-{:x}", speaker_idx, idx, short_hash(text));
-        let cached_path = cache_dir.join(format!("{}.wav", stable_id));
-        let (audio_path, duration_sec) = if cached_path.exists() {
-            let dur = wav_duration_sec(&cached_path).ok();
-            (Some(cached_path.to_string_lossy().to_string()), dur)
-        } else {
-            (None, None)
-        };
+    let clips = demo_clip_seeds("demo", &lines);
 
-        clips.push(DemoClipSeed {
-            speaker_index: *speaker_idx,
-            audio_path,
-            duration_sec,
-            text: (*text).to_string(),
+    Ok(DemoSeed { voices, clips })
+}
+
+#[tauri::command]
+async fn seed_hindi_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
+    eprintln!("[seed_hindi_demo] start");
+    emit_progress(&app, "references", 0, 1, "Preparing Hindi reference voice…");
+    let dir = std::env::temp_dir().join("soniqo-demo");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {}", e))?;
+
+    // Two FLEURS hi_in test-split speakers (CC-BY, PCM16 mono 16 kHz), one per
+    // gender. Reference text must be exact for voice-clone ICL — both
+    // transcripts are the raw FLEURS transcriptions, ASR-verified against the
+    // audio (a mismatched transcript leaks prompt words into the takes).
+    let ref_specs: [(&[u8], &str, &str); 2] = [
+        (
+            include_bytes!("../resources/voices/hindi_fleurs.wav"),
+            "लूना को साथी पहलवानों ने भी श्रद्धांजलि दी.",
+            "ref-hindi-fleurs.wav",
+        ),
+        (
+            include_bytes!("../resources/voices/hindi_fleurs_female.wav"),
+            "यह शहर देश के बाकी शहरों से अलग है क्योंकि यह किसी अफ्रीकी शहर की बजाय अरब शहर लगता है.",
+            "ref-hindi-fleurs-female.wav",
+        ),
+    ];
+
+    let mut voices = Vec::with_capacity(ref_specs.len());
+    for (bytes, ref_text, filename) in ref_specs.iter() {
+        let path = dir.join(filename);
+        std::fs::write(&path, bytes)
+            .map_err(|e| format!("write {} failed: {}", path.display(), e))?;
+        voices.push(DemoVoiceSeed {
+            reference_audio_path: path.to_string_lossy().to_string(),
+            reference_text: (*ref_text).to_string(),
         });
     }
+
+    // Male (0) and female (1) speakers alternate, like the English demo.
+    let lines: [(usize, &str); 4] = [
+        (0, "(happy) नमस्ते, आज हम हिंदी आवाज़ का परीक्षण कर रहे हैं।"),
+        (1, "(sad) यह पंक्ति शांत और भावुक सुनाई देनी चाहिए।"),
+        (0, "(angry) अब आवाज़ में थोड़ी तीव्रता और ज़ोर चाहिए।"),
+        (1, "(surprised) अंत में यह वाक्य साफ़ और उत्साहित होना चाहिए।"),
+    ];
+    let clips = demo_clip_seeds("demo-hi", &lines);
 
     Ok(DemoSeed { voices, clips })
 }
@@ -2819,6 +2705,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ping_sidecar,
             available_tts_engines,
+            available_asr_models,
             init_model,
             interrupt_model_load,
             pick_video,
@@ -2826,6 +2713,8 @@ pub fn run() {
             import_reference_audio,
             probe_reference,
             clone_voice,
+            save_dictation_audio,
+            transcribe_audio,
             synthesize_clip,
             export_project,
             list_projects,
@@ -2833,6 +2722,7 @@ pub fn run() {
             load_project,
             delete_project,
             seed_demo,
+            seed_hindi_demo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -2846,9 +2736,15 @@ mod tests {
     fn tts_engine_protocol_names_are_stable() {
         let cosy: TtsEngine = serde_json::from_str("\"cosyvoice\"").unwrap();
         assert_eq!(cosy, TtsEngine::CosyVoice);
+        let parakeet: AsrModel = serde_json::from_str("\"parakeet-tdt-v3\"").unwrap();
+        assert_eq!(parakeet, AsrModel::ParakeetTdtV3);
         assert_eq!(
             serde_json::to_string(&TtsEngine::VoxCPM2).unwrap(),
             "\"voxcpm2\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AsrModel::ParakeetTdtV3).unwrap(),
+            "\"parakeet-tdt-v3\""
         );
         assert_eq!(
             serde_json::to_string(&TtsEngine::IndicMio).unwrap(),
@@ -2867,6 +2763,7 @@ mod tests {
             TtsEngine::FishAudio.sidecar_command(),
             "synthesize_fish_audio"
         );
+        assert_eq!(parakeet.sidecar_command(), "transcribe_parakeet");
     }
 
     #[test]
@@ -2904,6 +2801,15 @@ mod tests {
     }
 
     #[test]
+    fn demo_anna_reference_transcript_matches_bundled_audio() {
+        assert!(
+            !DEMO_ANNA_REFERENCE_TEXT.contains("ruddering"),
+            "stale Anna transcript leaks reference text into Qwen3-TTS ICL output"
+        );
+        assert!(DEMO_ANNA_REFERENCE_TEXT.ends_with("The rudder was banging."));
+    }
+
+    #[test]
     fn chatterbox_engine_wiring() {
         let c: TtsEngine = serde_json::from_str("\"chatterbox\"").unwrap();
         assert_eq!(c, TtsEngine::Chatterbox);
@@ -2917,11 +2823,202 @@ mod tests {
         assert_eq!(TtsEngine::VoxCPM2.style_mode(), "instruction");
         assert_eq!(TtsEngine::IndicMio.style_mode(), "suffix-tag");
         assert_eq!(TtsEngine::FishAudio.style_mode(), "bracket-tag");
+        assert_eq!(TtsEngine::OmniVoice.style_mode(), "controlled-vocabulary");
         assert_eq!(TtsEngine::Qwen3.style_mode(), "none");
     }
 
     #[test]
+    fn tts_engine_info_exposes_model_capabilities() {
+        let vox = tts_engine_info(TtsEngine::VoxCPM2);
+        assert_eq!(vox.languages.len(), 30);
+        assert!(vox.languages.iter().any(|language| language == "hi"));
+        assert!(vox.languages.iter().any(|language| language == "vi"));
+        assert!(!vox.requires_language);
+        assert_eq!(vox.model_name, "voxcpm2-mlx-bf16");
+        assert_eq!(vox.model_id, "aufklarer/VoxCPM2-MLX-bf16");
+        assert_eq!(vox.precision, "bf16");
+
+        let cosy = tts_engine_info(TtsEngine::CosyVoice);
+        assert!(cosy.requires_language);
+        assert_eq!(
+            cosy.languages,
+            ["en", "zh", "ja", "ko", "de", "es", "fr", "it", "ru"]
+        );
+        assert!(cosy
+            .supported_markers
+            .iter()
+            .any(|marker| marker == "excited"));
+
+        let qwen = tts_engine_info(TtsEngine::Qwen3);
+        assert_eq!(qwen.model_name, "qwen3-tts-1.7b-mlx-bf16");
+        assert_eq!(qwen.model_id, "aufklarer/Qwen3-TTS-12Hz-1.7B-Base-MLX-bf16");
+        assert_eq!(qwen.voice_profile_modes, ["reference-clone"]);
+        assert!(qwen.requires_reference_audio);
+        assert!(qwen.requires_reference_transcript);
+        assert!(qwen.requires_language);
+        assert!(!qwen.supports_instruct);
+        assert_eq!(qwen.style_mode, "none");
+        assert!(qwen.languages.iter().any(|language| language == "en"));
+        assert!(qwen.languages.iter().any(|language| language == "ru"));
+        assert!(qwen.supported_markers.is_empty());
+        assert_eq!(qwen.precision, "bf16");
+
+        let chatterbox = tts_engine_info(TtsEngine::Chatterbox);
+        assert_eq!(chatterbox.languages.len(), 22);
+        assert!(chatterbox.languages.iter().any(|language| language == "zh"));
+        assert!(chatterbox.languages.iter().any(|language| language == "ja"));
+        assert!(!chatterbox.languages.iter().any(|language| language == "he"));
+        assert!(chatterbox.languages.iter().any(|language| language == "ko"));
+        assert_eq!(chatterbox.precision, "fp16");
+
+        let omni = tts_engine_info(TtsEngine::OmniVoice);
+        assert_eq!(omni.model_name, "omnivoice-mlx-fp16");
+        assert_eq!(omni.model_id, "aufklarer/OmniVoice-MLX-fp16");
+        assert_eq!(omni.precision, "fp16");
+
+        let fish = tts_engine_info(TtsEngine::FishAudio);
+        assert_eq!(fish.style_mode, "bracket-tag");
+        assert!(fish.languages.len() > 70);
+        assert!(fish
+            .benchmark_languages
+            .iter()
+            .any(|language| language == "hi"));
+        assert!(fish
+            .supported_markers
+            .iter()
+            .any(|marker| marker == "excited"));
+        assert_eq!(fish.use_policy, "research-only");
+        assert!(!fish.needs_trim);
+    }
+
+    #[test]
+    fn hindi_demo_reference_is_bundled_pcm_wav() {
+        let path = std::env::temp_dir().join(format!(
+            "speech-studio-hindi-ref-{}.wav",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(
+            &path,
+            include_bytes!("../resources/voices/hindi_fleurs.wav"),
+        )
+        .unwrap();
+
+        let (sample_rate, channels, bits) = read_wav_header(&path).unwrap();
+        assert_eq!(sample_rate, 16_000);
+        assert_eq!(channels, 1);
+        assert_eq!(bits, 16);
+
+        let duration = wav_duration_sec(&path).unwrap();
+        assert!(
+            (3.7..4.0).contains(&duration),
+            "unexpected Hindi reference duration: {duration}"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tts_registry_defaults_keep_16bit_precision_floor() {
+        for entry in MODEL_REGISTRY
+            .tts_engines
+            .iter()
+            .filter(|entry| engine_is_supported(entry.info.id))
+        {
+            assert!(
+                matches!(entry.info.precision.as_str(), "bf16" | "fp16"),
+                "{} default precision should stay 16-bit, got {}",
+                entry.info.model_name,
+                entry.info.precision
+            );
+            assert!(
+                !entry.info.model_id.contains("int8")
+                    && !entry.info.model_id.contains("8bit")
+                    && !entry.info.model_id.contains("4bit"),
+                "{} default model id should not be quantized: {}",
+                entry.info.model_name,
+                entry.info.model_id
+            );
+        }
+    }
+
+    #[test]
+    fn asr_registry_uses_parakeet_family_on_all_platforms() {
+        let parakeet = asr_model_info(AsrModel::ParakeetTdtV3);
+        assert_eq!(parakeet.model_name, "parakeet-tdt-v3-0.6b-int8");
+        assert_eq!(parakeet.sample_rate, 16_000);
+        assert_eq!(parakeet.max_segment_sec, 30);
+        assert!(parakeet.streaming);
+        assert_eq!(parakeet.readiness, "production");
+        assert_eq!(parakeet.languages, ["en"]);
+        assert_eq!(
+            parakeet.runtime,
+            if cfg!(target_os = "macos") {
+                "coreml"
+            } else {
+                "litert"
+            }
+        );
+        assert_eq!(
+            parakeet.model_id,
+            if cfg!(target_os = "macos") {
+                "aufklarer/Parakeet-TDT-v3-CoreML-INT8-30s"
+            } else {
+                "soniqo/Parakeet-TDT-0.6B-v3-LiteRT-INT8"
+            }
+        );
+    }
+
+    #[test]
+    fn studio_registry_keeps_qwen_on_bf16() {
+        let ids: Vec<TtsEngine> = MODEL_REGISTRY
+            .tts_engines
+            .iter()
+            .map(|entry| entry.info.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                TtsEngine::VoxCPM2,
+                TtsEngine::CosyVoice,
+                TtsEngine::Qwen3,
+                TtsEngine::Chatterbox,
+                TtsEngine::OmniVoice,
+                TtsEngine::IndicMio,
+                TtsEngine::FishAudio,
+            ]
+        );
+
+        let qwen = TtsEngine::Qwen3.registry_entry();
+        assert_eq!(qwen.info.model_name, "qwen3-tts-1.7b-mlx-bf16");
+        assert_eq!(
+            qwen.info.model_id,
+            "aufklarer/Qwen3-TTS-12Hz-1.7B-Base-MLX-bf16"
+        );
+        assert!(!qwen.info.model_name.contains("8bit"));
+        assert!(!qwen.info.model_id.contains("8bit"));
+        assert!(!qwen.info.model_name.contains("0.6b"));
+        assert_eq!(qwen.info.precision, "bf16");
+        assert_eq!(qwen.info.style_mode, "none");
+    }
+
+    #[test]
+    fn qwen_synth_budget_is_bounded_for_short_lines() {
+        assert_eq!(synth_max_tokens(TtsEngine::Qwen3, 2), 40);
+        assert_eq!(synth_max_tokens(TtsEngine::Qwen3, 6), 44);
+        assert_eq!(synth_max_tokens(TtsEngine::Qwen3, 20), 96);
+        assert_eq!(synth_max_tokens(TtsEngine::CosyVoice, 6), 112);
+    }
+
+    #[test]
     fn sidecar_language_normalization_preserves_chatterbox_hi() {
+        assert_eq!(
+            normalize_sidecar_language(TtsEngine::CosyVoice, Some("ru")).as_deref(),
+            Some("russian")
+        );
+        assert_eq!(
+            normalize_sidecar_language(TtsEngine::CosyVoice, Some("ja")).as_deref(),
+            Some("japanese")
+        );
         assert_eq!(
             normalize_sidecar_language(TtsEngine::Chatterbox, Some("hi")).as_deref(),
             Some("hi")
@@ -2980,6 +3077,21 @@ mod tests {
         assert!(
             dir.to_string_lossy().contains("audio.soniqo.studio"),
             "cache dir should be under the app namespace: {:?}",
+            dir
+        );
+    }
+
+    #[test]
+    fn dictation_cache_dir_under_app_namespace() {
+        let dir = dictation_cache_dir();
+        assert!(
+            dir.ends_with("dictation"),
+            "dictation dir should end with dictation: {:?}",
+            dir
+        );
+        assert!(
+            dir.to_string_lossy().contains("audio.soniqo.studio"),
+            "dictation dir should be under the app namespace: {:?}",
             dir
         );
     }
@@ -3131,94 +3243,6 @@ mod tests {
         assert!(trim_long_form_chunk_edges(TtsEngine::IndicMio));
     }
 
-    #[test]
-    fn tokens_match_folds_devanagari_vs_urdu_script() {
-        // Omnilingual decodes Hindustani in mixed script; the same spoken word
-        // must align across spellings via the consonant skeleton.
-        assert!(tokens_match("जोड़े", "جوڑے"));
-        assert!(tokens_match("लाइन", "لائن"));
-        assert!(tokens_match("नीचे", "نیچے"));
-        // ASCII never matches fuzzily.
-        assert!(!tokens_match("line", "lane"));
-    }
-
-    #[test]
-    fn grade_hindi_mixed_script_transcript_flags_babble_tail() {
-        // Real Omnilingual transcript of a take whose last second was AR
-        // babble ("یان کھن"); target is the chunk text in Devanagari.
-        let target = "गेम अपने आप सेव नहीं होता कि ठीक बीच में एक हॉरिजॉन्टल लाइन जोड़े।";
-        let transcript = "گیم اپنے سیو نہیں ہوتا کہ ٹھیک بیچ میں ایک ہاریجانٹل لائن جوڑے یان کھن";
-        let g = grade_transcript(transcript, target);
-        assert!(
-            g.coverage >= 0.6,
-            "cross-script coverage too low: {}",
-            g.coverage
-        );
-        assert!(
-            g.suffix_words >= 2,
-            "babble tail not detected: suffix={}",
-            g.suffix_words
-        );
-        assert!(
-            !g.is_clean_for(true),
-            "babble take must be rejected for non-Latin targets"
-        );
-    }
-
-    #[test]
-    fn grade_clean_take_passes() {
-        let g = grade_transcript(
-            "I knew you would make it, no matter what.",
-            "I knew you would make it, no matter what.",
-        );
-        assert_eq!(g.coverage, 1.0);
-        assert_eq!(g.prefix_words, 0);
-        assert_eq!(g.suffix_words, 0);
-        assert_eq!(g.repeated_target_words, 0);
-        assert!(g.is_clean());
-    }
-
-    #[test]
-    fn grade_detects_reference_leak_prefix() {
-        // Clip 1 from the sweep: "Can be." prefix + line repeated twice.
-        let g = grade_transcript(
-            "Can be. I never thought we'd make it this far. Ruttering. I never thought we'd make it this far.",
-            "I never thought we'd make it this far.",
-        );
-        assert_eq!(g.coverage, 1.0); // all target words present
-        assert!(
-            g.prefix_words >= 2,
-            "expected prefix junk, got {}",
-            g.prefix_words
-        );
-        assert!(
-            g.repeated_target_words >= 4,
-            "expected repetition, got {}",
-            g.repeated_target_words
-        );
-        assert!(!g.is_clean());
-    }
-
-    #[test]
-    fn grade_detects_short_take() {
-        let g = grade_transcript("Tonight.", "Then we end this together. Tonight.");
-        assert!(g.coverage < 0.5);
-        assert!(!g.is_clean());
-    }
-
-    #[test]
-    fn grade_accepts_minor_substitution() {
-        // "end" -> "and" — one-word substitution still passes if coverage stays
-        // above the 0.75 threshold.
-        let g = grade_transcript(
-            "Then we and this together. Tonight.",
-            "Then we end this together. Tonight.",
-        );
-        assert!(g.coverage >= 0.75, "expected >=0.75, got {}", g.coverage);
-        assert_eq!(g.prefix_words, 0);
-        assert!(g.is_clean(), "should accept minor substitution");
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     fn colocate_metallib_simulates_bundle_layout() {
@@ -3288,20 +3312,4 @@ mod tests {
         assert!(err < 1e-3, "mean abs error {err} too high");
     }
 
-    #[test]
-    fn score_prefers_clean_low_cov_over_leaked_high_cov() {
-        // The whole point of the composite score: when ladder exhausts, prefer
-        // a clean cov=75% take over a cov=100% leak.
-        let clean = grade_transcript("I knew you would make.", "I knew you would make it.");
-        let leaked = grade_transcript(
-            "Capit ruttering quilt I knew you would make it",
-            "I knew you would make it.",
-        );
-        assert!(
-            clean.score() > leaked.score(),
-            "clean.score={} leaked.score={}",
-            clean.score(),
-            leaked.score()
-        );
-    }
 }

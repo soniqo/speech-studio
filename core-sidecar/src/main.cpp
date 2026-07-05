@@ -20,16 +20,20 @@
 //   transcribe           — ASR a rendered take (Omnilingual CTC-300M) so the
 //                          host can grade it against the target text and
 //                          retry bad takes. Model dir comes per-request.
+//   transcribe_parakeet  — user dictation / transcription with Parakeet TDT v3.
 
 #include <speech_core/voxcpm2_c.h>
 #include <speech_core/audio/resampler.h>
 #include <speech_core/models/litert_omnilingual_stt.h>
+#include <speech_core/models/litert_parakeet_stt.h>
 #include <speech_core/util/json.h>
 
+#include "hf_download.h"
 #include "audio_decode.h"
 #include "sidecar_text.h"
 #include "sidecar_sysinfo.h"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -40,6 +44,7 @@
 #include <memory>
 #include <optional>
 #include <regex>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -136,6 +141,38 @@ static fs::path clips_cache_dir() {
     std::error_code ec;
     fs::create_directories(dir, ec);
     return dir;
+}
+
+static std::string model_cache_root() {
+    if (const char* c = std::getenv("SONIQO_MODEL_CACHE_DIR"); c && *c) return c;
+    if (const char* c = std::getenv("SPEECH_CORE_CACHE_DIR"); c && *c) return c;
+#if defined(_WIN32)
+    if (const char* la = std::getenv("LOCALAPPDATA"); la && *la)
+        return std::string(la) + "/speech-core";
+#elif defined(__APPLE__)
+    if (const char* h = std::getenv("HOME"); h && *h)
+        return std::string(h) + "/Library/Caches/speech-core";
+#else
+    if (const char* x = std::getenv("XDG_CACHE_HOME"); x && *x)
+        return std::string(x) + "/speech-core";
+    if (const char* h = std::getenv("HOME"); h && *h)
+        return std::string(h) + "/.cache/speech-core";
+#endif
+    return "./speech-core-cache";
+}
+
+static std::string sanitize_repo_id(const std::string& id) {
+    std::string s;
+    for (char c : id) {
+        if (c == '/' || c == '\\') s += "__";
+        else s += c;
+    }
+    return s;
+}
+
+static std::string format_mb(uint64_t bytes) {
+    const uint64_t mb = 1024ull * 1024ull;
+    return std::to_string((bytes + mb - 1) / mb) + " MB";
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +380,142 @@ static void handle_transcribe(const json::Dict& req, const std::string& id) {
               "\"text\":\"" + json_escape(res.text) + "\"}}");
 }
 
+// transcribe_parakeet — user-facing dictation/transcription. Uses the same
+// logical Parakeet TDT v3 family as the macOS sidecar, backed by the LiteRT
+// INT8 bundle on Windows/Linux. The bundle is downloaded on first use unless
+// SONIQO_PARAKEET_BUNDLE_DIR points at a pre-provisioned directory.
+static std::unique_ptr<speech_core::LiteRTParakeetStt> g_parakeet;
+static std::string g_parakeet_dir;
+static std::string g_parakeet_model_id;
+
+static void on_parakeet_download_progress(const std::string& file, int idx, int count,
+                                          uint64_t downloaded, uint64_t total) {
+    static std::string last_file;
+    static int last_pct = -1;
+    if (last_file != file) {
+        last_file = file;
+        last_pct = -1;
+    }
+    const double file_fraction = total ? static_cast<double>(downloaded) / total : 0.0;
+    const double overall = count > 0
+        ? ((static_cast<double>(idx) + file_fraction) / static_cast<double>(count)) * 100.0
+        : file_fraction * 100.0;
+    const int pct = static_cast<int>(overall + 0.5);
+    if (pct != last_pct && (pct % 5 == 0 || pct == 100)) {
+        last_pct = pct;
+        std::string detail = "Downloading Parakeet";
+        if (total) detail += " " + format_mb(downloaded) + " / " + format_mb(total);
+        log_err("[sidecar] parakeet " + std::to_string(pct) + "% " + detail);
+    }
+}
+
+static bool parakeet_bundle_exists(const std::string& dir) {
+    return fs::exists(fs::path(dir) / "parakeet-encoder.tflite") &&
+           fs::exists(fs::path(dir) / "parakeet-decoder-joint.tflite") &&
+           fs::exists(fs::path(dir) / "vocab.json");
+}
+
+static std::string ensure_parakeet_bundle(std::string& model_id_out) {
+    std::string dir = env_or("SONIQO_PARAKEET_BUNDLE_DIR", "");
+    if (!dir.empty()) {
+        if (!parakeet_bundle_exists(dir)) {
+            throw std::runtime_error(
+                "Parakeet bundle not found at " + dir +
+                " (expected parakeet-encoder.tflite, parakeet-decoder-joint.tflite, vocab.json)");
+        }
+        model_id_out = env_or("SONIQO_PARAKEET_MODEL_ID",
+                              "soniqo/Parakeet-TDT-0.6B-v3-LiteRT-INT8");
+        return dir;
+    }
+
+    if (!speech_core::hf::download_supported()) {
+        throw std::runtime_error(
+            "SONIQO_PARAKEET_BUNDLE_DIR is unset and this speech-core build has no "
+            "model-download support (rebuild with -DSPEECH_CORE_WITH_HF_DOWNLOAD=ON)");
+    }
+
+    const std::string model_id = env_or("SONIQO_PARAKEET_MODEL_ID",
+                                        "soniqo/Parakeet-TDT-0.6B-v3-LiteRT-INT8");
+    const std::string dir_out = model_cache_root() + "/" + sanitize_repo_id(model_id);
+    if (parakeet_bundle_exists(dir_out)) {
+        model_id_out = model_id;
+        return dir_out;
+    }
+    const std::vector<std::string> files = {
+        "parakeet-encoder.tflite",
+        "parakeet-decoder-joint.tflite",
+        "vocab.json",
+        "config.json",
+    };
+    log_err("[sidecar] ensuring Parakeet ASR bundle " + model_id + " …");
+    speech_core::hf::download_bundle(
+        model_id, "main", files, dir_out, on_parakeet_download_progress);
+    if (!parakeet_bundle_exists(dir_out)) {
+        throw std::runtime_error("Parakeet bundle incomplete after download: " + dir_out);
+    }
+    model_id_out = model_id;
+    return dir_out;
+}
+
+static std::string ensure_parakeet_model() {
+    try {
+        std::string model_id;
+        const std::string dir = ensure_parakeet_bundle(model_id);
+        if (g_parakeet && g_parakeet_dir == dir) return "";
+        log_err("[sidecar] loading Parakeet LiteRT bundle from " + dir);
+        g_parakeet = std::make_unique<speech_core::LiteRTParakeetStt>(
+            dir + "/parakeet-encoder.tflite",
+            dir + "/parakeet-decoder-joint.tflite",
+            dir + "/vocab.json",
+            /*hw_accel=*/false);
+        g_parakeet_dir = dir;
+        g_parakeet_model_id = model_id;
+        log_err("[sidecar] parakeet ready");
+        return "";
+    } catch (const std::exception& e) {
+        g_parakeet.reset();
+        return std::string("Parakeet ASR load failed: ") + e.what();
+    }
+}
+
+static void handle_transcribe_parakeet(const json::Dict& req, const std::string& id) {
+    const std::string audio_path = get(req, "audioPath");
+    if (audio_path.empty()) {
+        emit_error(id, "transcribe_parakeet requires audioPath");
+        return;
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<float> audio;
+    int rate = 0;
+    if (!load_audio_mono(audio_path, audio, rate) || audio.empty()) {
+        emit_error(id, "could not decode audio: " + audio_path);
+        return;
+    }
+    std::vector<float> a16 = (rate == 16000)
+        ? std::move(audio)
+        : speech_core::Resampler::resample(audio.data(), audio.size(), rate, 16000);
+
+    if (std::string err = ensure_parakeet_model(); !err.empty()) {
+        emit_error(id, err);
+        return;
+    }
+    auto res = g_parakeet->transcribe(a16.data(), a16.size(), 16000);
+    const double duration = static_cast<double>(a16.size()) / 16000.0;
+    const double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started).count();
+    char numeric[160];
+    std::snprintf(numeric, sizeof(numeric),
+                  "\"sampleRate\":16000,\"durationSec\":%.6f,\"elapsedSec\":%.6f",
+                  duration, elapsed);
+    emit_line("{\"id\":\"" + json_escape(id) + "\",\"ok\":true,\"result\":{" +
+              "\"text\":\"" + json_escape(res.text) + "\"," +
+              "\"language\":\"" + json_escape(res.language) + "\"," +
+              "\"modelName\":\"parakeet-tdt-v3-0.6b-int8\"," +
+              "\"modelId\":\"" + json_escape(g_parakeet_model_id) + "\"," +
+              numeric + "}}");
+}
+
 static void handle_synthesize(const json::Dict& req, const std::string& id) {
     const std::string ref_path = get(req, "referenceAudioPath");
     const std::string text = get(req, "text");
@@ -485,6 +658,8 @@ int main() {
             handle_probe(req, id);
         } else if (command == "transcribe") {
             handle_transcribe(req, id);
+        } else if (command == "transcribe_parakeet") {
+            handle_transcribe_parakeet(req, id);
         } else {
             emit_error(id, "unknown command: " + command);
         }

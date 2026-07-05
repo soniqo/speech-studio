@@ -1,7 +1,6 @@
 import { useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { Lock, Unlock, Trash2, RefreshCw, History, Loader2 } from "lucide-react";
-import { useProjectStore } from "../state/projectStore";
+import { Lock, Unlock, Trash2, RefreshCw, History, Loader2, ListPlus } from "lucide-react";
+import { useProjectStore, newClip } from "../state/projectStore";
 import { ScriptEditor } from "./ScriptEditor";
 import { synthesizeClip } from "../ipc/commands";
 import { Button } from "./ui/button";
@@ -15,6 +14,8 @@ import {
   SelectValue,
 } from "./ui/select";
 import { cn } from "@/lib/utils";
+import { clipAudioVersion } from "../lib/clipAudio";
+import { mediaFileSrc } from "../lib/mediaSrc";
 import { dateLocale, type Messages } from "../i18n/messages";
 import { useI18n } from "../i18n/useI18n";
 
@@ -62,8 +63,12 @@ export function Inspector() {
   const updateClip = useProjectStore((s) => s.updateClip);
   const assignVoiceToTrack = useProjectStore((s) => s.assignVoiceToTrack);
   const removeClip = useProjectStore((s) => s.removeClip);
+  const addClip = useProjectStore((s) => s.addClip);
+  const select = useProjectStore((s) => s.select);
+  const setPlaying = useProjectStore((s) => s.setPlaying);
+  const seek = useProjectStore((s) => s.seek);
   const engine = useProjectStore((s) => s.model.engine);
-  const language = useProjectStore((s) => s.model.language);
+  const modelLanguage = useProjectStore((s) => s.model.language);
   const activeEngine = useProjectStore((s) =>
     s.model.engines.find((candidate) => candidate.id === s.model.engine),
   );
@@ -170,6 +175,34 @@ export function Inspector() {
               <Value className="break-all">{track.sourcePath}</Value>
             </Section>
           )}
+          {track.kind === "speaker" && (
+            <Section>
+              <Label>{t.inspector.lines(track.clips.length)}</Label>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="w-full"
+                onClick={() => {
+                  const lastEnd = track.clips.reduce(
+                    (max, c) => Math.max(max, c.endSec),
+                    0,
+                  );
+                  const startSec = track.clips.length > 0 ? lastEnd + 0.5 : 0;
+                  const clip = newClip({
+                    trackId: track.id,
+                    startSec,
+                    endSec: startSec + 2,
+                    text: "",
+                  });
+                  addClip(clip);
+                  select({ kind: "clip", id: clip.id });
+                }}
+              >
+                <ListPlus className="mr-1.5 h-3.5 w-3.5" />
+                {t.inspector.addLine}
+              </Button>
+            </Section>
+          )}
         </div>
       </aside>
     );
@@ -257,6 +290,7 @@ export function Inspector() {
   const needsReferenceTranscript =
     activeEngine?.requiresReferenceTranscript ??
     (engine === "cosyvoice" || engine === "qwen3" || engine === "fish-audio");
+  const language = activeEngine?.requiresLanguage ? modelLanguage : undefined;
   const transcriptEngineName = activeEngine?.displayName ?? t.inspector.selectedEngine;
   const canRegenerate =
     !isRegenerating &&
@@ -267,6 +301,8 @@ export function Inspector() {
 
   async function regenerate() {
     if (!effectiveVoice || !effectiveVoice.referenceAudioPath) return;
+    setPlaying(false);
+    seek(current.startSec);
     setIsRegenerating(true);
     setRegenError(null);
     setRegenTiming(null);
@@ -391,8 +427,8 @@ export function Inspector() {
           <Section>
             <Label>{t.inspector.preview}</Label>
             <audio
-              key={clip.renderedAudioPath}
-              src={convertFileSrc(clip.renderedAudioPath)}
+              key={`${clip.renderedAudioPath}:${clipAudioVersion(clip) ?? ""}`}
+              src={mediaFileSrc(clip.renderedAudioPath, clipAudioVersion(clip))}
               controls
               className="w-full"
             />

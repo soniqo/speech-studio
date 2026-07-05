@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
-import { AlertCircle, ArrowDownToLine, Loader2 } from "lucide-react";
+import { AlertCircle, ArrowDownToLine, Check, Loader2, Save } from "lucide-react";
 import { useProjectStore, type ModelLoadProgress, type ModelStatus } from "../state/projectStore";
 import { DevPing } from "./DevPing";
 import { ProjectsMenu } from "./ProjectsMenu";
 import { useSynthesizeAll, useUnsynthesizedCount } from "../hooks/useSynthesizeAll";
+import { useProjectSave } from "../hooks/useProjectSave";
 import { useUpdater } from "../hooks/useUpdater";
 import { exportProject, initModel, interruptModelLoad, type ExportClip, type TtsEngineId } from "../ipc/commands";
 import { Button } from "./ui/button";
@@ -14,7 +15,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { cn } from "@/lib/utils";
 import { clipAudioPath } from "../lib/clipAudio";
 import { clampPercent, formatPercent } from "../lib/formatPercent";
-import { LOCALES, localizeModelProgressMessage, type AppLocale } from "../i18n/messages";
+import { languageLabel } from "../lib/languageLabels";
+import { localizeModelProgressMessage, type AppLocale } from "../i18n/messages";
 import { useI18n } from "../i18n/useI18n";
 
 function formatElapsed(seconds: number, locale: AppLocale): string {
@@ -78,25 +80,19 @@ function ModelChip({
   status,
   error,
   engineName,
-  lastLoadDurationSec,
   progress,
 }: {
   status: ModelStatus;
   error?: string;
   engineName: string;
-  lastLoadDurationSec?: number;
   progress?: ModelLoadProgress;
 }) {
   const { locale, messages: t } = useI18n();
   const variant =
     status === "ready" ? "success" : status === "error" ? "destructive" : "muted";
-  const readySuffix =
-    status === "ready" && lastLoadDurationSec != null && lastLoadDurationSec >= 1
-      ? ` (${formatElapsed(lastLoadDurationSec, locale)})`
-      : "";
   const label =
     status === "ready"
-      ? t.model.ready(engineName, readySuffix)
+      ? t.model.ready(engineName, "")
       : status === "loading"
         ? progress
           ? `${engineName} ${formatPercent(progress.percent)}`
@@ -115,7 +111,10 @@ function ModelChip({
     <Badge
       variant={variant}
       title={title}
-      className={cn("relative overflow-hidden", status === "loading" && "pr-2.5")}
+      className={cn(
+        "relative shrink-0 overflow-hidden whitespace-nowrap",
+        status === "loading" && "pr-2.5",
+      )}
     >
       {status === "loading" && (
         <span className="absolute inset-x-0 bottom-0 h-0.5 overflow-hidden bg-muted-foreground/15">
@@ -142,23 +141,10 @@ function ModelChip({
   );
 }
 
-/** Languages a per-language engine (Chatterbox) can synthesize today. */
-const TTS_LANGUAGES: { id: string; label: string }[] = [
-  { id: "en", label: "English" },
-  { id: "ar", label: "العربية" },
-  { id: "hi", label: "हिन्दी" },
-  { id: "de", label: "Deutsch" },
-  { id: "es", label: "Español" },
-  { id: "fr", label: "Français" },
-  { id: "it", label: "Italiano" },
-  { id: "pt", label: "Português" },
-];
-
 export function TopBar() {
   const { locale, messages: t } = useI18n();
   const project = useProjectStore((s) => s.project);
   const renameProject = useProjectStore((s) => s.renameProject);
-  const setLocale = useProjectStore((s) => s.setLocale);
   const model = useProjectStore((s) => s.model);
   const setModelStatus = useProjectStore((s) => s.setModelStatus);
   const setTtsEngine = useProjectStore((s) => s.setTtsEngine);
@@ -166,6 +152,7 @@ export function TopBar() {
   const synthesisStatus = useProjectStore((s) => s.synthesisStatus);
   const synthesisProgress = useProjectStore((s) => s.synthesisProgress);
   const hasContent = project.tracks.length > 0;
+  const { dirty, saving, saveNow } = useProjectSave();
   const missingCount = useUnsynthesizedCount();
   const { run: runSynthesize } = useSynthesizeAll();
   const [actionError, setActionError] = useState<string | null>(null);
@@ -177,6 +164,15 @@ export function TopBar() {
   const modelStatus = model.status;
   const engineInfo = model.engines.find((candidate) => candidate.id === model.engine);
   const engineName = engineInfo?.displayName ?? "VoxCPM2";
+  const languageIds = engineInfo?.requiresLanguage ? engineInfo.languages : [];
+  const languageOptions = languageIds.map((id) => ({
+    id,
+    label: languageLabel(id),
+  }));
+  const selectedLanguage = languageIds.includes(model.language)
+    ? model.language
+    : languageIds[0];
+  const showLanguageSelector = languageOptions.length > 1 && !!selectedLanguage;
   const synthDisabled = synthBusy || modelStatus !== "ready" || !hasContent;
   const engineSwitchDisabled = synthBusy;
   const synthMode: "missing" | "all" = missingCount > 0 ? "missing" : "all";
@@ -271,42 +267,27 @@ export function TopBar() {
   }
 
   return (
-    <header className="flex h-11 items-center gap-3 border-b border-border bg-card/60 px-3 backdrop-blur supports-[backdrop-filter]:bg-card/40">
-      <div className="flex items-center gap-2.5 min-w-0">
-        <span className="flex items-center gap-2 text-sm">
+    <header className="flex h-11 items-center gap-3 overflow-hidden border-b border-border bg-card/60 px-3 backdrop-blur supports-[backdrop-filter]:bg-card/40">
+      <div className="flex min-w-0 shrink items-center gap-2.5">
+        <span className="flex shrink-0 items-center gap-2 text-sm">
           <img
             src="/soniqo.png"
             alt="Soniqo"
             className="h-6 w-6 shrink-0 rounded"
           />
-          <span className="font-semibold tracking-tight text-foreground">
+          <span className="hidden whitespace-nowrap font-semibold tracking-tight text-foreground xl:inline">
             Speech Studio
           </span>
         </span>
         <Input
-          className="h-7 max-w-[220px] text-xs"
+          className="h-7 w-[140px] min-w-[80px] shrink text-xs lg:w-[220px]"
           value={project.name}
           onChange={(e) => renameProject(e.target.value)}
           spellCheck={false}
         />
       </div>
-      <div className="ml-auto flex items-center gap-2">
+      <div className="ml-auto flex min-w-0 items-center gap-2">
         <UpdateChip />
-        <Select
-          value={locale}
-          onValueChange={(value) => setLocale(value as AppLocale)}
-        >
-          <SelectTrigger className="h-7 w-[104px] text-xs" title={t.locale.selectorTitle}>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {LOCALES.map((option) => (
-              <SelectItem key={option} value={option}>
-                {option === "ru" ? t.locale.russian : t.locale.english}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
         {model.engines.length > 1 && (
           <Select
             value={model.engine}
@@ -314,7 +295,7 @@ export function TopBar() {
             disabled={engineSwitchDisabled}
           >
             <SelectTrigger
-              className="h-7 w-[158px] text-xs"
+              className="h-7 w-[158px] shrink-0 text-xs"
               title={
                 modelStatus === "loading"
                   ? t.topBar.switchLoadingEngine(engineName)
@@ -332,20 +313,20 @@ export function TopBar() {
             </SelectContent>
           </Select>
         )}
-        {engineInfo?.requiresLanguage && (
+        {showLanguageSelector && (
           <Select
-            value={model.language}
+            value={selectedLanguage}
             onValueChange={(value) => setTtsLanguage(value)}
             disabled={synthBusy}
           >
             <SelectTrigger
-              className="h-7 w-[120px] text-xs"
+              className="h-7 w-[120px] shrink-0 text-xs"
               title={t.topBar.synthesisLanguageTitle}
             >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {TTS_LANGUAGES.map((lang) => (
+              {languageOptions.map((lang) => (
                 <SelectItem key={lang.id} value={lang.id}>
                   {lang.label}
                 </SelectItem>
@@ -357,11 +338,14 @@ export function TopBar() {
           status={modelStatus}
           error={model.error}
           engineName={engineName}
-          lastLoadDurationSec={model.lastLoadDurationSec}
           progress={model.progress}
         />
-        <DevPing />
-        <ProjectsMenu />
+        <div className="hidden shrink-0 2xl:flex">
+          <DevPing />
+        </div>
+        <div className="shrink-0">
+          <ProjectsMenu />
+        </div>
         {actionError && (
           <span
             className="flex items-center gap-1 truncate text-xs text-destructive max-w-[280px]"
@@ -376,6 +360,7 @@ export function TopBar() {
           size="sm"
           onClick={onSynthesize}
           disabled={synthDisabled}
+          className="min-w-0 max-w-[240px] shrink"
           title={
             modelStatus !== "ready"
               ? t.topBar.waitModel(engineName)
@@ -386,14 +371,32 @@ export function TopBar() {
                   : t.topBar.resynthesizeTitle
           }
         >
-          {synthBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-          {synthLabel}
+          {synthBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 shrink-0 animate-spin" />}
+          <span className="truncate">{synthLabel}</span>
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => void saveNow()}
+          disabled={!hasContent || (!dirty && !saving)}
+          className="shrink-0"
+          title={t.topBar.saveTitle}
+        >
+          {saving ? (
+            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+          ) : dirty ? (
+            <Save className="mr-1.5 h-3.5 w-3.5" />
+          ) : (
+            <Check className="mr-1.5 h-3.5 w-3.5 text-emerald-400" />
+          )}
+          {dirty || saving ? t.topBar.save : t.topBar.saved}
         </Button>
         <Button
           variant="default"
           size="sm"
           onClick={onExport}
           disabled={exportDisabled}
+          className="shrink-0"
           title={
             renderedCount === 0
               ? t.topBar.exportDisabledTitle

@@ -6,6 +6,7 @@ import CosyVoiceTTS
 import FishAudioTTS
 import IndicMioTTS
 import OmniVoiceTTS
+import ParakeetASR
 import Qwen3TTS
 import VoxCPM2TTS
 
@@ -23,6 +24,7 @@ import VoxCPM2TTS
 //   synthesize_indic_mio  — Indic-Mio Hindi/Indic emotion synthesis (24 kHz).
 //   synthesize_fish_audio — Fish Audio S2 Pro clone + bracket markers (44.1 kHz).
 //   synthesize_icl        — Qwen3-TTS ICL voice clone; legacy fallback only.
+//   transcribe_parakeet   — local dictation / transcription via Parakeet ASR.
 
 struct Request: Decodable {
     let id: String
@@ -30,8 +32,11 @@ struct Request: Decodable {
     // Selected backend. The Studio sends this for init_model and synthesis;
     // SONIQO_TTS_ENGINE remains a compatibility default for direct callers.
     let engine: String?
+    // Exact artifact selected by the Studio model registry.
+    let modelId: String?
     let text: String?
     let voiceId: String?
+    let audioPath: String?
     let referenceAudioPath: String?
     let referenceText: String?
     // Optional sampling overrides — used by the debug test to A/B params
@@ -49,8 +54,7 @@ struct Request: Decodable {
     let instruct: String?
     // VoxCPM2: classifier-free guidance scale (default 2.0).
     let cfgValue: Float?
-    // Chatterbox: BCP-47-ish language id for the `[lang]` token (e.g. "en",
-    // "ar", "hi"). Ignored by the other engines.
+    // Optional synthesis language for engines that declare requiresLanguage.
     let language: String?
     // Chatterbox: direct exaggeration override (emotion intensity). When nil the
     // handler maps the inline emotion marker to a value.
@@ -66,6 +70,15 @@ struct SynthResult: Encodable {
     let audioPath: String
     let sampleRate: Int
     let durationSec: Double
+}
+
+struct TranscribeResult: Encodable {
+    let text: String
+    let modelName: String
+    let modelId: String
+    let sampleRate: Int
+    let durationSec: Double
+    let elapsedSec: Double
 }
 
 struct InitResult: Encodable {
@@ -305,17 +318,17 @@ struct ModelDownloadFailure: LocalizedError, CustomStringConvertible {
 /// "(<instruct>){text}" before tokenising.
 final class VoxCPM2Holder: @unchecked Sendable {
     private var model: VoxCPM2TTSModel?
+    private var loadedModelId: String?
 
-    func load() async throws -> VoxCPM2TTSModel {
-        if let m = model { return m }
-        // Default variant: int8 (~2.75 GB on disk, ~3.1 GB MLX active). The
-        // bf16 variant is ~4.6 GB on disk / ~9 GB active and pushes total
-        // peak RSS above 11 GB on this 1.7B-param model. int8 stays under
-        // 6 GB peak with no audible loss for ICL voice cloning at the demo
-        // clip lengths. Override with
-        // SONIQO_VOXCPM2_MODEL_ID=aufklarer/VoxCPM2-MLX-<bf16|int4>.
-        let modelId = ProcessInfo.processInfo.environment["SONIQO_VOXCPM2_MODEL_ID"]
-            ?? "aufklarer/VoxCPM2-MLX-int8"
+    func load(modelId requestedId: String? = nil) async throws -> VoxCPM2TTSModel {
+        // Default variant: bf16. int8 remains available through
+        // SONIQO_VOXCPM2_MODEL_ID for explicit low-memory experiments, but the
+        // Studio default should not use quantized TTS when a 16-bit bundle exists.
+        let modelId = requestedId
+            ?? ProcessInfo.processInfo.environment["SONIQO_VOXCPM2_MODEL_ID"]
+            ?? VoxCPM2TTSModel.defaultModelId
+        if let m = model, loadedModelId == modelId { return m }
+        if model != nil { unload() }
         logErr("[sidecar] loading VoxCPM2 model \(modelId)…")
         let m: VoxCPM2TTSModel
         do {
@@ -340,6 +353,7 @@ final class VoxCPM2Holder: @unchecked Sendable {
                 modelDir: modelDir, tokenizerDir: tokenizerDir)
         }
         model = m
+        loadedModelId = modelId
         logErr("[sidecar] vox ready")
         return m
     }
@@ -347,6 +361,7 @@ final class VoxCPM2Holder: @unchecked Sendable {
     func unload() {
         model?.unload()
         model = nil
+        loadedModelId = nil
     }
 }
 
@@ -396,7 +411,7 @@ let chatterboxHolder = ChatterboxHolder()
 
 /// Lazily loaded OmniVoice model (NAR diffusion + Higgs codec). Cloning takes the
 /// reference clip + target text + a language id; a reference transcript is optional
-/// but improves prosody. The published int8 bundle is self-contained (backbone +
+/// but improves prosody. The published fp16 bundle is self-contained (backbone +
 /// codec + tokenizer).
 final class OmniVoiceHolder: @unchecked Sendable {
     private var model: OmniVoiceTTSModel?
@@ -439,6 +454,12 @@ let omnivoiceHolder = OmniVoiceHolder()
 final class IndicMioHolder: @unchecked Sendable {
     private var model: IndicMioTTSModel?
     private var loadedModelId: String?
+    // The global speaker embedding is a pure function of the reference audio,
+    // so cache it per reference path. WavLM (a heavy SSL transformer over the
+    // whole reference) then runs once per voice instead of once per synthesis
+    // — the dominant per-call cost. Reference paths are content-hashed, so a
+    // changed clip lands on a new key. Cleared whenever the model is swapped.
+    private var embeddingCache: [String: [Float]] = [:]
 
     func load(modelId requestedId: String? = nil) async throws -> IndicMioTTSModel {
         let modelId = requestedId
@@ -459,9 +480,29 @@ final class IndicMioHolder: @unchecked Sendable {
         return m
     }
 
+    /// Global speaker embedding for a reference, computed once per path and
+    /// reused thereafter. `model` must be the currently loaded instance so the
+    /// cache and the embedding space stay in sync.
+    func globalEmbedding(
+        using model: IndicMioTTSModel,
+        referencePath: String,
+        referenceAudio: [Float],
+        referenceSampleRate: Int
+    ) async throws -> (embedding: [Float], cached: Bool) {
+        if let cached = embeddingCache[referencePath] {
+            return (cached, true)
+        }
+        let embedding = try await model.extractGlobalEmbedding(
+            referenceAudio: referenceAudio,
+            referenceSampleRate: referenceSampleRate)
+        embeddingCache[referencePath] = embedding
+        return (embedding, false)
+    }
+
     func unload() {
         model = nil
         loadedModelId = nil
+        embeddingCache.removeAll()
     }
 }
 
@@ -502,6 +543,46 @@ final class FishAudioHolder: @unchecked Sendable {
 }
 
 let fishAudioHolder = FishAudioHolder()
+
+// MARK: - Parakeet ASR model state
+
+/// Lazily loaded Parakeet ASR model for dictation. It is separate from the
+/// voice-cloning engine selector: recording a transcript should not force the
+/// user to switch TTS models.
+final class ParakeetHolder: @unchecked Sendable {
+    private var model: ParakeetASRModel?
+    private var loadedModelId: String?
+
+    func load() async throws -> ParakeetASRModel {
+        if let m = model { return m }
+        let modelId = ProcessInfo.processInfo.environment["SONIQO_PARAKEET_ASR_MODEL_ID"]
+            ?? ParakeetASRModel.defaultModelId
+        logErr("[sidecar] loading Parakeet ASR model \(modelId)…")
+        let m = try await ParakeetASRModel.fromPretrained(
+            modelId: modelId,
+            progressHandler: { progress, message in
+                logProgress("parakeet", progress, message)
+            }
+        )
+        try m.warmUp()
+        model = m
+        loadedModelId = modelId
+        logErr("[sidecar] parakeet ready")
+        return m
+    }
+
+    func modelId() -> String {
+        loadedModelId ?? ProcessInfo.processInfo.environment["SONIQO_PARAKEET_ASR_MODEL_ID"]
+            ?? ParakeetASRModel.defaultModelId
+    }
+
+    func unload() {
+        model = nil
+        loadedModelId = nil
+    }
+}
+
+let parakeetHolder = ParakeetHolder()
 
 // Engine selector. CosyVoice is the default. SONIQO_TTS_ENGINE remains a
 // process-level compatibility override, but Studio chooses the engine per
@@ -567,17 +648,199 @@ func clipsCacheDir() -> URL {
     return dir
 }
 
-func padAudioEdges(_ samples: [Float], sampleRate: Int, leadInMs: Int, postRollMs: Int) -> [Float] {
+func conditionAudioEdges(
+    _ samples: [Float],
+    sampleRate: Int,
+    preTrimMs: Int = 0,
+    leadInMs: Int = 100,
+    postRollMs: Int = 240,
+    fadeInMs: Int = 40,
+    fadeOutMs: Int = 40
+) -> [Float] {
+    guard !samples.isEmpty else { return samples }
+
+    let preTrim = min(samples.count, max(0, sampleRate * preTrimMs / 1000))
+    var body = Array(samples.dropFirst(preTrim))
+    guard !body.isEmpty else { return samples }
+
+    let fadeIn = min(body.count, max(0, sampleRate * fadeInMs / 1000))
+    if fadeIn > 1 {
+        for i in 0..<fadeIn {
+            let t = Float(i) / Float(fadeIn - 1)
+            let gain = t * t * (3 - 2 * t)
+            body[i] *= gain
+        }
+    }
+
+    let fadeOut = min(body.count, max(0, sampleRate * fadeOutMs / 1000))
+    if fadeOut > 1 {
+        for i in 0..<fadeOut {
+            let idx = body.count - fadeOut + i
+            let t = 1 - Float(i) / Float(fadeOut - 1)
+            let gain = t * t * (3 - 2 * t)
+            body[idx] *= gain
+        }
+    }
+
     let lead = max(0, sampleRate * leadInMs / 1000)
     let tail = max(0, sampleRate * postRollMs / 1000)
-    guard lead > 0 || tail > 0 else { return samples }
+    guard lead > 0 || tail > 0 else { return body }
 
     var out = [Float]()
-    out.reserveCapacity(lead + samples.count + tail)
+    out.reserveCapacity(lead + body.count + tail)
     out.append(contentsOf: repeatElement(0.0, count: lead))
-    out.append(contentsOf: samples)
+    out.append(contentsOf: body)
     out.append(contentsOf: repeatElement(0.0, count: tail))
     return out
+}
+
+/// Remove non-speech junk some engines emit before the real speech onset.
+/// Two measured shapes of the same reference-dependent codec-boundary
+/// artifact: Qwen3 ICL opens Marek renders with ~100 ms of quiet
+/// fricative-like hiss (median ZCR ≈ 0.4, 25 dB below the speech peak);
+/// OmniVoice opens Anna renders with ~200 ms of low-frequency hum (median
+/// ZCR ≈ 0.02, 10–15 dB below the peak). Both are followed by a silence gap
+/// before the phrase. A fixed pre-trim can't cover them: the residue runs
+/// past 150 ms on affected renders while unaffected ones start voiced within
+/// 25 ms, so any constant either leaves junk or eats a first phoneme.
+///
+/// Detect instead: group audio into energy islands and drop leading islands
+/// that are short, clearly quieter than the clip's loudest island, and
+/// separated from what follows by a silence gap (a genuine onset phoneme
+/// hangs directly onto its word). Real first words live in islands hundreds
+/// of ms long, so the length + gap + quietness tests do the heavy lifting;
+/// see the two-tier shape test below for how the borderline loudness band
+/// is handled. Junk-free audio returns unchanged.
+func trimLeadingJunk(_ samples: [Float], sampleRate: Int) -> [Float] {
+    let win = max(1, sampleRate * 5 / 1000)  // 5 ms analysis windows
+    let total = samples.count / win
+    guard total > 8 else { return samples }
+
+    var dbs = [Float]()
+    var zcrs = [Float]()
+    dbs.reserveCapacity(total)
+    zcrs.reserveCapacity(total)
+    for i in 0..<total {
+        var energy: Float = 0
+        var crossings = 0
+        for j in (i * win)..<((i + 1) * win) {
+            energy += samples[j] * samples[j]
+            if j > i * win && (samples[j] < 0) != (samples[j - 1] < 0) {
+                crossings += 1
+            }
+        }
+        energy /= Float(win)
+        dbs.append(energy > 0 ? 10 * log10(energy) : -120)
+        zcrs.append(Float(crossings) / Float(win - 1))
+    }
+
+    // Islands: runs of windows above the noise floor, closed by ≥50 ms quiet.
+    // Track each island's peak and its median ZCR over above-floor windows.
+    let floorDb: Float = -60
+    let closeGap = 10
+    struct Island {
+        var start: Int
+        var end: Int
+        var peak: Float
+        var zcrSamples: [Float]
+        var medianZcr: Float {
+            let sorted = zcrSamples.sorted()
+            return sorted.isEmpty ? 0 : sorted[sorted.count / 2]
+        }
+    }
+    var islands = [Island]()
+    var open: Island?
+    var quiet = 0
+    for (i, db) in dbs.enumerated() {
+        if db > floorDb {
+            if open == nil {
+                open = Island(start: i, end: i, peak: db, zcrSamples: [])
+            }
+            open!.peak = max(open!.peak, db)
+            open!.zcrSamples.append(zcrs[i])
+            quiet = 0
+        } else if open != nil {
+            quiet += 1
+            if quiet >= closeGap {
+                open!.end = i - quiet + 1
+                islands.append(open!)
+                open = nil
+            }
+        }
+    }
+    if var last = open {
+        last.end = total
+        islands.append(last)
+    }
+    guard let maxPeak = islands.map(\.peak).max(), maxPeak > -40 else {
+        return samples
+    }
+
+    var trimIdx = 0
+    for (i, island) in islands.enumerated() {
+        // Junk shape, two tiers: ≥20 dB below the loudest island is
+        // unmistakably sub-speech (the Qwen hiss runs 27 dB down, and no
+        // intended word sits that far under its own clip's peak). Between
+        // 8 and 20 dB down (the OmniVoice hum: 10–15 dB), additionally
+        // require a pure low-frequency signature so short isolated words
+        // with any consonant content are spared. Median ZCR is amplitude-
+        // invariant, so fades and gain don't move it.
+        //
+        // Deliberately NOT gap-based: a quiet, short, gap-separated leading
+        // island can be a real whispered onset word (VoxCPM2 renders "Just, …"
+        // exactly that way), so trimming on the gap alone eats the first word.
+        let quietDb = maxPeak - island.peak
+        let shapeMatches = quietDb >= 20
+            || (quietDb >= 8 && island.medianZcr <= 0.06)
+        let isJunk = i < islands.count - 1
+            && island.start * 5 <= 800             // near the head of the clip
+            && (island.end - island.start) * 5 <= 300
+            && (islands[i + 1].start - island.end) * 5 >= 80  // gap after
+            && shapeMatches
+        if !isJunk {
+            // Trim only when junk islands were actually skipped, to just
+            // before the first real island — keeping 60 ms of natural
+            // lead-in ahead of the onset. Junk-free audio returns unchanged.
+            if i > 0 {
+                trimIdx = max(0, island.start - 12)
+            }
+            break
+        }
+    }
+    guard trimIdx > 0 else { return samples }
+    return Array(samples.dropFirst(trimIdx * win))
+}
+
+/// The onset pipeline every cloning engine runs before writing its WAV: strip
+/// leading codec/reference-boundary junk, then edge-condition. Several engines
+/// (reference- and seed-dependent) open a take with a short quiet blip and a
+/// silence gap before the first word — audible especially on quiet/whisper
+/// takes. trimLeadingJunk removes it and returns clean audio unchanged, so
+/// engines without junk are unaffected. `engine` labels the trim log line.
+func conditionSynthOutput(
+    _ generated: [Float],
+    sampleRate: Int,
+    engine: String,
+    preTrimMs: Int = 0,
+    leadInMs: Int = 100,
+    postRollMs: Int = 240,
+    fadeInMs: Int = 40,
+    fadeOutMs: Int = 40
+) -> [Float] {
+    let dejunked = trimLeadingJunk(generated, sampleRate: sampleRate)
+    if dejunked.count != generated.count {
+        let trimmedMs = (generated.count - dejunked.count) * 1000 / sampleRate
+        logErr("[sidecar] \(engine) onset junk: trimmed leading \(trimmedMs)ms")
+    }
+    return conditionAudioEdges(
+        dejunked,
+        sampleRate: sampleRate,
+        preTrimMs: preTrimMs,
+        leadInMs: leadInMs,
+        postRollMs: postRollMs,
+        fadeInMs: fadeInMs,
+        fadeOutMs: fadeOutMs
+    )
 }
 
 func safeFilename(_ s: String) -> String {
@@ -778,19 +1041,19 @@ while let line = readLine(strippingNewline: true) {
             activateEngine(engine)
             switch engine {
             case .voxcpm2:
-                _ = try await voxHolder.load()
+                _ = try await voxHolder.load(modelId: request.modelId)
             case .cosyvoice:
                 _ = try await cosyHolder.load()
             case .qwen3:
                 _ = try await holder.load()
             case .chatterbox:
-                _ = try await chatterboxHolder.load()
+                _ = try await chatterboxHolder.load(modelId: request.modelId)
             case .omnivoice:
-                _ = try await omnivoiceHolder.load()
+                _ = try await omnivoiceHolder.load(modelId: request.modelId)
             case .indicMio:
-                _ = try await indicMioHolder.load()
+                _ = try await indicMioHolder.load(modelId: request.modelId)
             case .fishAudio:
-                _ = try await fishAudioHolder.load()
+                _ = try await fishAudioHolder.load(modelId: request.modelId)
             }
             emit(SuccessResponse(
                 id: request.id,
@@ -799,6 +1062,44 @@ while let line = readLine(strippingNewline: true) {
             ))
         } catch {
             logErr("[sidecar] init_model failed: \(error)")
+            emit(ErrorResponse(id: request.id, ok: false, error: "\(error)"))
+        }
+
+    case "transcribe_parakeet":
+        guard let audioPath = request.audioPath, !audioPath.isEmpty else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "transcribe_parakeet requires audioPath"
+            ))
+            continue
+        }
+
+        do {
+            let model = try await parakeetHolder.load()
+            let started = CFAbsoluteTimeGetCurrent()
+            let audio = try AudioFileLoader.load(
+                url: URL(fileURLWithPath: audioPath),
+                targetSampleRate: 16000
+            )
+            let text = try model.transcribeAudio(audio, sampleRate: 16000, language: request.language)
+            let elapsed = CFAbsoluteTimeGetCurrent() - started
+            let durationSec = Double(audio.count) / 16000.0
+            logErr(String(format: "[sidecar] parakeet transcribed %.2fs in %.2fs", durationSec, elapsed))
+            emit(SuccessResponse(
+                id: request.id,
+                ok: true,
+                result: TranscribeResult(
+                    text: text,
+                    modelName: "parakeet-tdt-v3-0.6b-int8",
+                    modelId: parakeetHolder.modelId(),
+                    sampleRate: 16000,
+                    durationSec: durationSec,
+                    elapsedSec: elapsed
+                )
+            ))
+        } catch {
+            logErr("[sidecar] parakeet transcription failed: \(error)")
             emit(ErrorResponse(id: request.id, ok: false, error: "\(error)"))
         }
 
@@ -823,7 +1124,7 @@ while let line = readLine(strippingNewline: true) {
 
         do {
             activateEngine(.voxcpm2)
-            let model = try await voxHolder.load()
+            let model = try await voxHolder.load(modelId: request.modelId)
             let refURL = URL(fileURLWithPath: refPath)
             // VoxCPM2's AudioVAE runs at 16 kHz internally; load the ref at
             // that rate so it lines up byte-for-byte with the CLI recipe.
@@ -855,7 +1156,7 @@ while let line = readLine(strippingNewline: true) {
             // for short clips. Allow the Rust value through if smaller than
             // the library default; otherwise fall back to 2000.
             let maxTokens = request.maxTokens.map { Int($0) } ?? 2000
-            let audio = try await model.generateVoxCPM2(
+            let generatedAudio = try await model.generateVoxCPM2(
                 text: cleanText,
                 language: nil,
                 maxTokens: maxTokens,
@@ -873,6 +1174,7 @@ while let line = readLine(strippingNewline: true) {
 
             let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
             let sampleRate = model.sampleRate
+            let audio = conditionSynthOutput(generatedAudio, sampleRate: sampleRate, engine: "voxcpm2")
             try WAVWriter.write(samples: audio, sampleRate: sampleRate, to: outURL)
             let durationSec = Double(audio.count) / Double(sampleRate)
             logMemorySnapshot("post-vox-synth")
@@ -926,7 +1228,8 @@ while let line = readLine(strippingNewline: true) {
             let finalInstruct = request.instruct?.isEmpty == false
                 ? request.instruct!
                 : extractedInstruct ?? "You are a helpful assistant."
-            logErr("[sidecar] cosy synth voice=\(request.voiceId ?? "?") chars=\(cleanText.count) refSamples=\(refSamples.count) instruct=\(finalInstruct)")
+            let language = request.language?.isEmpty == false ? request.language! : "english"
+            logErr("[sidecar] cosy synth voice=\(request.voiceId ?? "?") lang=\(language) chars=\(cleanText.count) refSamples=\(refSamples.count) instruct=\(finalInstruct)")
 
             // Extract the voice profile from the reference.
             let profile = try cosyHolder.voiceProfile(
@@ -955,7 +1258,7 @@ while let line = readLine(strippingNewline: true) {
             // prompt_token + prompt_feat carries the voice.
             let rawAudio = model.synthesize(
                 text: cleanText,
-                language: "english",
+                language: language,
                 instruction: finalInstruct,
                 speakerEmbedding: nil,
                 promptToken: profile.promptToken,
@@ -969,14 +1272,15 @@ while let line = readLine(strippingNewline: true) {
             // trim. Skip when the output is shorter than the trim — the
             // unclipped audio is the only thing we've got.
             let extraTrimSamples = 7200
-            let audio: [Float]
+            let trimmedAudio: [Float]
             if rawAudio.count > extraTrimSamples * 2 {
-                audio = Array(rawAudio.dropFirst(extraTrimSamples))
+                trimmedAudio = Array(rawAudio.dropFirst(extraTrimSamples))
             } else {
-                audio = rawAudio
+                trimmedAudio = rawAudio
             }
 
             let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
+            let audio = conditionSynthOutput(trimmedAudio, sampleRate: 24000, engine: "cosyvoice")
             try WAVWriter.write(samples: audio, sampleRate: 24000, to: outURL)
 
             let durationSec = Double(audio.count) / 24000.0
@@ -1015,7 +1319,7 @@ while let line = readLine(strippingNewline: true) {
 
         do {
             activateEngine(.chatterbox)
-            let model = try await chatterboxHolder.load()
+            let model = try await chatterboxHolder.load(modelId: request.modelId)
             let refURL = URL(fileURLWithPath: refPath)
             // clone() resamples the reference to the rates it needs (24 kHz mel,
             // 16 kHz tokenizer) internally, so load it once at the mel rate.
@@ -1046,7 +1350,7 @@ while let line = readLine(strippingNewline: true) {
             // Greedy (temperature 0) for determinism. cfgWeight is derived above —
             // the request's cfgValue is VoxCPM2's CFG ladder (2.0+) and must NOT be
             // used as Chatterbox's classifier-free-guidance weight.
-            let audio = try model.clone(
+            let generatedAudio = try model.clone(
                 referenceSamples: refSamples,
                 sampleRate: ChatterboxS3Gen.sampleRate,
                 text: cleanText,
@@ -1058,6 +1362,7 @@ while let line = readLine(strippingNewline: true) {
 
             let sampleRate = ChatterboxS3Gen.sampleRate
             let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
+            let audio = conditionSynthOutput(generatedAudio, sampleRate: sampleRate, engine: "chatterbox")
             try WAVWriter.write(samples: audio, sampleRate: sampleRate, to: outURL)
             let durationSec = Double(audio.count) / Double(sampleRate)
             logMemorySnapshot("post-cbx-synth")
@@ -1096,7 +1401,7 @@ while let line = readLine(strippingNewline: true) {
 
         do {
             activateEngine(.omnivoice)
-            let model = try await omnivoiceHolder.load()
+            let model = try await omnivoiceHolder.load(modelId: request.modelId)
             // OmniVoice takes a restricted style instruction, so map the inline
             // marker to the closest valid vocabulary item and route it to the
             // model's instruct conditioning.
@@ -1113,7 +1418,7 @@ while let line = readLine(strippingNewline: true) {
             MLX.seed(seed)
             logErr("[sidecar] omni synth voice=\(request.voiceId ?? "?") lang=\(language) tag=\(emotionTag ?? "(none)") instruct=\(finalInstruct ?? "(none)") refText=\(request.referenceText != nil) chars=\(cleanText.count)")
 
-            let audio = try model.generate(
+            let generatedAudio = try model.generate(
                 text: cleanText,
                 referenceAudio: URL(fileURLWithPath: refPath),
                 referenceText: request.referenceText,
@@ -1125,6 +1430,7 @@ while let line = readLine(strippingNewline: true) {
 
             let sampleRate = model.sampleRate
             let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
+            let audio = conditionSynthOutput(generatedAudio, sampleRate: sampleRate, engine: "omnivoice")
             try WAVWriter.write(samples: audio, sampleRate: sampleRate, to: outURL)
             let durationSec = Double(audio.count) / Double(sampleRate)
             logMemorySnapshot("post-omni-synth")
@@ -1162,8 +1468,23 @@ while let line = readLine(strippingNewline: true) {
 
         do {
             activateEngine(.indicMio)
-            let model = try await indicMioHolder.load()
+            let model = try await indicMioHolder.load(modelId: request.modelId)
             let language = request.language ?? "hindi"
+            // Indic-Mio styles via a closed set of inline markers appended as
+            // a suffix tag ("… <sad>"). Map the Studio marker onto that
+            // vocabulary; unmapped markers are dropped rather than passed
+            // through — the model reads unknown parentheticals aloud.
+            let (cleanText, emotionTag, _) = extractFirstEmotionTag(targetText)
+            let indicMioMarkers: [String: String] = [
+                "happy": "happy",
+                "sad": "sad",
+                "angry": "angry",
+                "disgust": "disgust", "disgusted": "disgust",
+                "fear": "fear", "afraid": "fear", "scared": "fear",
+                "surprise": "surprise", "surprised": "surprise",
+            ]
+            let mioTag = emotionTag.flatMap { indicMioMarkers[$0.lowercased()] }
+            let finalText = mioTag.map { "\(cleanText) <\($0)>" } ?? cleanText
             let sampling = IndicMioSamplingConfig(
                 maxNewTokens: request.maxTokens ?? 500,
                 temperature: request.temperature ?? 0.3,
@@ -1171,30 +1492,38 @@ while let line = readLine(strippingNewline: true) {
                 topP: 0.9,
                 repetitionPenalty: request.repetitionPenalty ?? 1.0
             )
-            logErr("[sidecar] indic-mio synth voice=\(request.voiceId ?? "?") lang=\(language) chars=\(targetText.count)")
+            logErr("[sidecar] indic-mio synth voice=\(request.voiceId ?? "?") lang=\(language) tag=\(emotionTag ?? "(none)") marker=\(mioTag.map { "<\($0)>" } ?? "(none)") chars=\(cleanText.count)")
             let audio: [Float]
             if let refPath = request.referenceAudioPath, !refPath.isEmpty {
                 let refURL = URL(fileURLWithPath: refPath)
                 let refSamples = try AudioFileLoader.load(url: refURL, targetSampleRate: model.sampleRate)
-                logErr("[sidecar] indic-mio reference=\(refPath) samples=\(refSamples.count) @ \(model.sampleRate) Hz")
-                audio = try await model.generate(
-                    text: targetText,
-                    language: language,
+                // Encode the reference once per voice; every later line (and
+                // any re-render) reuses the cached speaker embedding instead of
+                // re-running WavLM over the whole clip.
+                let (embedding, cached) = try await indicMioHolder.globalEmbedding(
+                    using: model,
+                    referencePath: refPath,
                     referenceAudio: refSamples,
-                    referenceSampleRate: model.sampleRate,
+                    referenceSampleRate: model.sampleRate)
+                logErr("[sidecar] indic-mio reference=\(refPath) samples=\(refSamples.count) @ \(model.sampleRate) Hz embedding=\(cached ? "cached" : "computed")")
+                audio = try await model.generate(
+                    text: finalText,
+                    language: language,
+                    globalEmbedding: embedding,
                     sampling: sampling
                 )
             } else {
                 audio = try await model.generate(
-                    text: targetText,
+                    text: finalText,
                     language: language,
                     sampling: sampling
                 )
             }
             let sampleRate = model.sampleRate
             let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
-            try WAVWriter.write(samples: audio, sampleRate: sampleRate, to: outURL)
-            let durationSec = Double(audio.count) / Double(sampleRate)
+            let conditionedAudio = conditionSynthOutput(audio, sampleRate: sampleRate, engine: "indic-mio")
+            try WAVWriter.write(samples: conditionedAudio, sampleRate: sampleRate, to: outURL)
+            let durationSec = Double(conditionedAudio.count) / Double(sampleRate)
             logErr(String(format: "[sidecar] indic-mio wrote %.2fs → %@", durationSec, outURL.path))
 
             emit(SuccessResponse(
@@ -1233,7 +1562,7 @@ while let line = readLine(strippingNewline: true) {
 
         do {
             activateEngine(.fishAudio)
-            let model = try await fishAudioHolder.load()
+            let model = try await fishAudioHolder.load(modelId: request.modelId)
             let seed = request.seed ?? 1000
             MLX.seed(seed)
             let maxTokens = request.maxTokens ?? 256
@@ -1257,9 +1586,10 @@ while let line = readLine(strippingNewline: true) {
                 sampling: sampling
             )
             let sampleRate = model.sampleRate
-            let audio = padAudioEdges(
+            let audio = conditionSynthOutput(
                 generatedAudio,
                 sampleRate: sampleRate,
+                engine: "fish-audio",
                 leadInMs: 120,
                 postRollMs: 220
             )
@@ -1305,31 +1635,32 @@ while let line = readLine(strippingNewline: true) {
             let cleanText = stripEmotionTags(targetText)
             logErr("[sidecar] synth voice=\(request.voiceId ?? "?") chars=\(cleanText.count) refSamples=\(refSamples.count)")
 
-            // ICL voice clone. Default matches mlx-audio's working recipe:
-            // T=0.9, topK=50, topP=1.0, max_tokens=4096. The ICL path inside
-            // speech-swift then text-length-caps maxTokens and (with the
-            // current code) leaves repetition_penalty at whatever the caller
-            // set (1.05 default). Empirically T=0.9 produces ~75% per-line
-            // ASR coverage with the cleaned bundled references; greedy on
-            // this 8-bit quantized model produces 0% (degenerate sequences).
-            // Cross-process MLX-Metal variance is the residual issue, best
-            // handled with ASR-graded retry.
-            var sampling = SamplingConfig.default
-            if let t = request.temperature { sampling.temperature = t }
-            if let k = request.topK { sampling.topK = k }
-            if let m = request.maxTokens { sampling.maxTokens = m }
+            // Match speech-swift's CLI defaults for Qwen3. The previous 0.9
+            // default was too creative for ICL cloning in Studio: it produced
+            // onset junk and unstable EOS on otherwise clean references.
+            var sampling = SamplingConfig(
+                temperature: request.temperature ?? 0.3,
+                topK: request.topK ?? 50,
+                maxTokens: request.maxTokens ?? 500
+            )
             if let r = request.repetitionPenalty { sampling.repetitionPenalty = r }
-            logErr("[sidecar] sampling t=\(sampling.temperature) topK=\(sampling.topK) maxTok=\(sampling.maxTokens) rp=\(sampling.repetitionPenalty)")
-            let audio = model.synthesizeWithVoiceCloneICL(
+            let language = request.language?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let finalLanguage = language?.isEmpty == false ? language! : "english"
+            let seed = request.seed ?? 1000
+            MLX.seed(seed)
+            logErr("[sidecar] qwen seed=\(seed) language=\(finalLanguage) sampling t=\(sampling.temperature) topK=\(sampling.topK) maxTok=\(sampling.maxTokens) rp=\(sampling.repetitionPenalty)")
+            let generatedAudio = model.synthesizeWithVoiceCloneICL(
                 text: cleanText,
                 referenceAudio: refSamples,
                 referenceSampleRate: 24000,
                 referenceText: refText,
+                language: finalLanguage,
                 sampling: sampling,
                 codecEncoder: codecEncoder
             )
 
             let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
+            let audio = conditionSynthOutput(generatedAudio, sampleRate: 24000, engine: "qwen", preTrimMs: 20)
             try WAVWriter.write(samples: audio, sampleRate: 24000, to: outURL)
 
             let durationSec = Double(audio.count) / 24000.0

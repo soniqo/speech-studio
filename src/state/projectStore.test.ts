@@ -1,6 +1,35 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { newClip, useProjectStore } from "./projectStore";
 import { emptyProject, type SpeakerTrack, type VideoTrack } from "../types/project";
+import type { TtsEngineInfo } from "../ipc/commands";
+
+function engineInfo(
+  id: TtsEngineInfo["id"],
+  patch: Partial<TtsEngineInfo> = {},
+): TtsEngineInfo {
+  return {
+    id,
+    displayName: id,
+    modelName: id,
+    modelId: `test/${id}`,
+    modelSize: "test",
+    runtime: "MLX",
+    precision: "fp16",
+    languages: ["en"],
+    voiceProfileModes: ["reference-clone"],
+    requiresReferenceAudio: true,
+    requiresReferenceTranscript: false,
+    requiresLanguage: false,
+    styleMode: "instruction",
+    supportsInstruct: true,
+    supportedMarkers: [],
+    needsTrim: true,
+    sampleRate: 24_000,
+    usePolicy: "commercial-safe",
+    readiness: "production",
+    ...patch,
+  };
+}
 
 function speakerTrack(name = "Speaker 1"): SpeakerTrack {
   return {
@@ -31,6 +60,73 @@ beforeEach(() => {
 describe("projectStore model defaults", () => {
   it("starts on CosyVoice so macOS loads it by default", () => {
     expect(useProjectStore.getState().model.engine).toBe("cosyvoice");
+  });
+
+  it("normalizes the current language when engine descriptors arrive", () => {
+    useProjectStore.setState((s) => ({
+      model: { ...s.model, engine: "chatterbox", language: "xx" },
+    }));
+    useProjectStore
+      .getState()
+      .setAvailableTtsEngines([
+        engineInfo("chatterbox", { languages: ["hi", "en"], requiresLanguage: true }),
+      ]);
+    expect(useProjectStore.getState().model.language).toBe("hi");
+  });
+
+  it("uses the selected engine's first language when switching engines", () => {
+    useProjectStore.setState((s) => ({
+      model: {
+        ...s.model,
+        engine: "cosyvoice",
+        language: "ru",
+        engines: [
+          engineInfo("cosyvoice", { languages: ["en", "zh"] }),
+          engineInfo("chatterbox", { languages: ["hi", "en"], requiresLanguage: true }),
+        ],
+      },
+    }));
+    useProjectStore.getState().setTtsEngine("chatterbox");
+    expect(useProjectStore.getState().model.language).toBe("hi");
+  });
+
+  it("accepts only languages declared by the active language-aware engine", () => {
+    useProjectStore.setState((s) => ({
+      model: {
+        ...s.model,
+        engine: "cosyvoice",
+        language: "en",
+        engines: [
+          engineInfo("cosyvoice", {
+            languages: ["en", "zh"],
+            requiresLanguage: true,
+          }),
+        ],
+      },
+    }));
+    useProjectStore.getState().setTtsLanguage("zh");
+    expect(useProjectStore.getState().model.language).toBe("zh");
+
+    useProjectStore.getState().setTtsLanguage("ru");
+    expect(useProjectStore.getState().model.language).toBe("zh");
+  });
+
+  it("ignores language changes for engines that do not expose a language selector", () => {
+    useProjectStore.setState((s) => ({
+      model: {
+        ...s.model,
+        engine: "qwen3",
+        language: "en",
+        engines: [
+          engineInfo("qwen3", {
+            languages: ["zh", "en"],
+            requiresLanguage: false,
+          }),
+        ],
+      },
+    }));
+    useProjectStore.getState().setTtsLanguage("zh");
+    expect(useProjectStore.getState().model.language).toBe("en");
   });
 });
 

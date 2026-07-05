@@ -1,8 +1,8 @@
 import { useEffect, useRef } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useProjectStore } from "../state/projectStore";
 import type { Clip, Project } from "../types/project";
-import { clipAudioPath } from "../lib/clipAudio";
+import { clipAudioPath, clipAudioVersion } from "../lib/clipAudio";
+import { mediaFileSrc } from "../lib/mediaSrc";
 
 // A jump in positionSec larger than this is treated as a seek (we re-sync
 // the active clip's currentTime). Smaller jumps come from the playhead RAF
@@ -35,15 +35,17 @@ export function useAudioScheduler() {
       wanted.add(c.id);
       const path = clipAudioPath(c);
       if (!path) continue;
-      const expectedSrc = convertFileSrc(path);
+      const expectedSrc = mediaFileSrc(path, clipAudioVersion(c));
       const existing = map.get(c.id);
       if (!existing) {
         const a = new Audio(expectedSrc);
         a.preload = "auto";
+        a.load();
         map.set(c.id, a);
       } else if (existing.src !== expectedSrc) {
         existing.pause();
         existing.src = expectedSrc;
+        existing.load();
       }
     }
 
