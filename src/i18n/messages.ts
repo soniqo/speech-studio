@@ -119,6 +119,9 @@ const en = {
     switchLoadingEngine: (engine: string) =>
       `Switch engine and interrupt ${engine} loading`,
     switchEngineTitle: "Switches the loaded voice-cloning engine",
+    pickAnotherModel: "Pick another model",
+    pickAnotherModelTitle: (engine: string) =>
+      `${engine} failed to load — choose a different engine`,
     synthesisLanguageTitle: "Synthesis language for multilingual engines",
     waitModel: (engine: string) => `Wait for ${engine} to finish loading`,
     loadProjectFirst: "Load a project first",
@@ -384,6 +387,9 @@ const ru: typeof en = {
     exportFailed: (error) => `Не удалось экспортировать: ${error}`,
     switchLoadingEngine: (engine) => `Переключить движок и прервать загрузку ${engine}`,
     switchEngineTitle: "Переключает загруженный движок клонирования голоса",
+    pickAnotherModel: "Выбрать другую модель",
+    pickAnotherModelTitle: (engine) =>
+      `${engine} не загрузился — выберите другой движок`,
     synthesisLanguageTitle: "Язык синтеза для многоязычных движков",
     waitModel: (engine) => `Дождитесь завершения загрузки ${engine}`,
     loadProjectFirst: "Сначала загрузите проект",
