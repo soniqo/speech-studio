@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, FilePlus2, FolderOpen, Loader2, Sparkles, Trash2 } from "lucide-react";
 import { useProjectStore } from "../state/projectStore";
+import { useEngineSwitch } from "../hooks/useEngineSwitch";
 import { buildDemoProject, buildHindiDemoProject } from "../state/demoProject";
 import {
   deleteProject,
@@ -30,7 +31,7 @@ export function ProjectsMenu() {
   const project = useProjectStore((s) => s.project);
   const setProject = useProjectStore((s) => s.setProject);
   const resetProject = useProjectStore((s) => s.resetProject);
-  const setTtsEngine = useProjectStore((s) => s.setTtsEngine);
+  const switchEngine = useEngineSwitch();
   const savedSnapshot = useProjectStore((s) => s.savedSnapshot);
   const markSaved = useProjectStore((s) => s.markSaved);
   const setDemoProgress = useProjectStore((s) => s.setDemoProgress);
@@ -208,8 +209,11 @@ export function ProjectsMenu() {
     setProject(p);
     markSaved(JSON.stringify(p));
     setDemoProgress(null);
+    // Switch through the shared flow so the model actually initializes (and
+    // the TopBar chip reflects loading/error) instead of silently flipping
+    // the store and deferring the load to the first synthesis.
     if (engines.some((engine) => engine.id === "indic-mio")) {
-      setTtsEngine("indic-mio");
+      void switchEngine("indic-mio");
     }
   }
 

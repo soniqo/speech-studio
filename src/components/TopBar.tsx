@@ -7,7 +7,8 @@ import { ProjectsMenu } from "./ProjectsMenu";
 import { useSynthesizeAll, useUnsynthesizedCount } from "../hooks/useSynthesizeAll";
 import { useProjectSave } from "../hooks/useProjectSave";
 import { useUpdater } from "../hooks/useUpdater";
-import { exportProject, initModel, interruptModelLoad, type ExportClip, type TtsEngineId } from "../ipc/commands";
+import { useEngineSwitch } from "../hooks/useEngineSwitch";
+import { exportProject, type ExportClip, type TtsEngineId } from "../ipc/commands";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Badge } from "./ui/badge";
@@ -146,9 +147,8 @@ export function TopBar() {
   const project = useProjectStore((s) => s.project);
   const renameProject = useProjectStore((s) => s.renameProject);
   const model = useProjectStore((s) => s.model);
-  const setModelStatus = useProjectStore((s) => s.setModelStatus);
-  const setTtsEngine = useProjectStore((s) => s.setTtsEngine);
   const setTtsLanguage = useProjectStore((s) => s.setTtsLanguage);
+  const switchEngine = useEngineSwitch();
   const synthesisStatus = useProjectStore((s) => s.synthesisStatus);
   const synthesisProgress = useProjectStore((s) => s.synthesisProgress);
   const hasContent = project.tracks.length > 0;
@@ -156,6 +156,7 @@ export function TopBar() {
   const missingCount = useUnsynthesizedCount();
   const { run: runSynthesize } = useSynthesizeAll();
   const [actionError, setActionError] = useState<string | null>(null);
+  const [enginePickerOpen, setEnginePickerOpen] = useState(false);
 
   const synthBusy = synthesisStatus === "running";
   const synthElapsed = useElapsedSeconds(
@@ -205,24 +206,8 @@ export function TopBar() {
   }
 
   async function onEngineChange(next: TtsEngineId) {
-    if (next === model.engine || synthBusy) return;
     setActionError(null);
-    const wasLoading = useProjectStore.getState().model.status === "loading";
-    setTtsEngine(next);
-    setModelStatus("loading");
-    try {
-      if (wasLoading) {
-        await interruptModelLoad();
-      }
-      await initModel(next);
-      if (useProjectStore.getState().model.engine === next) {
-        setModelStatus("ready");
-      }
-    } catch (e) {
-      if (useProjectStore.getState().model.engine === next) {
-        setModelStatus("error", String(e));
-      }
-    }
+    await switchEngine(next);
   }
 
   // Flatten every rendered clip into the {startSec, audioPath} payload the
@@ -293,13 +278,17 @@ export function TopBar() {
             value={model.engine}
             onValueChange={(value) => void onEngineChange(value as TtsEngineId)}
             disabled={engineSwitchDisabled}
+            open={enginePickerOpen}
+            onOpenChange={setEnginePickerOpen}
           >
             <SelectTrigger
               className="h-7 w-[158px] shrink-0 text-xs"
               title={
                 modelStatus === "loading"
                   ? t.topBar.switchLoadingEngine(engineName)
-                  : t.topBar.switchEngineTitle
+                  : modelStatus === "error"
+                    ? t.topBar.pickAnotherModelTitle(engineName)
+                    : t.topBar.switchEngineTitle
               }
             >
               <SelectValue />
@@ -340,6 +329,18 @@ export function TopBar() {
           engineName={engineName}
           progress={model.progress}
         />
+        {modelStatus === "error" && model.engines.length > 1 && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setEnginePickerOpen(true)}
+            disabled={engineSwitchDisabled}
+            className="h-7 shrink-0 border-destructive/50 text-xs"
+            title={t.topBar.pickAnotherModelTitle(engineName)}
+          >
+            {t.topBar.pickAnotherModel}
+          </Button>
+        )}
         <div className="hidden shrink-0 2xl:flex">
           <DevPing />
         </div>
