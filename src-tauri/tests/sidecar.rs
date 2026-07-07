@@ -1,25 +1,44 @@
-// Integration tests for the Swift sidecar binary.
+// Integration tests for the platform sidecar binary.
 //
 // These tests spawn the actual sidecar process and exercise the NDJSON
 // protocol from outside the Tauri runtime. They live here rather than in
 // src/ because they cross the process boundary.
 //
 // Fast tests (ping, error handling) run on every `cargo test`. The
-// voice-cloning test is `#[ignore]`d — it loads the Qwen3-TTS model
-// (downloads ~300MB on first run) and takes 30s+ wall time. Run it
-// explicitly with `cargo test -- --ignored`.
+// voice-cloning tests are `#[ignore]`d — they load real TTS models and can
+// download model weights on first run. Run them explicitly with
+// `cargo test -- --ignored`.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
 fn sidecar_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("swift-sidecar")
 }
 
+#[cfg(target_os = "windows")]
+fn sidecar_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("core-sidecar")
+        .join("build")
+        .join("Release")
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn sidecar_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("core-sidecar")
+        .join("build")
+}
+
+#[cfg(target_os = "macos")]
 fn sidecar_binary() -> PathBuf {
     sidecar_dir()
         .join(".build")
@@ -27,6 +46,17 @@ fn sidecar_binary() -> PathBuf {
         .join("soniqo-tts-sidecar")
 }
 
+#[cfg(target_os = "windows")]
+fn sidecar_binary() -> PathBuf {
+    sidecar_dir().join("speech-core-tts-sidecar.exe")
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn sidecar_binary() -> PathBuf {
+    sidecar_dir().join("speech-core-tts-sidecar")
+}
+
+#[cfg(target_os = "macos")]
 fn ensure_sidecar_built() {
     if sidecar_binary().exists() {
         return;
@@ -43,6 +73,32 @@ fn ensure_sidecar_built() {
     );
 }
 
+#[cfg(not(target_os = "macos"))]
+fn ensure_sidecar_built() {
+    let binary = sidecar_binary();
+    assert!(
+        binary.exists(),
+        "sidecar binary missing at {}; run `cmake --build core-sidecar/build --config Release` first",
+        binary.display()
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+fn add_sidecar_runtime_path(command: &mut Command, dir: &Path) {
+    #[cfg(target_os = "windows")]
+    let var = "PATH";
+    #[cfg(not(target_os = "windows"))]
+    let var = "LD_LIBRARY_PATH";
+
+    let mut paths = vec![dir.to_path_buf()];
+    if let Some(existing) = std::env::var_os(var) {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        command.env(var, joined);
+    }
+}
+
 struct SidecarHandle {
     child: Child,
     stdin: std::process::ChildStdin,
@@ -52,12 +108,18 @@ struct SidecarHandle {
 impl SidecarHandle {
     fn spawn() -> Self {
         ensure_sidecar_built();
-        let mut child = Command::new(sidecar_binary())
+        let binary = sidecar_binary();
+        let mut command = Command::new(&binary);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("failed to spawn sidecar");
+            .stderr(Stdio::inherit());
+        if let Some(dir) = binary.parent() {
+            command.current_dir(dir);
+            #[cfg(not(target_os = "macos"))]
+            add_sidecar_runtime_path(&mut command, dir);
+        }
+        let mut child = command.spawn().expect("failed to spawn sidecar");
         let stdin = child.stdin.take().expect("stdin");
         let stdout = child.stdout.take().expect("stdout");
         SidecarHandle {
@@ -118,12 +180,22 @@ fn sidecar_rejects_unknown_command() {
 #[test]
 fn sidecar_rejects_synthesize_with_missing_fields() {
     let mut s = SidecarHandle::spawn();
-    s.send(&serde_json::json!({
-        "id": "bad",
-        "command": "synthesize_icl",
-        "text": "hi"
-        // referenceAudioPath + referenceText missing
-    }));
+    let payload = if cfg!(target_os = "macos") {
+        serde_json::json!({
+            "id": "bad",
+            "command": "synthesize_icl",
+            "text": "hi"
+            // referenceAudioPath + referenceText missing
+        })
+    } else {
+        serde_json::json!({
+            "id": "bad",
+            "command": "synthesize_voxcpm2",
+            "text": "hi"
+            // referenceAudioPath missing
+        })
+    };
+    s.send(&payload);
     let v = s.recv();
     assert_eq!(v["ok"], false);
     let err = v["error"].as_str().unwrap_or("");
@@ -1173,21 +1245,38 @@ fn indic_mio_does_not_speak_emotion_marker() {
 #[test]
 fn sidecar_rejects_engine_mismatch() {
     let mut s = SidecarHandle::spawn();
-    s.send(&serde_json::json!({
-        "id": "mismatch",
-        "command": "synthesize_omnivoice",
-        "engine": "qwen3",
-        "text": "hi",
-        "referenceAudioPath": "/nonexistent.wav",
-    }));
+    let payload = if cfg!(target_os = "macos") {
+        serde_json::json!({
+            "id": "mismatch",
+            "command": "synthesize_omnivoice",
+            "engine": "qwen3",
+            "text": "hi",
+            "referenceAudioPath": "/nonexistent.wav",
+        })
+    } else {
+        serde_json::json!({
+            "id": "mismatch",
+            "command": "init_model",
+            "engine": "omnivoice",
+        })
+    };
+    s.send(&payload);
     let v = s.recv();
     assert_eq!(v["ok"], false);
     let err = v["error"].as_str().unwrap_or("");
-    assert!(
-        err.contains("requires engine"),
-        "unexpected error: {}",
-        err
-    );
+    if cfg!(target_os = "macos") {
+        assert!(
+            err.contains("requires engine"),
+            "unexpected error: {}",
+            err
+        );
+    } else {
+        assert!(
+            err.contains("unsupported engine"),
+            "unexpected error: {}",
+            err
+        );
+    }
 }
 
 #[test]
@@ -1201,5 +1290,9 @@ fn sidecar_rejects_indic_mio_without_text() {
     let v = s.recv();
     assert_eq!(v["ok"], false);
     let err = v["error"].as_str().unwrap_or("");
-    assert!(err.contains("requires text"), "unexpected error: {}", err);
+    assert!(
+        err.contains("requires") && err.contains("text"),
+        "unexpected error: {}",
+        err
+    );
 }

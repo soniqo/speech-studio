@@ -2845,9 +2845,30 @@ mod tests {
         assert!(vox.languages.iter().any(|language| language == "hi"));
         assert!(vox.languages.iter().any(|language| language == "vi"));
         assert!(!vox.requires_language);
-        assert_eq!(vox.model_name, "voxcpm2-mlx-bf16");
-        assert_eq!(vox.model_id, "aufklarer/VoxCPM2-MLX-bf16");
-        assert_eq!(vox.precision, "bf16");
+        assert_eq!(
+            vox.model_name,
+            if cfg!(target_os = "macos") {
+                "voxcpm2-mlx-bf16"
+            } else {
+                "voxcpm2-litert-fp16"
+            }
+        );
+        assert_eq!(
+            vox.model_id,
+            if cfg!(target_os = "macos") {
+                "aufklarer/VoxCPM2-MLX-bf16"
+            } else {
+                "soniqo/VoxCPM2-LiteRT"
+            }
+        );
+        assert_eq!(
+            vox.precision,
+            if cfg!(target_os = "macos") {
+                "bf16"
+            } else {
+                "fp16"
+            }
+        );
 
         let cosy = tts_engine_info(TtsEngine::CosyVoice);
         assert!(cosy.requires_language);
