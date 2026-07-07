@@ -1300,10 +1300,20 @@ fn synth_one_line(
     Ok((audio_path, duration))
 }
 
-/// Words per synthesis chunk. VoxCPM2's AR quality drifts past ~15-20 s of
-/// continuous generation; ~14 words ≈ 4-7 s of speech keeps every chunk in
-/// the model's sweet spot regardless of total clip length.
-const MAX_CHUNK_WORDS: usize = 14;
+/// Words per synthesis chunk. Most AR engines stay clean around ~14 words
+/// (≈4-7 s of speech). Indic-Mio's current LiteRT prefill graph has a
+/// 64-token prompt bucket including the chat template, and dense Devanagari
+/// can spend several BPE tokens per word, so use a smaller word cap until the
+/// bundle moves to a wider prefill export.
+const DEFAULT_MAX_CHUNK_WORDS: usize = 14;
+const INDIC_MIO_MAX_CHUNK_WORDS: usize = 6;
+
+fn max_chunk_words(engine: TtsEngine) -> usize {
+    match engine {
+        TtsEngine::IndicMio => INDIC_MIO_MAX_CHUNK_WORDS,
+        _ => DEFAULT_MAX_CHUNK_WORDS,
+    }
+}
 
 /// Silence inserted between concatenated chunks (sentence gap).
 const CHUNK_GAP_SEC: f64 = 0.28;
@@ -1515,7 +1525,8 @@ async fn synthesize_clip(
     // AR state, concatenating with a natural gap. A single short text takes
     // the direct path (identical to the previous behavior).
     let (chunk_source, suffix_marker) = normalize_synthesis_text(args.engine, &processed_text);
-    let mut chunks = chunk_text_for_synthesis(&chunk_source, MAX_CHUNK_WORDS);
+    let chunk_word_limit = max_chunk_words(args.engine);
+    let mut chunks = chunk_text_for_synthesis(&chunk_source, chunk_word_limit);
     if let Some(marker) = suffix_marker.as_deref() {
         for chunk in &mut chunks {
             if args.engine == TtsEngine::FishAudio {
@@ -1553,7 +1564,7 @@ async fn synthesize_clip(
         "[synth] clip {} long-form: {} chunks (≤{} words each)",
         args.clip_id,
         chunks.len(),
-        MAX_CHUNK_WORDS
+        chunk_word_limit
     );
     let mut rendered: Vec<Vec<f32>> = Vec::new();
     let mut rate: u32 = 0;
@@ -2876,6 +2887,35 @@ mod tests {
         assert_eq!(omni.model_id, "aufklarer/OmniVoice-MLX-fp16");
         assert_eq!(omni.precision, "fp16");
 
+        let indic = tts_engine_info(TtsEngine::IndicMio);
+        assert_eq!(indic.style_mode, "suffix-tag");
+        assert_eq!(indic.sample_rate, 24_000);
+        assert!(!indic.requires_language);
+        assert_eq!(
+            indic.model_name,
+            if cfg!(target_os = "macos") {
+                "indic-mio-mlx-fp16"
+            } else {
+                "indic-mio-litert-fp16"
+            }
+        );
+        assert_eq!(
+            indic.model_id,
+            if cfg!(target_os = "macos") {
+                "aufklarer/Indic-Mio-MLX-fp16"
+            } else {
+                "soniqo/Indic-Mio-LiteRT"
+            }
+        );
+        assert_eq!(
+            indic.runtime,
+            if cfg!(target_os = "macos") {
+                "MLX"
+            } else {
+                "LiteRT"
+            }
+        );
+
         let fish = tts_engine_info(TtsEngine::FishAudio);
         assert_eq!(fish.style_mode, "bracket-tag");
         assert!(fish.languages.len() > 70);
@@ -3010,6 +3050,12 @@ mod tests {
     }
 
     #[test]
+    fn indic_mio_uses_smaller_chunks_for_litert_prompt_bucket() {
+        assert_eq!(max_chunk_words(TtsEngine::IndicMio), 6);
+        assert_eq!(max_chunk_words(TtsEngine::VoxCPM2), 14);
+    }
+
+    #[test]
     fn sidecar_language_normalization_preserves_chatterbox_hi() {
         assert_eq!(
             normalize_sidecar_language(TtsEngine::CosyVoice, Some("ru")).as_deref(),
@@ -3062,6 +3108,7 @@ mod tests {
             engine_is_supported(TtsEngine::CosyVoice),
             cfg!(target_os = "macos")
         );
+        assert!(engine_is_supported(TtsEngine::IndicMio));
     }
 
     // The clip cache must live under the app namespace and end in `clips`, so
@@ -3311,5 +3358,4 @@ mod tests {
         // 16-bit step is ~3e-5; allow generous margin.
         assert!(err < 1e-3, "mean abs error {err} too high");
     }
-
 }

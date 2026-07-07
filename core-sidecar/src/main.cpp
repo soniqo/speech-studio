@@ -6,14 +6,15 @@
 // one JSON object per line on stdout. The Rust side keeps one process alive so
 // the model stays warm; commands are dispatched on this single read loop.
 //
-// Engine: speech-core's VoxCPM2 LiteRT voice-cloning backend via the C ABI in
-// <speech_core/voxcpm2_c.h>. The model bundle (4 *.tflite + tokenizer.json)
-// directory is taken from SONIQO_VOXCPM2_BUNDLE_DIR.
+// Engines: speech-core LiteRT voice-cloning backends via the C ABI:
+// VoxCPM2 (<speech_core/voxcpm2_c.h>) and Indic-Mio
+// (<speech_core/indic_mio_c.h>).
 //
 // Commands:
 //   ping                 — health check.
-//   init_model           — create + warm the VoxCPM2 handle.
+//   init_model           — create + warm the requested TTS handle.
 //   synthesize_voxcpm2   — clone-and-synthesize a line; writes a 48 kHz WAV.
+//   synthesize_indic_mio — Hindi/Indic emotion synthesis; writes a 24 kHz WAV.
 //   probe_reference      — decode a reference clip, report rate/duration/
 //                          rms/peak (no model load). Used at clone time to
 //                          reject/warn on nearly-silent references.
@@ -23,6 +24,7 @@
 //   transcribe_parakeet  — user dictation / transcription with Parakeet TDT v3.
 
 #include <speech_core/voxcpm2_c.h>
+#include <speech_core/indic_mio_c.h>
 #include <speech_core/audio/resampler.h>
 #include <speech_core/models/litert_omnilingual_stt.h>
 #include <speech_core/models/litert_parakeet_stt.h>
@@ -176,10 +178,27 @@ static std::string format_mb(uint64_t bytes) {
 }
 
 // ---------------------------------------------------------------------------
-// VoxCPM2 model state (one warm handle across calls)
+// TTS model state (one warm handle across calls)
 // ---------------------------------------------------------------------------
 
 static sc_voxcpm2_t g_synth = nullptr;
+static sc_indic_mio_t g_indic_mio = nullptr;
+static std::string g_indic_mio_ref_path;
+
+static void unload_voxcpm2_model() {
+    if (g_synth) {
+        sc_voxcpm2_destroy(g_synth);
+        g_synth = nullptr;
+    }
+}
+
+static void unload_indic_mio_model() {
+    if (g_indic_mio) {
+        sc_indic_mio_destroy(g_indic_mio);
+        g_indic_mio = nullptr;
+    }
+    g_indic_mio_ref_path.clear();
+}
 
 // Throttled download progress → stderr (Rust captures it). Logs each file at
 // 10% steps so the user sees first-run download progress without log spam.
@@ -200,6 +219,28 @@ static void on_download_progress(const char* file, int idx, int count,
     }
 }
 
+static void on_indic_mio_download_progress(const char* file, int idx, int count,
+                                           uint64_t downloaded, uint64_t total,
+                                           void* /*ctx*/) {
+    static std::string last_file;
+    static int last_pct = -1;
+    if (file && last_file != file) {
+        last_file = file;
+        last_pct = -1;
+    }
+    const double file_fraction = total ? static_cast<double>(downloaded) / total : 0.0;
+    const double overall = count > 0
+        ? ((static_cast<double>(idx) + file_fraction) / static_cast<double>(count)) * 100.0
+        : file_fraction * 100.0;
+    const int pct = static_cast<int>(overall + 0.5);
+    if (pct != last_pct && (pct % 5 == 0 || pct == 100)) {
+        last_pct = pct;
+        std::string detail = "Downloading Indic-Mio";
+        if (total) detail += " " + format_mb(downloaded) + " / " + format_mb(total);
+        log_err("[sidecar] indic-mio " + std::to_string(pct) + "% " + detail);
+    }
+}
+
 // Create the warm handle if needed. Returns an error string on failure ("" = ok).
 //
 // Two modes, mirroring the macOS sidecar:
@@ -210,7 +251,11 @@ static void on_download_progress(const char* file, int idx, int count,
 //     it. This is the first-run auto-download path, like speech-swift's
 //     fromPretrained on macOS.
 static std::string ensure_model() {
-    if (g_synth) return "";
+    if (g_synth) {
+        unload_indic_mio_model();
+        return "";
+    }
+    unload_indic_mio_model();
 
     // Pre-flight RAM guard. The fp16 VoxCPM2-LiteRT bundle needs ~10 GiB
     // resident; on a smaller machine sc_voxcpm2_create() is OOM-killed mid-load
@@ -272,6 +317,54 @@ static std::string ensure_model() {
         on_download_progress, nullptr);
     if (!g_synth) return "failed to obtain VoxCPM2 bundle " + model_id + " (see stderr)";
     log_err("[sidecar] vox ready");
+    return "";
+}
+
+static bool indic_mio_bundle_exists(const std::string& dir) {
+    const fs::path root(dir);
+    return fs::exists(root / "indicmio-text-prefill.tflite") &&
+           fs::exists(root / "indicmio-token-step.tflite") &&
+           fs::exists(root / "indicmio-audio-decoder.tflite") &&
+           fs::exists(root / "indicmio-ref-encoder.tflite") &&
+           fs::exists(root / "tokenizer.json") &&
+           fs::exists(root / "config.json");
+}
+
+static std::string ensure_indic_mio_model() {
+    if (g_indic_mio) {
+        unload_voxcpm2_model();
+        return "";
+    }
+    unload_voxcpm2_model();
+
+    std::string dir = env_or("SONIQO_INDIC_MIO_BUNDLE_DIR", "");
+    if (!dir.empty()) {
+        if (!indic_mio_bundle_exists(dir)) {
+            return "Indic-Mio bundle not found at " + dir +
+                   " (expected indicmio-*.tflite, tokenizer.json, config.json)";
+        }
+        log_err("[sidecar] loading Indic-Mio LiteRT bundle from " + dir + " …");
+        g_indic_mio = sc_indic_mio_create(dir.c_str());
+        if (!g_indic_mio) return "sc_indic_mio_create failed for bundle " + dir + " (see stderr)";
+        sc_indic_mio_set_temperature(g_indic_mio, 0.3f);
+        log_err("[sidecar] indic-mio ready");
+        return "";
+    }
+
+    if (!sc_indic_mio_has_download_support()) {
+        return "SONIQO_INDIC_MIO_BUNDLE_DIR is unset and this speech-core build has no "
+               "model-download support (rebuild with -DSPEECH_CORE_WITH_HF_DOWNLOAD=ON)";
+    }
+    const std::string model_id = env_or("SONIQO_INDIC_MIO_MODEL_ID", "soniqo/Indic-Mio-LiteRT");
+    const std::string cache = env_or("SONIQO_MODEL_CACHE_DIR", "");
+    log_err("[sidecar] ensuring Indic-Mio bundle " + model_id +
+            " (first run downloads ~2.6 GB from Hugging Face)…");
+    g_indic_mio = sc_indic_mio_create_from_pretrained(
+        model_id.c_str(), "main", cache.empty() ? nullptr : cache.c_str(),
+        on_indic_mio_download_progress, nullptr);
+    if (!g_indic_mio) return "failed to obtain Indic-Mio bundle " + model_id + " (see stderr)";
+    sc_indic_mio_set_temperature(g_indic_mio, 0.3f);
+    log_err("[sidecar] indic-mio ready");
     return "";
 }
 
@@ -619,6 +712,97 @@ static void handle_synthesize(const json::Dict& req, const std::string& id) {
               "\"durationSec\":" + dur_buf + "}}");
 }
 
+static void handle_synthesize_indic_mio(const json::Dict& req, const std::string& id) {
+    const std::string ref_path = get(req, "referenceAudioPath");
+    const std::string text = get(req, "text");
+    if (ref_path.empty() || text.empty()) {
+        emit_error(id, "synthesize_indic_mio requires referenceAudioPath and text");
+        return;
+    }
+
+    std::vector<float> ref;
+    int ref_rate = 0;
+    const bool ref_cached = (g_indic_mio && g_indic_mio_ref_path == ref_path);
+    if (!ref_cached) {
+        if (!load_audio_mono(ref_path, ref, ref_rate) || ref.empty()) {
+            emit_error(id, "could not decode reference audio (supported: WAV, MP3, FLAC): " + ref_path);
+            return;
+        }
+    }
+
+    if (std::string err = ensure_indic_mio_model(); !err.empty()) {
+        emit_error(id, err);
+        return;
+    }
+
+    if (!ref_cached) {
+        if (sc_indic_mio_set_reference(g_indic_mio, ref.data(), ref.size(), ref_rate) != 0) {
+            g_indic_mio_ref_path.clear();
+            emit_error(id, std::string("set_reference failed: ") +
+                           sc_indic_mio_last_error(g_indic_mio));
+            return;
+        }
+        g_indic_mio_ref_path = ref_path;
+    }
+
+    uint32_t seed = static_cast<uint32_t>(get_int(req, "seed").value_or(1000));
+    long long max_new = get_int(req, "maxTokens").value_or(384);
+    if (max_new < 16) max_new = 16;
+    if (max_new > 384) max_new = 384;
+
+    sc_indic_mio_set_temperature(g_indic_mio, 0.3f);
+    sc_indic_mio_set_seed(g_indic_mio, seed);
+    sc_indic_mio_set_max_new_tokens(g_indic_mio, static_cast<int>(max_new));
+
+    std::string ref_detail;
+    if (ref_cached) {
+        ref_detail = " reference=cached";
+    } else {
+        const AudioStats ref_stats = compute_audio_stats(ref);
+        char ref_levels[96];
+        std::snprintf(ref_levels, sizeof(ref_levels),
+                      " refSamples=%zu refRate=%d refRms=%.6f refPeak=%.4f",
+                      ref.size(), ref_rate, ref_stats.rms,
+                      static_cast<double>(ref_stats.peak));
+        ref_detail = ref_levels;
+    }
+    log_err("[sidecar] indic-mio synth voice=" + get(req, "voiceId", "?") +
+            " chars=" + std::to_string(text.size()) +
+            ref_detail +
+            " seed=" + std::to_string(seed) +
+            " maxNewTokens=" + std::to_string(max_new));
+
+    std::vector<float> audio;
+    int rc = sc_indic_mio_synthesize(g_indic_mio, text.c_str(), on_chunk, &audio);
+    if (rc != 0) {
+        emit_error(id, std::string("synthesize failed: ") +
+                       sc_indic_mio_last_error(g_indic_mio));
+        return;
+    }
+    if (audio.empty()) {
+        emit_error(id, "synthesis produced no audio");
+        return;
+    }
+
+    int sample_rate = sc_indic_mio_output_sample_rate(g_indic_mio);
+    fs::path out = clips_cache_dir() / (safe_filename(id) + ".wav");
+    if (!write_wav(out.string(), audio.data(), audio.size(), sample_rate)) {
+        emit_error(id, "could not write output WAV: " + out.string());
+        return;
+    }
+    double duration = static_cast<double>(audio.size()) / static_cast<double>(sample_rate);
+    log_err("[sidecar] indic-mio wrote " + std::to_string(sc_indic_mio_tokens_generated(g_indic_mio)) +
+            " tokens, eos=" + (sc_indic_mio_stopped_on_eos(g_indic_mio) ? "1" : "0") +
+            " seedUsed=" + std::to_string(sc_indic_mio_seed_used(g_indic_mio)));
+
+    char dur_buf[64];
+    std::snprintf(dur_buf, sizeof(dur_buf), "%.6f", duration);
+    emit_line("{\"id\":\"" + json_escape(id) + "\",\"ok\":true,\"result\":{" +
+              "\"audioPath\":\"" + json_escape(out.string()) + "\"," +
+              "\"sampleRate\":" + std::to_string(sample_rate) + "," +
+              "\"durationSec\":" + dur_buf + "}}");
+}
+
 int main() {
 #if defined(_WIN32)
     // Keep '\n' from being translated to "\r\n" on stdout and avoid CRLF
@@ -645,7 +829,16 @@ int main() {
             emit_line("{\"id\":\"" + json_escape(id) +
                       "\",\"ok\":true,\"result\":{\"pong\":true,\"version\":\"0.1.0\"}}");
         } else if (command == "init_model") {
-            if (std::string err = ensure_model(); !err.empty()) {
+            const std::string engine = get(req, "engine", "voxcpm2");
+            std::string err;
+            if (engine == "voxcpm2") {
+                err = ensure_model();
+            } else if (engine == "indic-mio") {
+                err = ensure_indic_mio_model();
+            } else {
+                err = "unsupported engine on this sidecar: " + engine;
+            }
+            if (!err.empty()) {
                 log_err("[sidecar] init_model failed: " + err);
                 emit_error(id, err);
             } else {
@@ -654,6 +847,8 @@ int main() {
             }
         } else if (command == "synthesize_voxcpm2") {
             handle_synthesize(req, id);
+        } else if (command == "synthesize_indic_mio") {
+            handle_synthesize_indic_mio(req, id);
         } else if (command == "probe_reference") {
             handle_probe(req, id);
         } else if (command == "transcribe") {
@@ -665,6 +860,7 @@ int main() {
         }
     }
 
-    if (g_synth) sc_voxcpm2_destroy(g_synth);
+    unload_voxcpm2_model();
+    unload_indic_mio_model();
     return 0;
 }

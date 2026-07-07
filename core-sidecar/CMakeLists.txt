@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 project(speech_core_tts_sidecar VERSION 0.0.2 LANGUAGES CXX)
 
 # Cross-platform (Linux/Windows) TTS sidecar for Speech Studio. Mirrors the
-# macOS Swift sidecar's NDJSON protocol but drives speech-core's VoxCPM2 LiteRT
-# voice-cloning backend through the C ABI in <speech_core/voxcpm2_c.h>.
+# macOS Swift sidecar's NDJSON protocol but drives speech-core LiteRT
+# voice-cloning backends through the VoxCPM2 and Indic-Mio C ABIs.
 #
 # We link speech-core's PREBUILT static libs rather than re-compiling the whole
 # engine: a downstream build dir already exists (built with
@@ -64,6 +64,28 @@ endif()
 # + a *-static-md triplet); on Linux it's the system libcurl.
 find_package(CURL REQUIRED)
 
+# utf8proc — pulled in by speech-core's Indic-Mio tokenizer. Like curl, this is
+# a PRIVATE dependency of the prebuilt static speech-core lib, so the sidecar
+# must link it explicitly.
+find_package(utf8proc QUIET)
+if(NOT utf8proc_FOUND)
+    include(FetchContent)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+    FetchContent_Declare(utf8proc
+        GIT_REPOSITORY https://github.com/JuliaStrings/utf8proc.git
+        GIT_TAG        v2.11.0)
+    set(UTF8PROC_INSTALL OFF CACHE BOOL "" FORCE)
+    set(UTF8PROC_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(utf8proc)
+endif()
+if(TARGET utf8proc)
+    set(SIDECAR_UTF8PROC_LIB utf8proc)
+elseif(TARGET utf8proc::utf8proc)
+    set(SIDECAR_UTF8PROC_LIB utf8proc::utf8proc)
+else()
+    message(FATAL_ERROR "utf8proc target not found")
+endif()
+
 # --- Sidecar executable ------------------------------------------------------
 add_executable(speech-core-tts-sidecar src/main.cpp src/audio_decode.cpp src/sidecar_text.cpp src/sidecar_sysinfo.cpp)
 target_include_directories(speech-core-tts-sidecar PRIVATE
@@ -77,6 +99,7 @@ target_link_libraries(speech-core-tts-sidecar PRIVATE
     "${SPEECH_CORE_MODELS_LITERT_LIB}"
     "${SPEECH_CORE_LIB}"
     litert
+    ${SIDECAR_UTF8PROC_LIB}
     CURL::libcurl)
 
 if(MSVC)

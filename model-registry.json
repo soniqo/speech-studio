@@ -279,7 +279,21 @@
       "usePolicy": "commercial-safe",
       "readiness": "production",
       "sidecarCommand": "synthesize_indic_mio",
-      "macosOnly": true
+      "macosOnly": false,
+      "platformOverrides": {
+        "linux": {
+          "modelName": "indic-mio-litert-fp16",
+          "modelId": "soniqo/Indic-Mio-LiteRT",
+          "runtime": "LiteRT",
+          "precision": "fp16"
+        },
+        "windows": {
+          "modelName": "indic-mio-litert-fp16",
+          "modelId": "soniqo/Indic-Mio-LiteRT",
+          "runtime": "LiteRT",
+          "precision": "fp16"
+        }
+      }
     },
     {
       "id": "fish-audio",
