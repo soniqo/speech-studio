@@ -30,11 +30,11 @@
 - **Tauri 2** 外壳（Rust + 操作系统原生 WebView），因此发布的应用是一个小巧的原生二进制，而非 Chromium 分支。
 - **React + Vite** 前端，负责时间轴、音色库与脚本编辑器。
 - **常驻的 sidecar 进程**让语音引擎保持加载状态，因此首次预热后逐行合成很快。Tauri 启动它一次，并通过 stdin/stdout 以 NDJSON 通信。在 macOS 上是 **Swift sidecar**（`swift-sidecar/`，MLX）；在 Windows/Linux 上是 **C++ sidecar**（`core-sidecar/`，LiteRT）。
-- **CosyVoice 3** 是 macOS 上的默认引擎，经由 [`speech-swift`](https://github.com/soniqo/speech-swift)（MLX）运行。Windows/Linux 默认使用 **VoxCPM2**，经由 [`speech-core`](https://github.com/soniqo/speech-core)（LiteRT）运行。在 macOS 上可从工具栏切换引擎：**VoxCPM2**、**Qwen3-TTS**、**Chatterbox**（支持 23 种语言的多语言克隆）、**OmniVoice**（600+ 语言克隆）、**Indic-Mio**（Hindi/Indic 情感标签）以及 **Fish Audio S2 Pro**（实验性克隆 + 方括号标记）。这些 MLX 引擎仅限 macOS；Windows/Linux 仅运行 VoxCPM2。
+- **CosyVoice 3** 是 macOS 上的默认引擎，经由 [`speech-swift`](https://github.com/soniqo/speech-swift)（MLX）运行。Windows/Linux 默认使用 **VoxCPM2**，经由 [`speech-core`](https://github.com/soniqo/speech-core)（LiteRT）运行。工具栏会按当前系统显示可用引擎：macOS 包含 **VoxCPM2**、**Qwen3-TTS**、**Chatterbox**（支持 23 种语言的多语言克隆）、**OmniVoice**（600+ 语言克隆）、**Indic-Mio**（Hindi/Indic 情感标签）以及 **Fish Audio S2 Pro**（实验性克隆 + 方括号标记）；Windows/Linux 当前通过 LiteRT 提供 **VoxCPM2** 与 **Indic-Mio**。
 
 ## 引擎
 
-从工具栏下拉框切换引擎（仅 macOS——Windows/Linux 始终使用 VoxCPM2，因此不显示下拉框）。
+从工具栏下拉框切换引擎。列表会按当前操作系统过滤。
 
 | 引擎 | 平台 | 后端 | 语音克隆 | 情感标记 | 语言数 |
 |---|---|---|:---:|---|:---:|
@@ -43,16 +43,16 @@
 | **Qwen3-TTS** | 仅 macOS | MLX | ✅（ICL） | — | 10 |
 | **Chatterbox** | 仅 macOS | MLX | ✅ | 仅强度¹ | 23 |
 | **OmniVoice** | 仅 macOS | MLX | ✅ | 受限指令² | 600+ |
-| **Indic-Mio** | 仅 macOS | MLX | ✅³ | 后缀标签 | Indic |
+| **Indic-Mio** | macOS · Windows · Linux | MLX / LiteRT | ✅³ | 后缀标签 | Indic |
 | **Fish Audio S2 Pro** | 仅 macOS | MLX | ✅⁴ | 方括号标签 | 80+ |
 
-MLX 引擎（CosyVoice 3、Qwen3-TTS、Chatterbox、OmniVoice、Indic-Mio、Fish Audio S2 Pro）仅限 **macOS**；Windows/Linux 通过 speech-core 的 LiteRT 后端运行 VoxCPM2。
+CosyVoice 3、Qwen3-TTS、Chatterbox、OmniVoice 与 Fish Audio S2 Pro 在 Studio 中仍仅限 **macOS**。VoxCPM2 与 Indic-Mio 也可在 Windows/Linux 上通过 speech-core 的 LiteRT 后端运行。
 
 ¹ Chatterbox 没有自由文本风格输入——情感标记映射为表现力/强度级别（更强或更弱），而非具体某种情感。
 
 ² OmniVoice 支持口音、年龄、性别、音高、耳语等语音设计属性。Studio 只传入它合法的 `instruct` 词表项：`whisper` 会直接映射，其他情感标记会近似映射为音高提示（如 `high pitch`、`low pitch`）。强情感只是近似，不是真正的情绪表演控制。
 
-³ Indic-Mio 作为实验性 Hindi/Indic 情感标签引擎暴露。它使用 `<happy>` / `<angry>` 这类后缀标签，并通过 WavLM → MioCodec 全局说话人嵌入从参考音频克隆；不需要参考文本。
+³ Indic-Mio 作为实验性 Hindi/Indic 情感标签引擎暴露。它使用 `<happy>` / `<angry>` 这类后缀标签，并通过 WavLM → MioCodec 全局说话人嵌入从参考音频克隆；不需要参考文本。Windows/Linux 使用 `soniqo/Indic-Mio-LiteRT` 模型包，并输出 24 kHz WAV 片段。
 
 ⁴ Fish Audio S2 Pro 使用 `[excited]`、`[angry]`、`[whisper]` 这类方括号标签。克隆需要准确的参考文本；公开权重为研究/非商业用途，商业使用需要单独授权。
 
@@ -96,10 +96,10 @@ MLX 引擎（CosyVoice 3、Qwen3-TTS、Chatterbox、OmniVoice、Indic-Mio、Fish
 每个平台都会在**首次运行时下载语音模型**并缓存，因此安装包本身很小：
 
 - **macOS** — `.dmg`（约 46 MB）；拖入 `/Applications`。首次运行会将 CosyVoice 3 的 MLX 权重下载到 `~/Library/Caches/qwen3-speech/`；之后选择 VoxCPM2 时会再下载约 2.75 GB 的 VoxCPM2 MLX 权重。
-- **Windows** — `.msi` 或 NSIS `-setup.exe`。首次运行会将约 8.8 GB 的 VoxCPM2-LiteRT 模型包下载到 `%LOCALAPPDATA%\speech-core`。
-- **Linux** — `.deb` 或 `.AppImage`。首次运行会将同样的模型包下载到 `~/.cache/speech-core`。
+- **Windows** — `.msi` 或 NSIS `-setup.exe`。首次选择的 LiteRT 引擎会下载到 `%LOCALAPPDATA%\speech-core`：VoxCPM2-LiteRT 约 8.8 GB；Indic-Mio-LiteRT 约 2.6 GB。
+- **Linux** — `.deb` 或 `.AppImage`。首次选择的 LiteRT 引擎会下载到 `~/.cache/speech-core`：VoxCPM2-LiteRT 约 8.8 GB；Indic-Mio-LiteRT 约 2.6 GB。
 
-Windows/Linux 的 LiteRT 模型包为 fp16 格式，加载时约需 **10 GiB 空闲内存** —— 8 GB 内存的机器可能不够。
+VoxCPM2 LiteRT 模型包为 fp16 格式，加载时约需 **10 GiB 空闲内存** —— 8 GB 内存的机器可能不够。Indic-Mio LiteRT 的磁盘占用更小，但加载后仍会常驻数 GB 内存。
 
 **macOS 构建已签名并经过公证**（自 v0.0.5 起）——像普通应用一样直接打开，无需绕过 Gatekeeper。Windows 安装包仍未签名：SmartScreen 需要点击 *More info → Run anyway*。
 
@@ -132,7 +132,7 @@ hf download openbmb/VoxCPM2 \
 通用：通过 `rustup` 安装的 Rust 1.95+（若 `cargo` 不在 `PATH` 中，执行 `. "$HOME/.cargo/env"`）、Node 20+ 与 `pnpm` 11+。
 
 - **macOS：** Apple Silicon（M1/M2/M3/M4）上的 macOS 15+，Xcode 26+（Swift 6.0 工具链）。
-- **Windows / Linux（x86_64）：** C++17 工具链 + CMake 3.16+，以及一个已构建并启用 LiteRT 后端的 [`speech-core`](https://github.com/soniqo/speech-core) 检出（`-DSPEECH_CORE_WITH_LITERT=ON -DLITERT_DIR=...`），外加 `VoxCPM2-LiteRT` 模型包。
+- **Windows / Linux（x86_64）：** C++17 工具链 + CMake 3.16+，以及一个已构建并启用 LiteRT 后端（`-DSPEECH_CORE_WITH_LITERT=ON -DLITERT_DIR=...`）和 HF 下载器（`-DSPEECH_CORE_WITH_HF_DOWNLOAD=ON`）的 [`speech-core`](https://github.com/soniqo/speech-core) 检出，或本地 VoxCPM2 / Indic-Mio LiteRT 模型包。
 
 ### 开发循环 — macOS
 
@@ -151,10 +151,16 @@ pnpm install
 # 针对你的 speech-core 检出构建 C++ sidecar（默认为 ../speech-core）：
 cmake -B core-sidecar/build core-sidecar -DSPEECH_CORE_DIR=../speech-core
 cmake --build core-sidecar/build --config Release
-# 指向 VoxCPM2-LiteRT 模型包，然后启动：
+# 可选：指向已预下载的模型包，跳过首次 Hugging Face 下载：
 export SONIQO_VOXCPM2_BUNDLE_DIR=/path/to/speech-core/scripts/models-voxcpm2
+export SONIQO_INDIC_MIO_BUNDLE_DIR=/path/to/Indic-Mio-LiteRT
+# 可选：直接以 Indic-Mio 启动，并调整并行下载连接数：
+export VITE_TTS_ENGINE=indic-mio
+export SPEECH_CORE_DOWNLOAD_CONNECTIONS=4
 pnpm tauri dev
 ```
+
+在 Windows PowerShell 中，先执行 `$env:VITE_TTS_ENGINE="indic-mio"` / `$env:SPEECH_CORE_DOWNLOAD_CONNECTIONS="4"`，再运行 `pnpm tauri dev`。
 
 ### 内存占用
 
@@ -185,7 +191,7 @@ cd .. && pnpm tauri build             # 在 src-tauri/target/release/bundle/ 下
 ## 同级仓库
 
 - [`speech-swift`](https://github.com/soniqo/speech-swift) — Apple Silicon 语音引擎（VoxCPM2、CosyVoice3、Qwen3-TTS、Chatterbox、OmniVoice、Indic-Mio、Fish Audio S2 Pro、Parakeet、Silero VAD）。
-- [`speech-core`](https://github.com/soniqo/speech-core) — C++ 引擎（Windows/Linux 上的 VoxCPM2 克隆，以及 STT、VAD、降噪）。
+- [`speech-core`](https://github.com/soniqo/speech-core) — C++ 引擎（Windows/Linux 上的 VoxCPM2 与 Indic-Mio 克隆，以及 STT、VAD、降噪）。
 
 ## 贡献
 

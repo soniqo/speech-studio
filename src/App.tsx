@@ -38,7 +38,11 @@ export default function App() {
         const engines = await availableTtsEngines();
         setAvailableTtsEngines(engines);
         let engine = useProjectStore.getState().model.engine;
-        if (!engines.some((candidate) => candidate.id === engine)) {
+        const configuredEngine = import.meta.env.VITE_TTS_ENGINE as TtsEngineId | undefined;
+        if (configuredEngine && engines.some((candidate) => candidate.id === configuredEngine)) {
+          engine = configuredEngine;
+          setTtsEngine(engine);
+        } else if (!engines.some((candidate) => candidate.id === engine)) {
           engine = engines[0]?.id ?? "voxcpm2";
           setTtsEngine(engine);
         }

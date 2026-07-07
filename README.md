@@ -30,11 +30,11 @@ The clone is local. The synth is local. No audio leaves your machine.
 - **Tauri 2** shell (Rust + the OS-native WebView) so the shipped app is a small native binary, not a Chromium fork.
 - **React + Vite** frontend for the timeline, voice library, and script editor.
 - **A warm sidecar process** holds the speech engine resident so per-line synthesis is fast after the first warm-up. Tauri spawns it once and talks NDJSON over stdin/stdout. On macOS this is the **Swift sidecar** (`swift-sidecar/`, MLX); on Windows/Linux the **C++ sidecar** (`core-sidecar/`, LiteRT).
-- **CosyVoice 3** is the default engine on macOS via [`speech-swift`](https://github.com/soniqo/speech-swift) (MLX). Windows/Linux default to **VoxCPM2** via [`speech-core`](https://github.com/soniqo/speech-core) (LiteRT). On macOS you can switch engines from the toolbar: **VoxCPM2**, **Qwen3-TTS**, **Chatterbox** (multilingual cloning across 23 languages), **OmniVoice** (600+ language cloning), **Indic-Mio** (Hindi/Indic emotion tags), and **Fish Audio S2 Pro** (experimental clone + bracket markers). Those MLX engines are macOS-only; Windows/Linux runs VoxCPM2.
+- **CosyVoice 3** is the default engine on macOS via [`speech-swift`](https://github.com/soniqo/speech-swift) (MLX). Windows/Linux default to **VoxCPM2** via [`speech-core`](https://github.com/soniqo/speech-core) (LiteRT). The toolbar lists the engines supported on the current OS: macOS includes **VoxCPM2**, **Qwen3-TTS**, **Chatterbox** (multilingual cloning across 23 languages), **OmniVoice** (600+ language cloning), **Indic-Mio** (Hindi/Indic emotion tags), and **Fish Audio S2 Pro** (experimental clone + bracket markers); Windows/Linux currently include **VoxCPM2** and **Indic-Mio** through LiteRT.
 
 ## Engines
 
-Switch engine from the toolbar dropdown (macOS only — Windows/Linux always use VoxCPM2, so the dropdown doesn't appear).
+Switch engine from the toolbar dropdown. The list is filtered to engines supported on the current OS.
 
 | Engine | Platforms | Backend | Voice cloning | Emotion markers | Languages |
 |---|---|---|:---:|---|:---:|
@@ -43,16 +43,16 @@ Switch engine from the toolbar dropdown (macOS only — Windows/Linux always use
 | **Qwen3-TTS** | macOS only | MLX | ✅ (ICL) | — | 10 |
 | **Chatterbox** | macOS only | MLX | ✅ | intensity only¹ | 23 |
 | **OmniVoice** | macOS only | MLX | ✅ | restricted instruct² | 600+ |
-| **Indic-Mio** | macOS only | MLX | ✅³ | suffix tags | Indic |
+| **Indic-Mio** | macOS · Windows · Linux | MLX / LiteRT | ✅³ | suffix tags | Indic |
 | **Fish Audio S2 Pro** | macOS only | MLX | ✅⁴ | bracket tags | 80+ |
 
-The MLX engines (CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice, Indic-Mio, Fish Audio S2 Pro) are **macOS-only**; Windows/Linux run VoxCPM2 through speech-core's LiteRT backend.
+CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice, and Fish Audio S2 Pro remain **macOS-only** in Studio. VoxCPM2 and Indic-Mio are also available on Windows/Linux through speech-core's LiteRT backend.
 
 ¹ Chatterbox has no free-text style input — emotion markers map to an expressiveness/intensity level (more vs. less expressive), not a specific emotion.
 
 ² OmniVoice supports broad voice-design attributes such as accent, age, gender, pitch, and whisper. Studio only passes valid `instruct` vocabulary items: `whisper` maps directly, while emotion markers map to pitch hints (`high pitch`, `low pitch`, etc.). Strong emotions are approximations, not true emotional acting.
 
-³ Indic-Mio is exposed as an experimental Hindi/Indic emotion-marker engine. It uses suffix tags such as `<happy>` / `<angry>` and clones from reference audio through WavLM → MioCodec global speaker embeddings. It does not need a reference transcript.
+³ Indic-Mio is exposed as an experimental Hindi/Indic emotion-marker engine. It uses suffix tags such as `<happy>` / `<angry>` and clones from reference audio through WavLM → MioCodec global speaker embeddings. It does not need a reference transcript. Windows/Linux use the `soniqo/Indic-Mio-LiteRT` bundle and output 24 kHz WAV clips.
 
 ⁴ Fish Audio S2 Pro uses bracket markers such as `[excited]`, `[angry]`, and `[whisper]`. It needs an accurate reference transcript for cloning, and the public weights are research/non-commercial unless separately licensed.
 
@@ -96,10 +96,10 @@ Grab the latest build from the [**releases page**](https://github.com/soniqo/spe
 Every platform **downloads its speech model on first run** and caches it, so the installers stay small:
 
 - **macOS** — `.dmg` (~46 MB); drag into `/Applications`. First run pulls the CosyVoice 3 MLX weights into `~/Library/Caches/qwen3-speech/`; selecting VoxCPM2 later pulls its ~2.75 GB MLX weights.
-- **Windows** — `.msi` or the NSIS `-setup.exe`. First run pulls the ~8.8 GB VoxCPM2-LiteRT bundle into `%LOCALAPPDATA%\speech-core`.
-- **Linux** — `.deb` or `.AppImage`. First run pulls the same bundle into `~/.cache/speech-core`.
+- **Windows** — `.msi` or the NSIS `-setup.exe`. The first selected LiteRT engine downloads into `%LOCALAPPDATA%\speech-core`: VoxCPM2-LiteRT is ~8.8 GB; Indic-Mio-LiteRT is ~2.6 GB.
+- **Linux** — `.deb` or `.AppImage`. The first selected LiteRT engine downloads into `~/.cache/speech-core`: VoxCPM2-LiteRT is ~8.8 GB; Indic-Mio-LiteRT is ~2.6 GB.
 
-The Windows/Linux LiteRT bundle is fp16 and needs **~10 GiB of free RAM** to load — an 8 GB machine may fall short.
+The VoxCPM2 LiteRT bundle is fp16 and needs **~10 GiB of free RAM** to load — an 8 GB machine may fall short. Indic-Mio LiteRT is smaller on disk but still keeps several GB resident while loaded.
 
 The **macOS build is signed and notarized** (from v0.0.5 on) — it opens like any other app, no Gatekeeper hoops. The Windows installers are still unsigned: SmartScreen needs *More info → Run anyway*.
 
@@ -132,7 +132,7 @@ The app detects the files on the next launch and skips the download entirely. If
 Common: Rust 1.95+ via `rustup` (`. "$HOME/.cargo/env"` if `cargo` isn't on `PATH`), Node 20+ and `pnpm` 11+.
 
 - **macOS:** 15+ on Apple Silicon (M1/M2/M3/M4), Xcode 26+ (Swift 6.0 toolchain).
-- **Windows / Linux (x86_64):** a C++17 toolchain + CMake 3.16+, and a built [`speech-core`](https://github.com/soniqo/speech-core) checkout with the LiteRT backend (`-DSPEECH_CORE_WITH_LITERT=ON -DLITERT_DIR=...`) plus the `VoxCPM2-LiteRT` model bundle.
+- **Windows / Linux (x86_64):** a C++17 toolchain + CMake 3.16+, and a built [`speech-core`](https://github.com/soniqo/speech-core) checkout with the LiteRT backend (`-DSPEECH_CORE_WITH_LITERT=ON -DLITERT_DIR=...`) and the HF downloader (`-DSPEECH_CORE_WITH_HF_DOWNLOAD=ON`) or local LiteRT bundles for VoxCPM2 / Indic-Mio.
 
 ### Dev loop — macOS
 
@@ -151,10 +151,16 @@ pnpm install
 # Build the C++ sidecar against your speech-core checkout (defaults to ../speech-core):
 cmake -B core-sidecar/build core-sidecar -DSPEECH_CORE_DIR=../speech-core
 cmake --build core-sidecar/build --config Release
-# Point it at the VoxCPM2-LiteRT bundle, then launch:
+# Optional: point at pre-downloaded bundles instead of first-run HF downloads:
 export SONIQO_VOXCPM2_BUNDLE_DIR=/path/to/speech-core/scripts/models-voxcpm2
+export SONIQO_INDIC_MIO_BUNDLE_DIR=/path/to/Indic-Mio-LiteRT
+# Optional: launch directly into Indic-Mio and tune parallel HF downloads:
+export VITE_TTS_ENGINE=indic-mio
+export SPEECH_CORE_DOWNLOAD_CONNECTIONS=4
 pnpm tauri dev
 ```
+
+On Windows PowerShell, use `$env:VITE_TTS_ENGINE="indic-mio"` / `$env:SPEECH_CORE_DOWNLOAD_CONNECTIONS="4"` before `pnpm tauri dev`.
 
 ### Memory footprint
 
@@ -185,7 +191,7 @@ cd .. && pnpm tauri build             # produces .app + .dmg under src-tauri/tar
 ## Sibling repos
 
 - [`speech-swift`](https://github.com/soniqo/speech-swift) — Apple Silicon speech engines (VoxCPM2, CosyVoice3, Qwen3-TTS, Chatterbox, OmniVoice, Indic-Mio, Fish Audio S2 Pro, Parakeet, Silero VAD).
-- [`speech-core`](https://github.com/soniqo/speech-core) — C++ engines (VoxCPM2 cloning on Windows/Linux, plus STT, VAD, denoise).
+- [`speech-core`](https://github.com/soniqo/speech-core) — C++ engines (VoxCPM2 and Indic-Mio cloning on Windows/Linux, plus STT, VAD, denoise).
 
 ## Contributing
 

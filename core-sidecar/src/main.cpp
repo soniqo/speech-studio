@@ -232,12 +232,15 @@ static void on_indic_mio_download_progress(const char* file, int idx, int count,
     const double overall = count > 0
         ? ((static_cast<double>(idx) + file_fraction) / static_cast<double>(count)) * 100.0
         : file_fraction * 100.0;
-    const int pct = static_cast<int>(overall + 0.5);
-    if (pct != last_pct && (pct % 5 == 0 || pct == 100)) {
-        last_pct = pct;
-        std::string detail = "Downloading Indic-Mio";
+    const int progress_step = static_cast<int>(overall * 2.0);
+    if (progress_step != last_pct || overall >= 99.95) {
+        last_pct = progress_step;
+        char pct_buf[32];
+        std::snprintf(pct_buf, sizeof(pct_buf), "%.1f", overall);
+        std::string detail = "Downloading Indic-Mio [" + std::to_string(idx + 1) +
+                             "/" + std::to_string(count) + "]";
         if (total) detail += " " + format_mb(downloaded) + " / " + format_mb(total);
-        log_err("[sidecar] indic-mio " + std::to_string(pct) + "% " + detail);
+        log_err("[sidecar] indic-mio " + std::string(pct_buf) + "% " + detail);
     }
 }
 

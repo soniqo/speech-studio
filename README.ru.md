@@ -30,11 +30,11 @@
 - **Tauri 2** как оболочка (Rust + нативный WebView операционной системы), поэтому распространяемое приложение — небольшой нативный бинарник, а не форк Chromium.
 - **React + Vite** для фронтенда таймлайна, библиотеки голосов и редактора сценария.
 - **Постоянный sidecar-процесс** держит речевой движок загруженным, поэтому после первого прогрева построчный синтез выполняется быстро. Tauri запускает его один раз и общается с ним через stdin/stdout по NDJSON. На macOS это **Swift sidecar** (`swift-sidecar/`, MLX), на Windows/Linux — **C++ sidecar** (`core-sidecar/`, LiteRT).
-- **VoxCPM2** — движок по умолчанию на всех платформах: через [`speech-swift`](https://github.com/soniqo/speech-swift) (MLX) на macOS и [`speech-core`](https://github.com/soniqo/speech-core) (LiteRT) на Windows/Linux. На macOS движок можно переключить в панели инструментов: **CosyVoice3**, **Qwen3-TTS**, **Chatterbox** (многоязычное клонирование на 23 языках), **OmniVoice** (клонирование на 600+ языках), **Indic-Mio** (эмоциональные теги для Hindi/Indic) и **Fish Audio S2 Pro** (экспериментальное клонирование + маркеры в квадратных скобках). Эти MLX-движки доступны только на macOS; Windows/Linux используют VoxCPM2.
+- **CosyVoice 3** — движок по умолчанию на macOS через [`speech-swift`](https://github.com/soniqo/speech-swift) (MLX). Windows/Linux по умолчанию используют **VoxCPM2** через [`speech-core`](https://github.com/soniqo/speech-core) (LiteRT). Панель инструментов показывает движки, доступные на текущей ОС: macOS включает **VoxCPM2**, **Qwen3-TTS**, **Chatterbox** (многоязычное клонирование на 23 языках), **OmniVoice** (клонирование на 600+ языках), **Indic-Mio** (эмоциональные теги для Hindi/Indic) и **Fish Audio S2 Pro** (экспериментальное клонирование + маркеры в квадратных скобках); Windows/Linux сейчас включают **VoxCPM2** и **Indic-Mio** через LiteRT.
 
 ## Движки
 
-Переключайте движок в выпадающем списке панели инструментов (только macOS — Windows/Linux всегда используют VoxCPM2, поэтому список не отображается).
+Переключайте движок в выпадающем списке панели инструментов. Список фильтруется по движкам, доступным на текущей ОС.
 
 | Движок | Платформы | Бэкенд | Клонирование голоса | Маркеры эмоций | Языки |
 |---|---|---|:---:|---|:---:|
@@ -43,16 +43,16 @@
 | **Qwen3-TTS** | только macOS | MLX | ✅ (ICL) | — | 10 |
 | **Chatterbox** | только macOS | MLX | ✅ | только интенсивность¹ | 23 |
 | **OmniVoice** | только macOS | MLX | ✅ | ограниченный instruct² | 600+ |
-| **Indic-Mio** | только macOS | MLX | ✅³ | суффиксные теги | Indic |
+| **Indic-Mio** | macOS · Windows · Linux | MLX / LiteRT | ✅³ | суффиксные теги | Indic |
 | **Fish Audio S2 Pro** | только macOS | MLX | ✅⁴ | теги в квадратных скобках | 80+ |
 
-MLX-движки (CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice, Indic-Mio, Fish Audio S2 Pro) доступны **только на macOS**; Windows/Linux запускают VoxCPM2 через LiteRT-бэкенд speech-core.
+CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice и Fish Audio S2 Pro остаются в Studio **только для macOS**. VoxCPM2 и Indic-Mio также доступны на Windows/Linux через LiteRT-бэкенд speech-core.
 
 ¹ У Chatterbox нет свободного текстового поля для стиля: маркеры эмоций преобразуются в уровень выразительности/интенсивности (сильнее или мягче), а не в конкретную эмоцию.
 
 ² OmniVoice поддерживает широкие параметры голосового дизайна: акцент, возраст, пол, высоту тона и шёпот. Studio передаёт только допустимые элементы словаря `instruct`: `whisper` мапится напрямую, а маркеры эмоций приближённо преобразуются в подсказки высоты тона (`high pitch`, `low pitch` и т. п.). Сильные эмоции — приближение, а не полноценная актёрская эмоциональность.
 
-³ Indic-Mio подключён как экспериментальный движок для Hindi/Indic с маркерами эмоций. Он использует суффиксные теги вроде `<happy>` / `<angry>` и клонирует по референсному аудио через WavLM → глобальные speaker embeddings MioCodec. Транскрипт референса не нужен.
+³ Indic-Mio подключён как экспериментальный движок для Hindi/Indic с маркерами эмоций. Он использует суффиксные теги вроде `<happy>` / `<angry>` и клонирует по референсному аудио через WavLM → глобальные speaker embeddings MioCodec. Транскрипт референса не нужен. Windows/Linux используют бандл `soniqo/Indic-Mio-LiteRT` и выводят WAV-клипы 24 kHz.
 
 ⁴ Fish Audio S2 Pro использует маркеры в квадратных скобках, например `[excited]`, `[angry]` и `[whisper]`. Для клонирования нужен точный транскрипт референса, а публичные веса предназначены для исследовательского/некоммерческого использования, если нет отдельной лицензии.
 
@@ -96,10 +96,10 @@ MLX-движки (CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice, Indic-Mio, Fish
 На каждой платформе речевая модель **скачивается при первом запуске** и кэшируется, поэтому установщики остаются небольшими:
 
 - **macOS** — `.dmg` (~46 MB); перетащите в `/Applications`. Первый запуск скачает ~2.75 GB весов MLX в `~/Library/Caches/qwen3-speech/`.
-- **Windows** — `.msi` или NSIS `-setup.exe`. Первый запуск скачает бандл VoxCPM2-LiteRT (~8.8 GB) в `%LOCALAPPDATA%\speech-core`.
-- **Linux** — `.deb` или `.AppImage`. Первый запуск скачает тот же бандл в `~/.cache/speech-core`.
+- **Windows** — `.msi` или NSIS `-setup.exe`. Первый выбранный LiteRT-движок скачивается в `%LOCALAPPDATA%\speech-core`: VoxCPM2-LiteRT занимает ~8.8 GB; Indic-Mio-LiteRT — ~2.6 GB.
+- **Linux** — `.deb` или `.AppImage`. Первый выбранный LiteRT-движок скачивается в `~/.cache/speech-core`: VoxCPM2-LiteRT занимает ~8.8 GB; Indic-Mio-LiteRT — ~2.6 GB.
 
-Бандл LiteRT для Windows/Linux хранится в fp16 и требует **~10 GiB свободной RAM** для загрузки; машине с 8 GB памяти может не хватить.
+Бандл VoxCPM2 LiteRT хранится в fp16 и требует **~10 GiB свободной RAM** для загрузки; машине с 8 GB памяти может не хватить. Indic-Mio LiteRT меньше на диске, но после загрузки всё равно держит несколько GB в памяти.
 
 **Сборка для macOS подписана и нотариализована** (начиная с v0.0.5) — открывается как обычное приложение, без обхода Gatekeeper. Windows-установщики пока не подписаны: SmartScreen потребует *More info → Run anyway*.
 
@@ -132,7 +132,7 @@ hf download openbmb/VoxCPM2 \
 Общие: Rust 1.95+ через `rustup` (`. "$HOME/.cargo/env"`, если `cargo` не в `PATH`), Node 20+ и `pnpm` 11+.
 
 - **macOS:** macOS 15+ на Apple Silicon (M1/M2/M3/M4), Xcode 26+ (toolchain Swift 6.0).
-- **Windows / Linux (x86_64):** toolchain C++17 + CMake 3.16+, а также checkout [`speech-core`](https://github.com/soniqo/speech-core), собранный с LiteRT-бэкендом (`-DSPEECH_CORE_WITH_LITERT=ON -DLITERT_DIR=...`) и бандлом модели `VoxCPM2-LiteRT`.
+- **Windows / Linux (x86_64):** toolchain C++17 + CMake 3.16+, а также checkout [`speech-core`](https://github.com/soniqo/speech-core), собранный с LiteRT-бэкендом (`-DSPEECH_CORE_WITH_LITERT=ON -DLITERT_DIR=...`) и HF-загрузчиком (`-DSPEECH_CORE_WITH_HF_DOWNLOAD=ON`) либо локальными LiteRT-бандлами VoxCPM2 / Indic-Mio.
 
 ### Цикл разработки — macOS
 
@@ -151,21 +151,27 @@ pnpm install
 # Build the C++ sidecar against your speech-core checkout (defaults to ../speech-core):
 cmake -B core-sidecar/build core-sidecar -DSPEECH_CORE_DIR=../speech-core
 cmake --build core-sidecar/build --config Release
-# Point it at the VoxCPM2-LiteRT bundle, then launch:
+# Необязательно: укажите заранее скачанные бандлы вместо первого HF-скачивания:
 export SONIQO_VOXCPM2_BUNDLE_DIR=/path/to/speech-core/scripts/models-voxcpm2
+export SONIQO_INDIC_MIO_BUNDLE_DIR=/path/to/Indic-Mio-LiteRT
+# Необязательно: запустите сразу Indic-Mio и настройте параллельные HF-загрузки:
+export VITE_TTS_ENGINE=indic-mio
+export SPEECH_CORE_DOWNLOAD_CONNECTIONS=4
 pnpm tauri dev
 ```
+
+В Windows PowerShell используйте `$env:VITE_TTS_ENGINE="indic-mio"` / `$env:SPEECH_CORE_DOWNLOAD_CONNECTIONS="4"` перед `pnpm tauri dev`.
 
 ### Потребление памяти
 
 Измерения на Mac с Apple Silicon (M-серия, unified memory). Колонка **Resident (real)** — реальная память процесса (Activity Monitor, «Memory» — физический footprint по `vmmap`), именно её стоит сравнивать с объёмом RAM. **MLX active/peak** — собственный учёт MLX (peak за многострочную сессию). Важно: обычный `ps rss` на Apple Silicon занижает показатель примерно в 3 раза — Metal-буферы unified memory не входят в RSS, поэтому ориентируйтесь на resident-значения ниже.
 
-Движок **VoxCPM2** по умолчанию:
+Выбираемый MLX-движок **VoxCPM2**:
 
-| Вариант | Диск | MLX active | MLX peak | Resident (real) | По умолчанию |
-|---|---|---|---|---|---|
-| `aufklarer/VoxCPM2-MLX-int8`  | 2.75 GB | 3.1 GB | 5.4 GB | **~4–5 GB** | ✅ |
-| `aufklarer/VoxCPM2-MLX-bf16`  | 4.6 GB  | 9.1 GB | 11.4 GB | ~12 GB | |
+| Вариант | Диск | MLX active | MLX peak | Resident (real) |
+|---|---|---|---|---|
+| `aufklarer/VoxCPM2-MLX-int8`  | 2.75 GB | 3.1 GB | 5.4 GB | **~4–5 GB** |
+| `aufklarer/VoxCPM2-MLX-bf16`  | 4.6 GB  | 9.1 GB | 11.4 GB | ~12 GB |
 
 Остальные macOS-движки загружаются отдельно при выборе; одновременно резидентен только один движок (при переключении предыдущий выгружается): **Chatterbox** ~4 GB resident (1.3 GB на диске), **CosyVoice 3** легче, **Qwen3-TTS** (1.7B bf16) тяжелее. OmniVoice скачивается и загружается отдельно при выборе.
 
@@ -173,7 +179,7 @@ pnpm tauri dev
 
 ### Попробовать демо
 
-Нажмите **«Загрузить демо»** в верхней панели. Приложение подготовит сцену «Scene 04» с двумя клонированными голосами (Anna и Marek) и четырьмя репликами — каждая со своим маркером эмоции — а затем синтезирует всё через VoxCPM2.
+Нажмите **«Загрузить демо»** в верхней панели. Приложение подготовит сцену «Scene 04» с двумя клонированными голосами (Anna и Marek) и четырьмя репликами — каждая со своим маркером эмоции — а затем синтезирует всё через текущий выбранный движок.
 
 ### Упаковка собственного .app / .dmg
 
@@ -185,7 +191,7 @@ cd .. && pnpm tauri build             # produces .app + .dmg under src-tauri/tar
 ## Соседние репозитории
 
 - [`speech-swift`](https://github.com/soniqo/speech-swift) — речевые движки для Apple Silicon (VoxCPM2, CosyVoice3, Qwen3-TTS, Chatterbox, OmniVoice, Indic-Mio, Fish Audio S2 Pro, Parakeet, Silero VAD).
-- [`speech-core`](https://github.com/soniqo/speech-core) — C++-движки (клонирование VoxCPM2 на Windows/Linux, а также STT, VAD и шумоподавление).
+- [`speech-core`](https://github.com/soniqo/speech-core) — C++-движки (клонирование VoxCPM2 и Indic-Mio на Windows/Linux, а также STT, VAD и шумоподавление).
 
 ## Участие в разработке
 
