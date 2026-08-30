@@ -164,7 +164,7 @@ On Windows PowerShell, use `$env:VITE_TTS_ENGINE="indic-mio"` / `$env:SPEECH_COR
 
 ### Memory footprint
 
-Measured on an Apple Silicon Mac (M-series, unified memory). The **resident** column is the real process footprint (Activity Monitor's "Memory" — `vmmap` physical footprint), which is the figure to check against your RAM. **MLX active/peak** is MLX's own accounting (peak is over a multi-line session). Note: plain `ps rss` under-reports by ~3× on Apple Silicon — Metal unified-memory buffers don't count as RSS, so use the resident figures below.
+Measured on an Apple Silicon Mac (M-series, unified memory). The **resident** column is the real process footprint (Activity Monitor's "Memory" — `vmmap` physical footprint), which is the figure to check against your RAM. **MLX active/peak** is MLX's own accounting (peak is over a multi-line session). Note: plain `ps rss` under-reports by ~3× on Apple Silicon — Metal unified-memory buffers don't count as RSS, so use the resident figures below. The **Activity** panel shows the same footprint figure live after every load and render.
 
 The selectable **VoxCPM2** MLX engine:
 

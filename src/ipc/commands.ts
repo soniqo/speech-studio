@@ -338,3 +338,9 @@ export function revealActivityLog(): Promise<void> {
 export function clearActivityLog(): Promise<void> {
   return invoke<void>("clear_activity_log");
 }
+
+/** Record a WebView-side event (a clip that failed to render) next to the
+ * sidecar lines, so the panel and the log file tell the whole story. */
+export function noteActivity(text: string): Promise<void> {
+  return invoke<void>("activity_log_note", { args: { text } });
+}

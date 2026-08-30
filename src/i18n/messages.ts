@@ -112,7 +112,7 @@ const en = {
     nothingToSynthesize:
       "Nothing to synthesize — clips need text and an assigned voice (locked clips are skipped)",
     clipsFailed: (failed: number, total: number) =>
-      `${failed}/${total} clips failed — see console`,
+      `${failed}/${total} clips failed — see the Activity log`,
     exportMixTitle: "Export mix as WAV",
     wavAudio: "WAV audio",
     exportFailed: (error: string) => `export failed: ${error}`,
@@ -405,7 +405,7 @@ const ru: typeof en = {
     nothingToSynthesize:
       "Нечего синтезировать: клипам нужны текст и назначенный голос, заблокированные клипы пропускаются",
     clipsFailed: (failed, total) =>
-      `Не удалось синтезировать ${failed} из ${total}; подробности в консоли`,
+      `Не удалось синтезировать ${failed} из ${total}; подробности в панели «Активность»`,
     exportMixTitle: "Экспорт микса в WAV",
     wavAudio: "Аудио WAV",
     exportFailed: (error) => `Не удалось экспортировать: ${error}`,

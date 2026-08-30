@@ -258,6 +258,22 @@ async fn clear_activity_log() {
     }
 }
 
+#[derive(Deserialize)]
+struct ActivityNoteArgs {
+    text: String,
+}
+
+/// Lets the WebView record its own failures (a clip that would not render)
+/// next to the sidecar lines, so the panel and the log file tell the whole
+/// story. Bounded so a runaway caller cannot flood the file.
+#[tauri::command]
+async fn activity_log_note(args: ActivityNoteArgs) {
+    let text: String = args.text.trim().chars().take(2000).collect();
+    if !text.is_empty() {
+        studio_log!("[studio] {text}");
+    }
+}
+
 // ---------- sidecar process management ----------
 
 // Sidecar binary name (Tauri's externalBin bundler strips the target-triple
@@ -1188,7 +1204,12 @@ async fn init_model(
     let env: SidecarResponse = serde_json::from_value(raw).map_err(|e| e.to_string())?;
     if !env.ok {
         let error = env.error.unwrap_or_else(|| "init_model failed".into());
-        return Err(humanize_sidecar_error(args.engine, error));
+        let error = humanize_sidecar_error(args.engine, error);
+        studio_log!(
+            "[speech-studio] init_model {} failed: {error}",
+            args.engine.display_name()
+        );
+        return Err(error);
     }
     Ok(())
 }
@@ -3192,6 +3213,7 @@ pub fn run() {
             activity_log_info,
             reveal_activity_log,
             clear_activity_log,
+            activity_log_note,
             available_tts_engines,
             available_asr_models,
             set_tts_variant,
