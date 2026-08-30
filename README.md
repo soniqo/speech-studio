@@ -95,7 +95,7 @@ Grab the latest build from the [**releases page**](https://github.com/soniqo/spe
 
 Every platform **downloads its speech model on first run** and caches it, so the installers stay small:
 
-- **macOS** — `.dmg` (~46 MB); drag into `/Applications`. First run pulls the CosyVoice 3 MLX weights into `~/Library/Caches/qwen3-speech/`; selecting VoxCPM2 later pulls its ~2.75 GB MLX weights.
+- **macOS** — `.dmg` (~46 MB); drag into `/Applications`. First run pulls the CosyVoice 3 MLX weights into `~/Library/Caches/qwen3-speech/`; selecting VoxCPM2 later pulls its MLX weights (~5 GB for the default bf16, ~3 GB for the int8 option in the weights picker).
 - **Windows** — `.msi` or the NSIS `-setup.exe`. The first selected LiteRT engine downloads into `%LOCALAPPDATA%\speech-core`: VoxCPM2-LiteRT is ~8.8 GB; Indic-Mio-LiteRT is ~2.6 GB.
 - **Linux** — `.deb` or `.AppImage`. The first selected LiteRT engine downloads into `~/.cache/speech-core`: VoxCPM2-LiteRT is ~8.8 GB; Indic-Mio-LiteRT is ~2.6 GB.
 
