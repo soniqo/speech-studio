@@ -217,7 +217,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Check out speech-studio
         uses: actions/checkout@v4
@@ -322,21 +322,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Attach installers to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            speech-studio/src-tauri/target/release/bundle/msi/*.msi
-            speech-studio/src-tauri/target/release/bundle/nsis/*-setup.exe
-          fail_on_unmatched_files: false
-
   build-linux:
     name: Linux (x86_64)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Check out speech-studio
         uses: actions/checkout@v4
@@ -431,15 +422,6 @@ jobs:
             speech-studio/src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: warn
           retention-days: 14
-
-      - name: Attach installers to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            speech-studio/src-tauri/target/release/bundle/deb/*.deb
-            speech-studio/src-tauri/target/release/bundle/appimage/*.AppImage
-          fail_on_unmatched_files: false
 
   # ---------------------------------------------------------------------------
   # Signed + notarized macOS release. Runs ONLY on tag pushes and is bound to
@@ -809,4 +791,47 @@ jobs:
             speech-studio/src-tauri/target/release/bundle/macos/*.app.tar.gz
             speech-studio/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
             speech-studio/src-tauri/target/release/bundle/macos/latest.json
+          fail_on_unmatched_files: true
+
+  # ---------------------------------------------------------------------------
+  # Attach the Windows/Linux installers to the GitHub Release only after the
+  # signed macOS lane has landed its .dmg + updater manifest. Whichever job
+  # attaches first creates the release, and `releases/latest` — which the
+  # in-app updater resolves latest.json against — flips to it right then. When
+  # the ungated installer jobs published on their own and the macOS approval
+  # never came, the release went live half-built and every existing macOS
+  # install's update check 404'd (v0.0.9, #42). The installers still build in
+  # parallel with the macOS lane; only publishing waits, and a failed or
+  # unapproved macOS lane leaves the tag without a release rather than with a
+  # broken one.
+  # ---------------------------------------------------------------------------
+  publish-installers:
+    name: Publish Windows/Linux installers
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows installers
+        uses: actions/download-artifact@v4
+        with:
+          name: speech-studio-windows-x86_64
+          path: installers/windows
+
+      - name: Download Linux installers
+        uses: actions/download-artifact@v4
+        with:
+          name: speech-studio-linux-x86_64
+          path: installers/linux
+
+      - name: Attach installers to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installers/windows/**/*.msi
+            installers/windows/**/*-setup.exe
+            installers/linux/**/*.deb
+            installers/linux/**/*.AppImage
           fail_on_unmatched_files: true
