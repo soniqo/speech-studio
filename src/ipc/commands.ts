@@ -298,3 +298,49 @@ export function seedDemo(): Promise<DemoSeed> {
 export function seedHindiDemo(): Promise<DemoSeed> {
   return invoke<DemoSeed>("seed_hindi_demo");
 }
+
+// ── Activity log ─────────────────────────────────────────────────────────────
+
+export type ActivityLogSource = "sidecar" | "studio";
+
+/** One line of the shell's activity ring: sidecar stderr or a Studio note. */
+export interface ActivityLine {
+  seq: number;
+  tsMs: number;
+  source: ActivityLogSource;
+  text: string;
+}
+
+/** Parsed from the sidecar's `[sidecar] mem …` snapshots after loads and
+ * renders. `footprintMb` is the real process footprint (Activity Monitor's
+ * "Memory"); `rssMb` under-reports Metal buffers. Older sidecars send neither. */
+export interface SidecarMemoryEvent {
+  label: string;
+  activeMb?: number | null;
+  cacheMb?: number | null;
+  peakMb?: number | null;
+  rssMb?: number | null;
+  footprintMb?: number | null;
+}
+
+export function activityLogSnapshot(): Promise<ActivityLine[]> {
+  return invoke<ActivityLine[]>("activity_log_snapshot");
+}
+
+export function activityLogInfo(): Promise<{ path: string | null }> {
+  return invoke<{ path: string | null }>("activity_log_info");
+}
+
+export function revealActivityLog(): Promise<void> {
+  return invoke<void>("reveal_activity_log");
+}
+
+export function clearActivityLog(): Promise<void> {
+  return invoke<void>("clear_activity_log");
+}
+
+/** Record a WebView-side event (a clip that failed to render) next to the
+ * sidecar lines, so the panel and the log file tell the whole story. */
+export function noteActivity(text: string): Promise<void> {
+  return invoke<void>("activity_log_note", { args: { text } });
+}

@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { synthesizeClip } from "../ipc/commands";
+import { noteActivity, synthesizeClip } from "../ipc/commands";
 import { useProjectStore } from "../state/projectStore";
 import type { Clip, SpeakerTrack, Voice } from "../types/project";
 import { clipAudioPath } from "../lib/clipAudio";
@@ -125,6 +125,7 @@ export function useSynthesizeAll() {
             completed++;
           } catch (e) {
             console.error(`synthesize ${job.clip.id} failed`, e);
+            void noteActivity(`[synth] clip ${job.clip.id} failed: ${String(e)}`).catch(() => {});
             failed++;
           }
         }

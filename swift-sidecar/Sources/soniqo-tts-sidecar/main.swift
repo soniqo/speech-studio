@@ -1021,10 +1021,33 @@ let mlxCacheMB: Int = {
 MLX.Memory.cacheLimit = mlxCacheMB * 1024 * 1024
 logErr("[sidecar] mlx cacheLimit=\(mlxCacheMB) MB")
 
+/// Process-level figures to go with MLX's own accounting. `phys_footprint` is
+/// what Activity Monitor shows as "Memory" and includes Metal unified-memory
+/// buffers; plain resident size under-reports those by ~3× on Apple Silicon.
+func processMemoryMB() -> (rss: Int, footprint: Int)? {
+    var info = task_vm_info_data_t()
+    var count = mach_msg_type_number_t(
+        MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+    let kr = withUnsafeMutablePointer(to: &info) { ptr in
+        ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+            task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+        }
+    }
+    guard kr == KERN_SUCCESS else { return nil }
+    let mb = 1024 * 1024
+    return (Int(info.resident_size) / mb, Int(info.phys_footprint) / mb)
+}
+
+/// One line the Studio parses into its Activity panel's memory readout:
+/// `[sidecar] mem <label> active=..M cache=..M peak=..M rss=..M footprint=..M`.
 func logMemorySnapshot(_ label: String) {
     let snap = MLX.Memory.snapshot()
     let mb = { (b: Int) in b / (1024 * 1024) }
-    logErr("[sidecar] mem \(label) active=\(mb(snap.activeMemory))M cache=\(mb(snap.cacheMemory))M peak=\(mb(snap.peakMemory))M")
+    var line = "[sidecar] mem \(label) active=\(mb(snap.activeMemory))M cache=\(mb(snap.cacheMemory))M peak=\(mb(snap.peakMemory))M"
+    if let proc = processMemoryMB() {
+        line += " rss=\(proc.rss)M footprint=\(proc.footprint)M"
+    }
+    logErr(line)
 }
 
 // MARK: - main loop
@@ -1075,6 +1098,7 @@ while let line = readLine(strippingNewline: true) {
             case .fishAudio:
                 _ = try await fishAudioHolder.load(modelId: request.modelId)
             }
+            logMemorySnapshot("post-load-\(engine.rawValue)")
             emit(SuccessResponse(
                 id: request.id,
                 ok: true,
@@ -1304,6 +1328,7 @@ while let line = readLine(strippingNewline: true) {
             try WAVWriter.write(samples: audio, sampleRate: 24000, to: outURL)
 
             let durationSec = Double(audio.count) / 24000.0
+            logMemorySnapshot("post-cosy-synth")
             emit(SuccessResponse(
                 id: request.id,
                 ok: true,
@@ -1545,6 +1570,7 @@ while let line = readLine(strippingNewline: true) {
             try WAVWriter.write(samples: conditionedAudio, sampleRate: sampleRate, to: outURL)
             let durationSec = Double(conditionedAudio.count) / Double(sampleRate)
             logErr(String(format: "[sidecar] indic-mio wrote %.2fs → %@", durationSec, outURL.path))
+            logMemorySnapshot("post-indic-mio-synth")
 
             emit(SuccessResponse(
                 id: request.id,
@@ -1684,6 +1710,7 @@ while let line = readLine(strippingNewline: true) {
             try WAVWriter.write(samples: audio, sampleRate: 24000, to: outURL)
 
             let durationSec = Double(audio.count) / 24000.0
+            logMemorySnapshot("post-qwen-synth")
             emit(SuccessResponse(
                 id: request.id,
                 ok: true,

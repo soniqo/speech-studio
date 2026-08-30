@@ -3,9 +3,11 @@ import { LeftRail } from "./LeftRail";
 import { Timeline } from "./Timeline";
 import { Inspector } from "./Inspector";
 import { Transport } from "./Transport";
+import { ActivityPanel } from "./ActivityPanel";
 import { usePlayheadTick } from "../hooks/usePlayheadTick";
 import { useAudioScheduler } from "../hooks/useAudioScheduler";
 import { useDemoProgress } from "../hooks/useDemoProgress";
+import { useActivityLog } from "../hooks/useActivityLog";
 import { useProjectStore } from "../state/projectStore";
 import { TooltipProvider } from "./ui/tooltip";
 import { clampPercent, formatPercent } from "../lib/formatPercent";
@@ -56,6 +58,7 @@ export function AppShell() {
   usePlayheadTick();
   useAudioScheduler();
   useDemoProgress();
+  useActivityLog();
   return (
     <TooltipProvider delayDuration={300}>
       <div className="flex h-screen flex-col bg-background text-foreground">
@@ -66,6 +69,7 @@ export function AppShell() {
           <Timeline />
           <Inspector />
         </div>
+        <ActivityPanel />
         <Transport />
       </div>
     </TooltipProvider>

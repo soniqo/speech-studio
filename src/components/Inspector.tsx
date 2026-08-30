@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Lock, Unlock, Trash2, RefreshCw, History, Loader2, ListPlus } from "lucide-react";
 import { useProjectStore, newClip } from "../state/projectStore";
 import { ScriptEditor } from "./ScriptEditor";
-import { synthesizeClip } from "../ipc/commands";
+import { synthesizeClip, noteActivity } from "../ipc/commands";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
@@ -333,6 +333,7 @@ export function Inspector() {
       );
     } catch (e) {
       console.error("synthesize_clip failed", e);
+      void noteActivity(`[synth] regenerate ${current.id} failed: ${String(e)}`).catch(() => {});
       setRegenError(String(e));
     } finally {
       setIsRegenerating(false);

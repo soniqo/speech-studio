@@ -164,7 +164,7 @@ On Windows PowerShell, use `$env:VITE_TTS_ENGINE="indic-mio"` / `$env:SPEECH_COR
 
 ### Memory footprint
 
-Measured on an Apple Silicon Mac (M-series, unified memory). The **resident** column is the real process footprint (Activity Monitor's "Memory" — `vmmap` physical footprint), which is the figure to check against your RAM. **MLX active/peak** is MLX's own accounting (peak is over a multi-line session). Note: plain `ps rss` under-reports by ~3× on Apple Silicon — Metal unified-memory buffers don't count as RSS, so use the resident figures below.
+Measured on an Apple Silicon Mac (M-series, unified memory). The **resident** column is the real process footprint (Activity Monitor's "Memory" — `vmmap` physical footprint), which is the figure to check against your RAM. **MLX active/peak** is MLX's own accounting (peak is over a multi-line session). Note: plain `ps rss` under-reports by ~3× on Apple Silicon — Metal unified-memory buffers don't count as RSS, so use the resident figures below. The **Activity** panel shows the same footprint figure live after every load and render.
 
 The selectable **VoxCPM2** MLX engine:
 
@@ -182,6 +182,10 @@ Engines that publish more than one set of weights show a **weights picker** next
 ### Try the demo
 
 Hit **Load demo** in the top bar. It bootstraps a Scene 04 storyboard with two cloned voices (Anna and Marek) and four lines of dialogue — one with each emotion marker — then synthesizes everything through the currently selected engine (CosyVoice 3 by default on macOS).
+
+### Activity log
+
+The **Activity** button in the transport bar opens a live log of what the engine is doing: model downloads and loads, every synthesis step, and the sidecar's memory snapshots after each load and render (MLX active/peak plus the real process footprint). *Copy* puts the visible log on the clipboard for a bug report; *Log file* reveals the full, rotating file — `~/Library/Logs/audio.soniqo.studio/speech-studio.log` on macOS, `%LOCALAPPDATA%\audio.soniqo.studio\logs\` on Windows, `~/.local/share/audio.soniqo.studio/logs/` on Linux.
 
 ### Packaging your own .app / .dmg
 
