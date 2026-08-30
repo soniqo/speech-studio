@@ -67,19 +67,41 @@
       "usePolicy": "commercial-safe",
       "readiness": "production",
       "sidecarCommand": "synthesize_voxcpm2",
+      "variants": [
+        {
+          "id": "bf16",
+          "label": "bf16",
+          "modelName": "voxcpm2-mlx-bf16",
+          "modelId": "aufklarer/VoxCPM2-MLX-bf16",
+          "precision": "bf16",
+          "diskGb": 5.0,
+          "ramGib": 12
+        },
+        {
+          "id": "int8",
+          "label": "int8",
+          "modelName": "voxcpm2-mlx-int8",
+          "modelId": "aufklarer/VoxCPM2-MLX-int8",
+          "precision": "int8",
+          "diskGb": 3.0,
+          "ramGib": 5
+        }
+      ],
       "macosOnly": false,
       "platformOverrides": {
         "linux": {
           "modelName": "voxcpm2-litert-fp16",
           "modelId": "soniqo/VoxCPM2-LiteRT",
           "runtime": "LiteRT",
-          "precision": "fp16"
+          "precision": "fp16",
+          "variants": []
         },
         "windows": {
           "modelName": "voxcpm2-litert-fp16",
           "modelId": "soniqo/VoxCPM2-LiteRT",
           "runtime": "LiteRT",
-          "precision": "fp16"
+          "precision": "fp16",
+          "variants": []
         }
       }
     },
@@ -118,6 +140,33 @@
       "usePolicy": "commercial-safe",
       "readiness": "production",
       "sidecarCommand": "synthesize_cosyvoice",
+      "variants": [
+        {
+          "id": "bf16",
+          "label": "bf16",
+          "modelName": "cosyvoice-3-0.5b-mlx-bf16",
+          "modelId": "aufklarer/CosyVoice3-0.5B-MLX-bf16",
+          "precision": "bf16",
+          "diskGb": 2.3,
+          "ramGib": 2.1
+        },
+        {
+          "id": "8bit",
+          "label": "8-bit LLM",
+          "modelName": "cosyvoice-3-0.5b-mlx-8bit",
+          "modelId": "aufklarer/CosyVoice3-0.5B-MLX-8bit",
+          "precision": "int8",
+          "diskGb": 1.9
+        },
+        {
+          "id": "8bit-full",
+          "label": "8-bit LLM + DiT",
+          "modelName": "cosyvoice-3-0.5b-mlx-8bit-full",
+          "modelId": "aufklarer/CosyVoice3-0.5B-MLX-8bit-full",
+          "precision": "int8",
+          "diskGb": 1.6
+        }
+      ],
       "macosOnly": true
     },
     {
@@ -141,6 +190,25 @@
       "usePolicy": "commercial-safe",
       "readiness": "legacy-fallback",
       "sidecarCommand": "synthesize_icl",
+      "variants": [
+        {
+          "id": "bf16",
+          "label": "bf16",
+          "modelName": "qwen3-tts-1.7b-mlx-bf16",
+          "modelId": "aufklarer/Qwen3-TTS-12Hz-1.7B-Base-MLX-bf16",
+          "precision": "bf16",
+          "diskGb": 3.6,
+          "ramGib": 5.0
+        },
+        {
+          "id": "8bit",
+          "label": "8-bit",
+          "modelName": "qwen3-tts-1.7b-mlx-8bit",
+          "modelId": "aufklarer/Qwen3-TTS-12Hz-1.7B-Base-MLX-8bit",
+          "precision": "int8",
+          "diskGb": 2.4
+        }
+      ],
       "macosOnly": true
     },
     {

@@ -7,8 +7,13 @@ import { ProjectsMenu } from "./ProjectsMenu";
 import { useSynthesizeAll, useUnsynthesizedCount } from "../hooks/useSynthesizeAll";
 import { useProjectSave } from "../hooks/useProjectSave";
 import { useUpdater } from "../hooks/useUpdater";
-import { useEngineSwitch } from "../hooks/useEngineSwitch";
-import { exportProject, type ExportClip, type TtsEngineId } from "../ipc/commands";
+import { useEngineSwitch, useVariantSwitch } from "../hooks/useEngineSwitch";
+import {
+  exportProject,
+  type ExportClip,
+  type TtsEngineId,
+  type TtsModelVariant,
+} from "../ipc/commands";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Badge } from "./ui/badge";
@@ -149,6 +154,7 @@ export function TopBar() {
   const model = useProjectStore((s) => s.model);
   const setTtsLanguage = useProjectStore((s) => s.setTtsLanguage);
   const switchEngine = useEngineSwitch();
+  const switchVariant = useVariantSwitch();
   const synthesisStatus = useProjectStore((s) => s.synthesisStatus);
   const synthesisProgress = useProjectStore((s) => s.synthesisProgress);
   const hasContent = project.tracks.length > 0;
@@ -165,6 +171,11 @@ export function TopBar() {
   const modelStatus = model.status;
   const engineInfo = model.engines.find((candidate) => candidate.id === model.engine);
   const engineName = engineInfo?.displayName ?? "VoxCPM2";
+  const variants = engineInfo?.variants ?? [];
+  const selectedVariant =
+    variants.find((candidate) => candidate.id === engineInfo?.selectedVariant)?.id ??
+    variants[0]?.id;
+  const showVariantSelector = variants.length > 1 && !!selectedVariant;
   const languageIds = engineInfo?.requiresLanguage ? engineInfo.languages : [];
   const languageOptions = languageIds.map((id) => ({
     id,
@@ -208,6 +219,24 @@ export function TopBar() {
   async function onEngineChange(next: TtsEngineId) {
     setActionError(null);
     await switchEngine(next);
+  }
+
+  async function onVariantChange(next: string) {
+    setActionError(null);
+    await switchVariant(next);
+  }
+
+  // "5.0 GB · ~12 GiB RAM" — the numbers the choice is actually about.
+  function variantHint(variant: TtsModelVariant): string | null {
+    const parts: string[] = [];
+    if (variant.diskGb != null) parts.push(t.topBar.variantDisk(variant.diskGb.toFixed(1)));
+    if (variant.ramGib != null) {
+      const ram = Number.isInteger(variant.ramGib)
+        ? String(variant.ramGib)
+        : variant.ramGib.toFixed(1);
+      parts.push(t.topBar.variantRam(ram));
+    }
+    return parts.length > 0 ? parts.join(" · ") : null;
   }
 
   // Flatten every rendered clip into the {startSec, audioPath} payload the
@@ -297,6 +326,28 @@ export function TopBar() {
               {model.engines.map((engine) => (
                 <SelectItem key={engine.id} value={engine.id}>
                   {engine.displayName}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+        {showVariantSelector && (
+          <Select
+            value={selectedVariant}
+            onValueChange={(value) => void onVariantChange(value)}
+            disabled={engineSwitchDisabled}
+          >
+            <SelectTrigger
+              className="h-7 w-[136px] shrink-0 text-xs"
+              title={t.topBar.variantTitle(engineName)}
+              aria-label={t.topBar.variantLabel}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {variants.map((variant) => (
+                <SelectItem key={variant.id} value={variant.id} hint={variantHint(variant)}>
+                  {variant.label}
                 </SelectItem>
               ))}
             </SelectContent>

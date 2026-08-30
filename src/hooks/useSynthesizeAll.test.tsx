@@ -35,6 +35,8 @@ function engineInfo(): TtsEngineInfo {
     sampleRate: 24_000,
     usePolicy: "commercial-safe",
     readiness: "production",
+    variants: [],
+    selectedVariant: null,
   };
 }
 

@@ -18,6 +18,8 @@ import VoxCPM2TTS
 //   ping                  — health check.
 //   init_model            — preload the requested TTS engine and release the
 //                           inactive one before it can retain Metal memory.
+//                           `modelId` picks the artifact; a different id on a
+//                           loaded engine swaps the weights.
 //   synthesize_voxcpm2    — VoxCPM2 voice clone (48 kHz).
 //   synthesize_cosyvoice  — CosyVoice zero-shot voice clone (24 kHz).
 //   synthesize_chatterbox — Chatterbox multilingual voice clone (24 kHz).
@@ -135,16 +137,22 @@ func logProgress(_ stage: String, _ progress: Double, _ message: String) {
 final class ModelHolder: @unchecked Sendable {
     private var model: Qwen3TTSModel?
     private var tokenizerEncoder: SpeechTokenizerEncoder?
+    private var loadedModelId: String?
 
-    func load() async throws -> (Qwen3TTSModel, SpeechTokenizerEncoder) {
-        if let m = model, let e = tokenizerEncoder {
+    /// `requestedId == nil` reuses whatever is loaded; a different id reloads.
+    func load(modelId requestedId: String? = nil) async throws -> (Qwen3TTSModel, SpeechTokenizerEncoder) {
+        if let m = model, let e = tokenizerEncoder,
+           requestedId == nil || requestedId == loadedModelId {
             return (m, e)
         }
+        if model != nil { unload() }
         // 1.7B bf16 is the highest-fidelity variant. Its 4-bit was dropped (it
         // degraded badly — near-silent/garbled on some inputs); 8-bit remains an
-        // option. Override via SONIQO_TTS_MODEL_ID if needed.
-        let modelId = ProcessInfo.processInfo.environment["SONIQO_TTS_MODEL_ID"]
-            ?? "aufklarer/Qwen3-TTS-12Hz-1.7B-Base-MLX-bf16"
+        // option through the Studio's weights picker. SONIQO_TTS_MODEL_ID only
+        // covers direct callers that omit modelId.
+        let modelId = requestedId
+            ?? ProcessInfo.processInfo.environment["SONIQO_TTS_MODEL_ID"]
+            ?? Qwen3TTSModel.defaultModelId
         logErr("[sidecar] loading Qwen3-TTS model \(modelId) (first run downloads weights from HuggingFace)…")
         let result = try await Qwen3TTSModel.fromPretrainedWithEncoder(
             modelId: modelId,
@@ -154,6 +162,7 @@ final class ModelHolder: @unchecked Sendable {
         )
         model = result.0
         tokenizerEncoder = result.1
+        loadedModelId = modelId
         logErr("[sidecar] model ready")
         return result
     }
@@ -162,6 +171,7 @@ final class ModelHolder: @unchecked Sendable {
         model?.unload()
         model = nil
         tokenizerEncoder = nil
+        loadedModelId = nil
     }
 }
 
@@ -177,14 +187,22 @@ final class CosyHolder: @unchecked Sendable {
     private var model: CosyVoiceTTSModel?
     private var speechTokenizer: SpeechTokenizerModel?
     private var profileCache: [String: CosyVoiceVoiceProfile] = [:]
+    private var loadedModelId: String?
 
-    func load() async throws -> (CosyVoiceTTSModel, SpeechTokenizerModel) {
-        if let m = model, let s = speechTokenizer {
+    /// `requestedId == nil` reuses whatever is loaded; a different id reloads
+    /// (the Studio's weights picker: bf16 ↔ 8-bit bundles).
+    func load(modelId requestedId: String? = nil) async throws -> (CosyVoiceTTSModel, SpeechTokenizerModel) {
+        if let m = model, let s = speechTokenizer,
+           requestedId == nil || requestedId == loadedModelId {
             return (m, s)
         }
-        // Studio uses the full bf16 bundle: both the LLM and DiT remain
-        // unquantized (~2.1 GB on disk), which is the quality-first choice.
-        let modelId = "aufklarer/CosyVoice3-0.5B-MLX-bf16"
+        if model != nil { unload() }
+        // Default: the full bf16 bundle — LLM and DiT unquantized (~2.1 GB on
+        // disk), the quality-first choice. The Studio registry selects the
+        // artifact per request; the env var only covers direct callers.
+        let modelId = requestedId
+            ?? ProcessInfo.processInfo.environment["SONIQO_COSYVOICE_MODEL_ID"]
+            ?? CosyVoiceTTSModel.defaultModelId
         logErr("[sidecar] loading CosyVoice model \(modelId)…")
 
         // 1. Main TTS bundle (LLM + Flow + HiFiGAN + tokenizer)
@@ -223,6 +241,7 @@ final class CosyHolder: @unchecked Sendable {
 
         model = cosy
         speechTokenizer = tokenizer
+        loadedModelId = modelId
         logErr("[sidecar] cosy ready")
         return (cosy, tokenizer)
     }
@@ -276,6 +295,7 @@ final class CosyHolder: @unchecked Sendable {
         model = nil
         speechTokenizer = nil
         profileCache.removeAll()
+        loadedModelId = nil
     }
 }
 
@@ -321,9 +341,9 @@ final class VoxCPM2Holder: @unchecked Sendable {
     private var loadedModelId: String?
 
     func load(modelId requestedId: String? = nil) async throws -> VoxCPM2TTSModel {
-        // Default variant: bf16. int8 remains available through
-        // SONIQO_VOXCPM2_MODEL_ID for explicit low-memory experiments, but the
-        // Studio default should not use quantized TTS when a 16-bit bundle exists.
+        // Default variant: bf16. The Studio's weights picker selects int8 for
+        // low-memory machines by sending its modelId; SONIQO_VOXCPM2_MODEL_ID
+        // only covers direct callers that omit modelId.
         let modelId = requestedId
             ?? ProcessInfo.processInfo.environment["SONIQO_VOXCPM2_MODEL_ID"]
             ?? VoxCPM2TTSModel.defaultModelId
@@ -1043,9 +1063,9 @@ while let line = readLine(strippingNewline: true) {
             case .voxcpm2:
                 _ = try await voxHolder.load(modelId: request.modelId)
             case .cosyvoice:
-                _ = try await cosyHolder.load()
+                _ = try await cosyHolder.load(modelId: request.modelId)
             case .qwen3:
-                _ = try await holder.load()
+                _ = try await holder.load(modelId: request.modelId)
             case .chatterbox:
                 _ = try await chatterboxHolder.load(modelId: request.modelId)
             case .omnivoice:
@@ -1213,7 +1233,7 @@ while let line = readLine(strippingNewline: true) {
 
         do {
             activateEngine(.cosyvoice)
-            let (model, _) = try await cosyHolder.load()
+            let (model, _) = try await cosyHolder.load(modelId: request.modelId)
             let refURL = URL(fileURLWithPath: refPath)
             // Match the CLI: load reference at 16 kHz. extractVoiceProfile
             // resamples to 16k for the speech tokenizer and 24k for the flow
@@ -1627,7 +1647,7 @@ while let line = readLine(strippingNewline: true) {
 
         do {
             activateEngine(.qwen3)
-            let (model, codecEncoder) = try await holder.load()
+            let (model, codecEncoder) = try await holder.load(modelId: request.modelId)
 
             let refURL = URL(fileURLWithPath: refPath)
             let refSamples = try AudioFileLoader.load(url: refURL, targetSampleRate: 24000)

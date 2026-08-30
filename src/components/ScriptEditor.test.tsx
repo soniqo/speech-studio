@@ -43,6 +43,8 @@ function engineInfo(patch: Partial<TtsEngineInfo> & Pick<TtsEngineInfo, "id" | "
     sampleRate: 24_000,
     usePolicy: "commercial-safe",
     readiness: "production",
+    variants: [],
+    selectedVariant: null,
     ...patch,
   };
 }
