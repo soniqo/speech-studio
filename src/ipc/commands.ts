@@ -21,6 +21,21 @@ export type TtsEngineId =
   | "indic-mio"
   | "fish-audio";
 
+/** One selectable artifact of an engine — same architecture, different
+ * weights (precision / size / memory footprint). */
+export interface TtsModelVariant {
+  id: string;
+  label: string;
+  modelName: string;
+  modelId: string;
+  precision: string;
+  modelSize?: string;
+  /** Approximate download size in GB. */
+  diskGb?: number;
+  /** Approximate resident memory while synthesizing, in GiB. */
+  ramGib?: number;
+}
+
 export interface TtsEngineInfo {
   id: TtsEngineId;
   displayName: string;
@@ -57,10 +72,23 @@ export interface TtsEngineInfo {
   sampleRate: number;
   usePolicy: "commercial-safe" | "research-only" | "needs-review" | string;
   readiness: "production" | "legacy-fallback" | "benchmark" | "experimental" | string;
+  /** Alternative published artifacts (precision / memory trade-offs); empty
+   * when the engine ships a single bundle. `modelId`/`precision` above already
+   * reflect the selected one. */
+  variants: TtsModelVariant[];
+  /** Variant in effect — the saved choice or the registry default; null for
+   * single-bundle engines. */
+  selectedVariant: string | null;
 }
 
 export function availableTtsEngines(): Promise<TtsEngineInfo[]> {
   return invoke<TtsEngineInfo[]>("available_tts_engines");
+}
+
+/** Persist which artifact `engine` loads and get the refreshed engine list.
+ * Follow with `initModel(engine)` so the sidecar swaps the weights. */
+export function setTtsVariant(engine: TtsEngineId, variant: string): Promise<TtsEngineInfo[]> {
+  return invoke<TtsEngineInfo[]>("set_tts_variant", { args: { engine, variant } });
 }
 
 export type AsrModelId = "parakeet-tdt-v3";

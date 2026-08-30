@@ -123,6 +123,11 @@ const en = {
     pickAnotherModelTitle: (engine: string) =>
       `${engine} failed to load — choose a different engine`,
     synthesisLanguageTitle: "Synthesis language for multilingual engines",
+    variantLabel: "Model weights",
+    variantTitle: (engine: string) =>
+      `${engine} weights — lower precision needs less memory; switching reloads the model`,
+    variantDisk: (gb: string) => `${gb} GB`,
+    variantRam: (gib: string) => `~${gib} GiB RAM`,
     waitModel: (engine: string) => `Wait for ${engine} to finish loading`,
     loadProjectFirst: "Load a project first",
     synthesizeMissingTitle: (count: number) =>
@@ -410,6 +415,11 @@ const ru: typeof en = {
     pickAnotherModelTitle: (engine) =>
       `${engine} не загрузился — выберите другой движок`,
     synthesisLanguageTitle: "Язык синтеза для многоязычных движков",
+    variantLabel: "Веса модели",
+    variantTitle: (engine) =>
+      `Веса ${engine}: меньшая точность экономит память; переключение перезагружает модель`,
+    variantDisk: (gb) => `${gb} ГБ`,
+    variantRam: (gib) => `~${gib} ГиБ ОЗУ`,
     waitModel: (engine) => `Дождитесь завершения загрузки ${engine}`,
     loadProjectFirst: "Сначала загрузите проект",
     synthesizeMissingTitle: (count) =>
