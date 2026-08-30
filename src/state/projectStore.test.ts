@@ -27,6 +27,8 @@ function engineInfo(
     sampleRate: 24_000,
     usePolicy: "commercial-safe",
     readiness: "production",
+    variants: [],
+    selectedVariant: null,
     ...patch,
   };
 }

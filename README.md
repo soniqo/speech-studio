@@ -123,7 +123,7 @@ hf download openbmb/VoxCPM2 \
 
 **Option B — browser:** download the files from [aufklarer/VoxCPM2-MLX-int8](https://huggingface.co/aufklarer/VoxCPM2-MLX-int8/tree/main) and [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2/tree/main) into the same two directories. Minimum set: the model directory needs `config.json` plus every `*.safetensors` file; the tokenizer directory needs the five files listed in the command above.
 
-The app detects the files on the next launch and skips the download entirely. If you overrode `SONIQO_VOXCPM2_MODEL_ID`, substitute that repo id in the model path. Source builds launched from a terminal can also extend the in-app stall patience with `HF_DOWNLOAD_STALL_TIMEOUT=<seconds>`.
+The app detects the files on the next launch and skips the download entirely. The commands above fetch the **int8** weights, so pick *int8* in the toolbar's weights picker next to the engine selector (the default is bf16 — to pre-download that one instead, substitute `aufklarer/VoxCPM2-MLX-bf16` in both places). Source builds launched from a terminal can also extend the in-app stall patience with `HF_DOWNLOAD_STALL_TIMEOUT=<seconds>`.
 
 ## Build from source
 
@@ -175,7 +175,9 @@ The selectable **VoxCPM2** MLX engine:
 
 The macOS engines load separately when selected — only one is resident at a time (switching unloads the previous): **Chatterbox** ~4 GB resident (1.3 GB on disk), **CosyVoice 3** lighter than VoxCPM2, **Qwen3-TTS** (1.7B bf16) heavier. OmniVoice is downloaded and loaded separately when selected.
 
-The MLX buffer cache is capped at 1 GB (`SONIQO_MLX_CACHE_MB` to override) — without that cap, peak grows to tens of GB on long sessions as varying-shape buffers accumulate. Override the VoxCPM2 model with `SONIQO_VOXCPM2_MODEL_ID=aufklarer/VoxCPM2-MLX-bf16` if you want the higher-fidelity weights.
+The MLX buffer cache is capped at 1 GB (`SONIQO_MLX_CACHE_MB` to override) — without that cap, peak grows to tens of GB on long sessions as varying-shape buffers accumulate.
+
+Engines that publish more than one set of weights show a **weights picker** next to the engine selector: VoxCPM2 (bf16 / int8), CosyVoice 3 (bf16 / 8-bit LLM / 8-bit LLM + DiT) and Qwen3-TTS (bf16 / 8-bit). Lower precision trades a little fidelity for a smaller download and less memory; switching reloads the engine, and the choice is remembered across launches.
 
 ### Try the demo
 

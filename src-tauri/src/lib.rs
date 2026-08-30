@@ -371,7 +371,7 @@ struct SidecarResponse {
 /// TTS backends exposed by the Studio. CosyVoice is currently available only
 /// through the macOS Swift/MLX sidecar; Windows and Linux continue to expose
 /// VoxCPM2 through speech-core.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 enum TtsEngine {
     VoxCPM2,
@@ -426,6 +426,37 @@ struct TtsEngineInfo {
     #[serde(rename = "usePolicy")]
     use_policy: String,
     readiness: String,
+    /// Alternative published artifacts for this engine (precision / memory
+    /// trade-offs). Empty when the engine ships a single bundle. The entry's
+    /// top-level `modelId` is the default and must match one variant.
+    #[serde(default)]
+    variants: Vec<TtsModelVariant>,
+    /// Variant id in effect for this engine (the saved choice, else the
+    /// registry default). `None` for single-bundle engines. Populated when the
+    /// info is resolved against the model settings, never read from the
+    /// registry file.
+    #[serde(default, rename = "selectedVariant")]
+    selected_variant: Option<String>,
+}
+
+/// One selectable artifact of a TTS engine — same architecture and sidecar
+/// command, different weights (precision, size, memory footprint).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct TtsModelVariant {
+    id: String,
+    label: String,
+    model_name: String,
+    model_id: String,
+    precision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_size: Option<String>,
+    /// Approximate download size in GB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disk_gb: Option<f64>,
+    /// Approximate resident memory while synthesizing, in GiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ram_gib: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -483,6 +514,10 @@ struct ModelPlatformOverride {
     model_id: Option<String>,
     runtime: Option<String>,
     precision: Option<String>,
+    /// Replaces the variant list on this platform. When omitted, the list is
+    /// dropped whenever the override changes `modelId` — another runtime's
+    /// bundle has its own artifacts, so the MLX variants would be wrong.
+    variants: Option<Vec<TtsModelVariant>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -507,7 +542,59 @@ impl TtsEngineInfo {
         if let Some(value) = &item.precision {
             self.precision = value.clone();
         }
+        if let Some(value) = &item.variants {
+            self.variants = value.clone();
+        } else if item.model_id.is_some() {
+            self.variants.clear();
+        }
     }
+
+    /// The registry default variant — the one whose artifact matches the
+    /// entry's top-level `modelId`. `None` for single-bundle engines.
+    fn default_variant(&self) -> Option<&TtsModelVariant> {
+        self.variants.iter().find(|v| v.model_id == self.model_id)
+    }
+
+    /// Point the entry at `variant`'s artifact and record the selection.
+    fn apply_variant(&mut self, variant: &TtsModelVariant) {
+        self.model_name = variant.model_name.clone();
+        self.model_id = variant.model_id.clone();
+        self.precision = variant.precision.clone();
+        if let Some(size) = &variant.model_size {
+            self.model_size = size.clone();
+        }
+        self.selected_variant = Some(variant.id.clone());
+    }
+}
+
+/// Registry invariants for an engine's variant list: unique, non-empty ids and
+/// exactly one variant carrying the entry's default artifact, so the picker
+/// always has a well-defined default.
+fn validate_variants(info: &TtsEngineInfo) -> Result<(), String> {
+    if info.variants.is_empty() {
+        return Ok(());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for v in &info.variants {
+        if v.id.trim().is_empty() || v.model_id.trim().is_empty() {
+            return Err(format!("{:?}: variant with empty id or modelId", info.id));
+        }
+        if !seen.insert(v.id.as_str()) {
+            return Err(format!("{:?}: duplicate variant id {}", info.id, v.id));
+        }
+    }
+    let defaults = info
+        .variants
+        .iter()
+        .filter(|v| v.model_id == info.model_id)
+        .count();
+    if defaults != 1 {
+        return Err(format!(
+            "{:?}: expected exactly one variant with the default modelId {}, found {}",
+            info.id, info.model_id, defaults
+        ));
+    }
+    Ok(())
 }
 
 impl AsrModelInfo {
@@ -545,6 +632,7 @@ static MODEL_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(|| {
         if let Some(item) = entry.platform_overrides.get(platform) {
             entry.info.apply_platform_override(item);
         }
+        validate_variants(&entry.info).expect("model-registry.json variants must be consistent");
     }
     for entry in &mut registry.asr_models {
         if let Some(item) = entry.platform_overrides.get(platform) {
@@ -674,8 +762,85 @@ fn humanize_sidecar_error(engine: TtsEngine, error: String) -> String {
     error
 }
 
+/// Registry info with no user selection applied (the default artifact).
 fn tts_engine_info(engine: TtsEngine) -> TtsEngineInfo {
-    engine.registry_entry().info.clone()
+    resolve_tts_engine_info(engine, &ModelSettings::default())
+}
+
+/// Registry info with the user's saved variant applied. An unknown or stale
+/// variant id (e.g. one removed by an update) falls back to the registry
+/// default rather than failing the engine.
+fn resolve_tts_engine_info(engine: TtsEngine, settings: &ModelSettings) -> TtsEngineInfo {
+    let mut info = engine.registry_entry().info.clone();
+    if info.variants.is_empty() {
+        return info;
+    }
+    let selected = settings
+        .tts_variants
+        .get(&engine)
+        .and_then(|id| info.variants.iter().find(|v| &v.id == id))
+        .or_else(|| info.default_variant())
+        .cloned();
+    if let Some(variant) = selected {
+        info.apply_variant(&variant);
+    }
+    info
+}
+
+fn resolved_tts_engines(settings: &ModelSettings) -> Vec<TtsEngineInfo> {
+    MODEL_REGISTRY
+        .tts_engines
+        .iter()
+        .filter(|entry| engine_is_supported(entry.info.id))
+        .map(|entry| resolve_tts_engine_info(entry.info.id, settings))
+        .collect()
+}
+
+/// Per-user model choices that survive restarts: which published artifact
+/// each engine loads. Stored as JSON under the app data dir; a missing or
+/// unreadable file means "registry defaults".
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelSettings {
+    #[serde(default)]
+    tts_variants: HashMap<TtsEngine, String>,
+}
+
+struct ModelSettingsState(Mutex<ModelSettings>);
+
+const MODEL_SETTINGS_FILE: &str = "model-settings.json";
+
+fn model_settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    Ok(dir.join(MODEL_SETTINGS_FILE))
+}
+
+fn load_model_settings(app: &tauri::AppHandle) -> ModelSettings {
+    let Ok(path) = model_settings_path(app) else {
+        return ModelSettings::default();
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
+            eprintln!(
+                "[speech-studio] ignoring unreadable {}: {e}",
+                path.display()
+            );
+            ModelSettings::default()
+        }),
+        Err(_) => ModelSettings::default(),
+    }
+}
+
+fn save_model_settings(app: &tauri::AppHandle, settings: &ModelSettings) -> Result<(), String> {
+    let path = model_settings_path(app)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 fn asr_model_info(model: AsrModel) -> AsrModelInfo {
@@ -683,13 +848,42 @@ fn asr_model_info(model: AsrModel) -> AsrModelInfo {
 }
 
 #[tauri::command]
-async fn available_tts_engines() -> Vec<TtsEngineInfo> {
-    MODEL_REGISTRY
-        .tts_engines
-        .iter()
-        .filter(|entry| engine_is_supported(entry.info.id))
-        .map(|entry| entry.info.clone())
-        .collect()
+async fn available_tts_engines(
+    settings: State<'_, ModelSettingsState>,
+) -> Result<Vec<TtsEngineInfo>, String> {
+    let settings = settings.0.lock().map_err(|e| e.to_string())?;
+    Ok(resolved_tts_engines(&settings))
+}
+
+#[derive(Deserialize)]
+struct SetTtsVariantArgs {
+    engine: TtsEngine,
+    variant: String,
+}
+
+/// Persist the artifact choice for an engine and return the refreshed engine
+/// list. The caller re-runs `init_model` so the sidecar swaps the weights.
+#[tauri::command]
+async fn set_tts_variant(
+    app: tauri::AppHandle,
+    settings: State<'_, ModelSettingsState>,
+    args: SetTtsVariantArgs,
+) -> Result<Vec<TtsEngineInfo>, String> {
+    ensure_engine_supported(args.engine)?;
+    let entry = args.engine.registry_entry();
+    if !entry.info.variants.iter().any(|v| v.id == args.variant) {
+        return Err(format!(
+            "{} has no model variant {:?}",
+            args.engine.display_name(),
+            args.variant
+        ));
+    }
+    let mut settings = settings.0.lock().map_err(|e| e.to_string())?;
+    settings
+        .tts_variants
+        .insert(args.engine, args.variant.clone());
+    save_model_settings(&app, &settings)?;
+    Ok(resolved_tts_engines(&settings))
 }
 
 #[tauri::command]
@@ -717,9 +911,22 @@ struct InitModelArgs {
 }
 
 #[tauri::command]
-async fn init_model(manager: State<'_, SidecarManager>, args: InitModelArgs) -> Result<(), String> {
+async fn init_model(
+    manager: State<'_, SidecarManager>,
+    settings: State<'_, ModelSettingsState>,
+    args: InitModelArgs,
+) -> Result<(), String> {
     ensure_engine_supported(args.engine)?;
-    let info = tts_engine_info(args.engine);
+    let info = {
+        let settings = settings.0.lock().map_err(|e| e.to_string())?;
+        resolve_tts_engine_info(args.engine, &settings)
+    };
+    eprintln!(
+        "[speech-studio] init_model {} -> {} (variant: {})",
+        args.engine.display_name(),
+        info.model_id,
+        info.selected_variant.as_deref().unwrap_or("default")
+    );
     let payload = serde_json::json!({
         "id": format!("init-{}", uuid::Uuid::new_v4()),
         "command": "init_model",
@@ -1213,6 +1420,7 @@ fn synth_max_tokens(engine: TtsEngine, target_word_count: usize) -> usize {
 fn synth_one_line(
     manager: &SidecarManager,
     engine: TtsEngine,
+    model_id: &str,
     clip_id: &str,
     voice_id: &str,
     reference_audio_path: &str,
@@ -1237,7 +1445,6 @@ fn synth_one_line(
     // 6-word chunk (natural ≈ 15 steps) to ramble to 74 steps / 11.8 s.
     let min_stop_steps = (target_word_count.saturating_mul(5) / 2).clamp(8, max_tokens - 16);
     let sidecar_language = normalize_sidecar_language(engine, language);
-    let model_id = engine.registry_entry().info.model_id.as_str();
 
     // Single-shot for every engine. The 16-bit (fp16/bf16) models produce
     // intelligible speech in one pass, so there is no seed/cfg retry ladder and
@@ -1485,10 +1692,17 @@ fn equalize_chunk_loudness(rendered: &mut [Vec<f32>], rate: u32) {
 #[tauri::command]
 async fn synthesize_clip(
     manager: State<'_, SidecarManager>,
+    settings: State<'_, ModelSettingsState>,
     args: SynthesizeArgs,
 ) -> Result<SynthesizeResult, String> {
     let synth_started = std::time::Instant::now();
     ensure_engine_supported(args.engine)?;
+    // Resolve the artifact once per clip so every chunk renders with the same
+    // weights even if the variant picker changes mid-render.
+    let model_id = {
+        let settings = settings.0.lock().map_err(|e| e.to_string())?;
+        resolve_tts_engine_info(args.engine, &settings).model_id
+    };
     if args.text.trim().is_empty() {
         return Err("clip text is empty".into());
     }
@@ -1544,6 +1758,7 @@ async fn synthesize_clip(
         let (audio_path, duration_sec) = synth_one_line(
             &manager,
             args.engine,
+            &model_id,
             &args.clip_id,
             &args.voice_id,
             &reference_audio_path,
@@ -1573,6 +1788,7 @@ async fn synthesize_clip(
         let (path, _dur) = synth_one_line(
             &manager,
             args.engine,
+            &model_id,
             &args.clip_id,
             &args.voice_id,
             &reference_audio_path,
@@ -2711,12 +2927,16 @@ pub fn run() {
             // fine, the sidecar's own dir covers dev.
             let resource_dir = app.path().resource_dir().ok();
             app.manage(SidecarManager::new(resource_dir, app.handle().clone()));
+            app.manage(ModelSettingsState(Mutex::new(load_model_settings(
+                app.handle(),
+            ))));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             ping_sidecar,
             available_tts_engines,
             available_asr_models,
+            set_tts_variant,
             init_model,
             interrupt_model_load,
             pick_video,
@@ -2950,6 +3170,117 @@ mod tests {
             .any(|marker| marker == "excited"));
         assert_eq!(fish.use_policy, "research-only");
         assert!(!fish.needs_trim);
+    }
+
+    #[test]
+    fn registry_variants_are_consistent_and_default_resolves() {
+        for entry in &MODEL_REGISTRY.tts_engines {
+            validate_variants(&entry.info).expect("registry variants");
+        }
+        let vox = tts_engine_info(TtsEngine::VoxCPM2);
+        if cfg!(target_os = "macos") {
+            let ids: Vec<&str> = vox.variants.iter().map(|v| v.id.as_str()).collect();
+            assert_eq!(ids, ["bf16", "int8"]);
+            assert_eq!(vox.selected_variant.as_deref(), Some("bf16"));
+            let cosy = tts_engine_info(TtsEngine::CosyVoice);
+            assert_eq!(cosy.variants.len(), 3);
+            assert_eq!(cosy.selected_variant.as_deref(), Some("bf16"));
+            assert_eq!(cosy.model_id, "aufklarer/CosyVoice3-0.5B-MLX-bf16");
+        } else {
+            // The LiteRT bundle has no published alternates; the MLX list
+            // must not leak through the platform override.
+            assert!(vox.variants.is_empty());
+            assert_eq!(vox.selected_variant, None);
+        }
+        let indic = tts_engine_info(TtsEngine::IndicMio);
+        assert!(indic.variants.is_empty());
+        assert_eq!(indic.selected_variant, None);
+    }
+
+    #[test]
+    fn validate_variants_rejects_inconsistent_lists() {
+        let mut info = tts_engine_info(TtsEngine::VoxCPM2);
+        let variant = |id: &str, model_id: &str| TtsModelVariant {
+            id: id.into(),
+            label: id.into(),
+            model_name: id.into(),
+            model_id: model_id.into(),
+            precision: "bf16".into(),
+            model_size: None,
+            disk_gb: None,
+            ram_gib: None,
+        };
+        info.model_id = "a/default".into();
+        info.variants = vec![variant("x", "a/other")];
+        assert!(
+            validate_variants(&info).is_err(),
+            "default artifact missing"
+        );
+        info.variants = vec![variant("x", "a/default"), variant("x", "a/other")];
+        assert!(validate_variants(&info).is_err(), "duplicate ids");
+        info.variants = vec![variant("x", "a/default"), variant("y", "a/other")];
+        assert!(validate_variants(&info).is_ok());
+    }
+
+    #[test]
+    fn resolve_applies_saved_variant_and_falls_back_on_unknown() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let mut settings = ModelSettings::default();
+        settings
+            .tts_variants
+            .insert(TtsEngine::VoxCPM2, "int8".into());
+        let vox = resolve_tts_engine_info(TtsEngine::VoxCPM2, &settings);
+        assert_eq!(vox.model_id, "aufklarer/VoxCPM2-MLX-int8");
+        assert_eq!(vox.model_name, "voxcpm2-mlx-int8");
+        assert_eq!(vox.precision, "int8");
+        assert_eq!(vox.selected_variant.as_deref(), Some("int8"));
+        // Everything that is not artifact-specific stays untouched.
+        assert_eq!(vox.id.sidecar_command(), "synthesize_voxcpm2");
+        assert_eq!(vox.languages.len(), 30);
+
+        settings
+            .tts_variants
+            .insert(TtsEngine::CosyVoice, "no-such-variant".into());
+        let cosy = resolve_tts_engine_info(TtsEngine::CosyVoice, &settings);
+        assert_eq!(cosy.model_id, "aufklarer/CosyVoice3-0.5B-MLX-bf16");
+        assert_eq!(cosy.selected_variant.as_deref(), Some("bf16"));
+
+        // A selection for a single-bundle engine is ignored.
+        settings
+            .tts_variants
+            .insert(TtsEngine::IndicMio, "int8".into());
+        let indic = resolve_tts_engine_info(TtsEngine::IndicMio, &settings);
+        assert_eq!(indic.model_id, "aufklarer/Indic-Mio-MLX-fp16");
+        assert_eq!(indic.selected_variant, None);
+    }
+
+    #[test]
+    fn model_settings_roundtrip_json_with_engine_keys() {
+        let mut settings = ModelSettings::default();
+        settings
+            .tts_variants
+            .insert(TtsEngine::VoxCPM2, "int8".into());
+        settings
+            .tts_variants
+            .insert(TtsEngine::IndicMio, "fp16".into());
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("\"voxcpm2\":\"int8\""), "{json}");
+        assert!(json.contains("\"indic-mio\":\"fp16\""), "{json}");
+        let back: ModelSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.tts_variants
+                .get(&TtsEngine::VoxCPM2)
+                .map(String::as_str),
+            Some("int8")
+        );
+        // Unknown engines in an old settings file must not break loading.
+        let stale: Result<ModelSettings, _> =
+            serde_json::from_str("{\"ttsVariants\":{\"retired-engine\":\"x\"}}");
+        assert!(stale.is_err() || stale.unwrap().tts_variants.is_empty());
+        let empty: ModelSettings = serde_json::from_str("{}").unwrap();
+        assert!(empty.tts_variants.is_empty());
     }
 
     #[test]
