@@ -319,6 +319,25 @@ const en = {
   appShell: {
     preparingDownload: "Preparing model download",
   },
+  activity: {
+    title: "Activity",
+    toggleTitle: "Show what the speech engine is doing: log, memory",
+    processShort: (gb: string) => `${gb} GB`,
+    copy: "Copy",
+    copied: "Copied",
+    copyTitle: "Copy the visible log to the clipboard",
+    reveal: "Log file",
+    noLogFile: "No log file for this session",
+    clear: "Clear",
+    clearTitle: "Clear the visible log (the log file keeps everything)",
+    close: "Close",
+    empty: "Nothing logged yet — load a model or synthesize a clip.",
+    noMemoryYet: "memory: waiting for the engine",
+    memory: (active: string, peak: string, process: string | null) =>
+      process == null
+        ? `MLX ${active} GB · peak ${peak} GB`
+        : `MLX ${active} GB · peak ${peak} GB · process ${process} GB`,
+  },
 } satisfies Record<string, unknown>;
 
 const ru: typeof en = {
@@ -586,6 +605,25 @@ const ru: typeof en = {
   },
   appShell: {
     preparingDownload: "Подготовка загрузки модели",
+  },
+  activity: {
+    title: "Активность",
+    toggleTitle: "Показать, что делает речевой движок: лог, память",
+    processShort: (gb) => `${gb} ГБ`,
+    copy: "Копировать",
+    copied: "Скопировано",
+    copyTitle: "Скопировать видимый лог в буфер обмена",
+    reveal: "Файл лога",
+    noLogFile: "В этой сессии нет файла лога",
+    clear: "Очистить",
+    clearTitle: "Очистить видимый лог (файл лога сохраняет всё)",
+    close: "Закрыть",
+    empty: "Пока ничего не записано — загрузите модель или синтезируйте клип.",
+    noMemoryYet: "память: ждём движок",
+    memory: (active, peak, process) =>
+      process == null
+        ? `MLX ${active} ГБ · пик ${peak} ГБ`
+        : `MLX ${active} ГБ · пик ${peak} ГБ · процесс ${process} ГБ`,
   },
 };
 

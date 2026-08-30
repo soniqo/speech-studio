@@ -2,6 +2,7 @@ import { Pause, Play } from "lucide-react";
 import { useProjectStore } from "../state/projectStore";
 import { useAnyClipRendered } from "../hooks/useSynthesizeAll";
 import { Button } from "./ui/button";
+import { ActivityToggle } from "./ActivityPanel";
 import { cn } from "@/lib/utils";
 import { useI18n } from "../i18n/useI18n";
 
@@ -82,6 +83,7 @@ export function Transport() {
           )}
         />
       </div>
+      <ActivityToggle />
     </footer>
   );
 }

@@ -181,6 +181,10 @@ The MLX buffer cache is capped at 1 GB (`SONIQO_MLX_CACHE_MB` to override) — w
 
 Hit **Load demo** in the top bar. It bootstraps a Scene 04 storyboard with two cloned voices (Anna and Marek) and four lines of dialogue — one with each emotion marker — then synthesizes everything through the currently selected engine (CosyVoice 3 by default on macOS).
 
+### Activity log
+
+The **Activity** button in the transport bar opens a live log of what the engine is doing: model downloads and loads, every synthesis step, and the sidecar's memory snapshots after each load and render (MLX active/peak plus the real process footprint). *Copy* puts the visible log on the clipboard for a bug report; *Log file* reveals the full, rotating file — `~/Library/Logs/audio.soniqo.studio/speech-studio.log` on macOS, `%LOCALAPPDATA%\audio.soniqo.studio\logs\` on Windows, `~/.local/share/audio.soniqo.studio/logs/` on Linux.
+
 ### Packaging your own .app / .dmg
 
 ```bash

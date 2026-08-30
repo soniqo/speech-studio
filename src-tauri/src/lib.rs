@@ -12,6 +12,252 @@ use std::time::Instant;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+// ── Activity log ────────────────────────────────────────────────────────────
+//
+// Everything the sidecar prints on stderr, plus the shell's own progress
+// lines, kept in a bounded in-memory ring for the Activity panel, streamed to
+// the WebView as `activity_log` events, appended to a rotating file under the
+// app log dir, and still echoed to stderr for terminal launches. The bundled
+// app previously had no log surface at all: a stalled download or a failed
+// load could only be diagnosed by relaunching from Terminal.
+
+macro_rules! studio_log {
+    ($($arg:tt)*) => {
+        log_line(LogSource::Studio, format!($($arg)*))
+    };
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum LogSource {
+    Sidecar,
+    Studio,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ActivityLine {
+    seq: u64,
+    #[serde(rename = "tsMs")]
+    ts_ms: u64,
+    source: LogSource,
+    text: String,
+}
+
+const ACTIVITY_RING_CAPACITY: usize = 2000;
+const ACTIVITY_LOG_FILE: &str = "speech-studio.log";
+const ACTIVITY_LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
+
+struct ActivityLog {
+    lines: Mutex<std::collections::VecDeque<ActivityLine>>,
+    next_seq: std::sync::atomic::AtomicU64,
+    sink: Mutex<Option<std::fs::File>>,
+    path: Mutex<Option<PathBuf>>,
+    app: std::sync::OnceLock<tauri::AppHandle>,
+}
+
+static ACTIVITY_LOG: LazyLock<ActivityLog> = LazyLock::new(|| ActivityLog {
+    lines: Mutex::new(std::collections::VecDeque::with_capacity(
+        ACTIVITY_RING_CAPACITY,
+    )),
+    next_seq: std::sync::atomic::AtomicU64::new(1),
+    sink: Mutex::new(None),
+    path: Mutex::new(None),
+    app: std::sync::OnceLock::new(),
+});
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Keep the log file bounded: once it passes the rotation size the previous
+/// content survives as `<name>.1` and a fresh file starts.
+fn rotate_log_file(path: &Path) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() < ACTIVITY_LOG_ROTATE_BYTES {
+        return;
+    }
+    let mut rotated = path.as_os_str().to_owned();
+    rotated.push(".1");
+    let _ = std::fs::rename(path, PathBuf::from(rotated));
+}
+
+/// Wire the ring to the app (event emission) and the log file. Called once
+/// from setup; lines logged before that only buffer and echo to stderr.
+fn init_activity_log(app: &tauri::AppHandle) {
+    let _ = ACTIVITY_LOG.app.set(app.clone());
+    let dir = match app.path().app_log_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            studio_log!("[speech-studio] no app log dir, logging to stderr only: {e}");
+            return;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        studio_log!("[speech-studio] cannot create {}: {e}", dir.display());
+        return;
+    }
+    let path = dir.join(ACTIVITY_LOG_FILE);
+    rotate_log_file(&path);
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => {
+            if let Ok(mut sink) = ACTIVITY_LOG.sink.lock() {
+                *sink = Some(file);
+            }
+            if let Ok(mut current) = ACTIVITY_LOG.path.lock() {
+                *current = Some(path.clone());
+            }
+            studio_log!(
+                "[speech-studio] v{} started; log file {}",
+                app.package_info().version,
+                path.display()
+            );
+        }
+        Err(e) => studio_log!("[speech-studio] cannot open {}: {e}", path.display()),
+    }
+}
+
+fn log_line(source: LogSource, text: String) {
+    eprintln!("{text}");
+    let line = ActivityLine {
+        seq: ACTIVITY_LOG
+            .next_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        ts_ms: unix_ms(),
+        source,
+        text,
+    };
+    if let Ok(mut lines) = ACTIVITY_LOG.lines.lock() {
+        if lines.len() >= ACTIVITY_RING_CAPACITY {
+            lines.pop_front();
+        }
+        lines.push_back(line.clone());
+    }
+    if let Ok(mut sink) = ACTIVITY_LOG.sink.lock() {
+        if let Some(file) = sink.as_mut() {
+            let tag = match source {
+                LogSource::Sidecar => "sidecar",
+                LogSource::Studio => "studio ",
+            };
+            let _ = writeln!(
+                file,
+                "{} {} {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                tag,
+                line.text
+            );
+        }
+    }
+    if let Some(app) = ACTIVITY_LOG.app.get() {
+        let _ = app.emit("activity_log", line);
+    }
+}
+
+/// The Swift sidecar prints an MLX memory snapshot after loads and renders:
+/// `[sidecar] mem post-vox-synth active=2130M cache=512M peak=4312M rss=5120M
+/// footprint=6100M`. Older sidecars omit the process figures.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct SidecarMemoryEvent {
+    label: String,
+    #[serde(rename = "activeMb")]
+    active_mb: Option<u64>,
+    #[serde(rename = "cacheMb")]
+    cache_mb: Option<u64>,
+    #[serde(rename = "peakMb")]
+    peak_mb: Option<u64>,
+    #[serde(rename = "rssMb")]
+    rss_mb: Option<u64>,
+    #[serde(rename = "footprintMb")]
+    footprint_mb: Option<u64>,
+}
+
+fn parse_sidecar_memory(line: &str) -> Option<SidecarMemoryEvent> {
+    let rest = line.split_once("[sidecar] mem ")?.1.trim();
+    let mut parts = rest.split_whitespace();
+    let mut event = SidecarMemoryEvent {
+        label: parts.next()?.to_string(),
+        active_mb: None,
+        cache_mb: None,
+        peak_mb: None,
+        rss_mb: None,
+        footprint_mb: None,
+    };
+    let mut any = false;
+    for part in parts {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        let Ok(mb) = value.trim_end_matches('M').parse::<u64>() else {
+            continue;
+        };
+        let slot = match key {
+            "active" => &mut event.active_mb,
+            "cache" => &mut event.cache_mb,
+            "peak" => &mut event.peak_mb,
+            "rss" => &mut event.rss_mb,
+            "footprint" => &mut event.footprint_mb,
+            _ => continue,
+        };
+        *slot = Some(mb);
+        any = true;
+    }
+    any.then_some(event)
+}
+
+#[tauri::command]
+async fn activity_log_snapshot() -> Vec<ActivityLine> {
+    ACTIVITY_LOG
+        .lines
+        .lock()
+        .map(|lines| lines.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+#[derive(Serialize)]
+struct ActivityLogInfo {
+    path: Option<String>,
+}
+
+#[tauri::command]
+async fn activity_log_info() -> ActivityLogInfo {
+    ActivityLogInfo {
+        path: ACTIVITY_LOG
+            .path
+            .lock()
+            .ok()
+            .and_then(|p| p.as_ref().map(|p| p.display().to_string())),
+    }
+}
+
+#[tauri::command]
+async fn reveal_activity_log(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let path = ACTIVITY_LOG
+        .path
+        .lock()
+        .ok()
+        .and_then(|p| p.clone())
+        .ok_or("no log file for this session")?;
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn clear_activity_log() {
+    if let Ok(mut lines) = ACTIVITY_LOG.lines.lock() {
+        lines.clear();
+    }
+}
+
 // ---------- sidecar process management ----------
 
 // Sidecar binary name (Tauri's externalBin bundler strips the target-triple
@@ -103,7 +349,7 @@ fn colocate_metallib(sidecar_dir: &std::path::Path) {
         // the first Gatekeeper bypass. If both fail, swallow — the sidecar
         // will spawn and surface a clear MLX error to the frontend.
         if let Err(e2) = std::fs::copy(&src, &dest) {
-            eprintln!("[speech-studio] failed to colocate mlx.metallib: symlink={e}, copy={e2}");
+            studio_log!("[speech-studio] failed to colocate mlx.metallib: symlink={e}, copy={e2}");
         }
     }
 }
@@ -276,10 +522,13 @@ impl SidecarManager {
             std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().map_while(Result::ok) {
-                    eprintln!("{line}");
                     if let Some(event) = parse_sidecar_progress(&line) {
                         let _ = app.emit("model_progress", event);
                     }
+                    if let Some(event) = parse_sidecar_memory(&line) {
+                        let _ = app.emit("sidecar_memory", event);
+                    }
+                    log_line(LogSource::Sidecar, line);
                 }
             });
         }
@@ -349,7 +598,9 @@ fn kill_process(pid: u32) -> Result<(), String> {
         .map_err(|e| format!("failed to interrupt sidecar process {pid}: {e}"))?;
 
     if !status.success() {
-        eprintln!("[speech-studio] sidecar process {pid} was already gone or could not be killed");
+        studio_log!(
+            "[speech-studio] sidecar process {pid} was already gone or could not be killed"
+        );
     }
     Ok(())
 }
@@ -1289,7 +1540,7 @@ fn synth_one_line(
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
     validate_synth_audio(&audio_path)?;
-    eprintln!(
+    studio_log!(
         "[synth] clip {} part {} synthesized via {} single-shot (seed={}, {:.2}s)",
         clip_id,
         part_idx,
@@ -1510,9 +1761,11 @@ async fn synthesize_clip(
     // keeping the preprocess is harmless and stays useful if we fall back.
     let processed_text = preprocess_target(&args.text);
     if processed_text != args.text {
-        eprintln!(
+        studio_log!(
             "[synth] clip {} preprocessed text: {:?} -> {:?}",
-            args.clip_id, args.text, processed_text
+            args.clip_id,
+            args.text,
+            processed_text
         );
     }
 
@@ -1560,7 +1813,7 @@ async fn synthesize_clip(
         });
     }
 
-    eprintln!(
+    studio_log!(
         "[synth] clip {} long-form: {} chunks (≤{} words each)",
         args.clip_id,
         chunks.len(),
@@ -1622,7 +1875,7 @@ async fn synthesize_clip(
     ));
     write_wav_pcm16_mono(&out_path, rate, &combined)?;
     let duration_sec = combined.len() as f64 / rate as f64;
-    eprintln!(
+    studio_log!(
         "[synth] clip {} long-form done: {:.2}s audio across {} chunks in {:.2}s wall",
         args.clip_id,
         duration_sec,
@@ -2216,11 +2469,11 @@ fn demo_clip_seeds(cache_prefix: &str, lines: &[(usize, &str)]) -> Vec<DemoClipS
 
 #[tauri::command]
 async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
-    eprintln!("[seed_demo] start (lazy mode: bundled references only)");
+    studio_log!("[seed_demo] start (lazy mode: bundled references only)");
     emit_progress(&app, "references", 0, 1, "Preparing reference voices…");
     let dir = std::env::temp_dir().join("soniqo-demo");
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {}", e))?;
-    eprintln!("[seed_demo] dir = {}", dir.display());
+    studio_log!("[seed_demo] dir = {}", dir.display());
 
     // Step 1 — bundle real human-voice reference clips into the binary so the
     // demo uses distinct natural voices instead of `say`'s synthetic output.
@@ -2250,7 +2503,7 @@ async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
         // changed across builds (e.g. when we swap the reference voice).
         std::fs::write(&path, bytes)
             .map_err(|e| format!("write {} failed: {}", path.display(), e))?;
-        eprintln!(
+        studio_log!(
             "[seed_demo] wrote bundled reference {} ({} bytes)",
             path.display(),
             bytes.len()
@@ -2260,7 +2513,7 @@ async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
             reference_text: (*ref_text).to_string(),
         });
     }
-    eprintln!("[seed_demo] references ready; synthesis is on demand");
+    studio_log!("[seed_demo] references ready; synthesis is on demand");
 
     // Step 2 — demo lines, each wrapped in a VoxCPM2 style marker. The
     // sidecar's extractFirstEmotionTag pulls the tag name out and passes it
@@ -2288,7 +2541,7 @@ async fn seed_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
 
 #[tauri::command]
 async fn seed_hindi_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
-    eprintln!("[seed_hindi_demo] start");
+    studio_log!("[seed_hindi_demo] start");
     emit_progress(&app, "references", 0, 1, "Preparing Hindi reference voice…");
     let dir = std::env::temp_dir().join("soniqo-demo");
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {}", e))?;
@@ -2563,7 +2816,7 @@ async fn export_project(args: ExportArgs) -> Result<ExportResult, String> {
     }
 
     write_wav_pcm16_mono(std::path::Path::new(&args.out_path), sample_rate, &mix)?;
-    eprintln!(
+    studio_log!(
         "[export] wrote {} ({} frames @ {} Hz from {} clips)",
         args.out_path,
         mix.len(),
@@ -2709,12 +2962,17 @@ pub fn run() {
             // resource_dir() is where Tauri stages bundled `resources` (incl.
             // libLiteRt on Windows/Linux). None in some dev layouts — that's
             // fine, the sidecar's own dir covers dev.
+            init_activity_log(app.handle());
             let resource_dir = app.path().resource_dir().ok();
             app.manage(SidecarManager::new(resource_dir, app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             ping_sidecar,
+            activity_log_snapshot,
+            activity_log_info,
+            reveal_activity_log,
+            clear_activity_log,
             available_tts_engines,
             available_asr_models,
             init_model,
@@ -2775,6 +3033,61 @@ mod tests {
             "synthesize_fish_audio"
         );
         assert_eq!(parakeet.sidecar_command(), "transcribe_parakeet");
+    }
+
+    #[test]
+    fn parses_sidecar_memory_lines() {
+        let ev = parse_sidecar_memory(
+            "[sidecar] mem post-vox-synth active=2130M cache=512M peak=4312M rss=5120M footprint=6100M",
+        )
+        .expect("memory event");
+        assert_eq!(ev.label, "post-vox-synth");
+        assert_eq!(ev.active_mb, Some(2130));
+        assert_eq!(ev.cache_mb, Some(512));
+        assert_eq!(ev.peak_mb, Some(4312));
+        assert_eq!(ev.rss_mb, Some(5120));
+        assert_eq!(ev.footprint_mb, Some(6100));
+
+        // Sidecars that predate the process figures still produce an event.
+        let ev = parse_sidecar_memory("[sidecar] mem post-cbx-synth active=1M cache=2M peak=3M")
+            .expect("legacy memory event");
+        assert_eq!(ev.rss_mb, None);
+        assert_eq!(ev.footprint_mb, None);
+
+        assert!(parse_sidecar_memory("[sidecar] cosy  50% Loading LLM weights...").is_none());
+        assert!(parse_sidecar_memory("[sidecar] mem label-only").is_none());
+        assert!(parse_sidecar_memory("[sidecar] mem x active=notanumber").is_none());
+    }
+
+    #[test]
+    fn activity_ring_is_bounded_and_keeps_order() {
+        for i in 0..(ACTIVITY_RING_CAPACITY + 10) {
+            log_line(LogSource::Studio, format!("ring-test {i}"));
+        }
+        let lines = ACTIVITY_LOG.lines.lock().unwrap();
+        assert_eq!(lines.len(), ACTIVITY_RING_CAPACITY);
+        assert!(lines
+            .iter()
+            .zip(lines.iter().skip(1))
+            .all(|(a, b)| a.seq < b.seq));
+        let last = format!("ring-test {}", ACTIVITY_RING_CAPACITY + 9);
+        assert!(lines.iter().any(|l| l.text == last));
+        assert!(!lines.iter().any(|l| l.text == "ring-test 0"));
+    }
+
+    #[test]
+    fn log_rotation_moves_oversized_file_aside() {
+        let dir = std::env::temp_dir().join(format!("studio-log-rot-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(ACTIVITY_LOG_FILE);
+        std::fs::write(&path, vec![b'x'; (ACTIVITY_LOG_ROTATE_BYTES + 1) as usize]).unwrap();
+        rotate_log_file(&path);
+        assert!(!path.exists());
+        assert!(dir.join(format!("{ACTIVITY_LOG_FILE}.1")).exists());
+        std::fs::write(&path, b"small").unwrap();
+        rotate_log_file(&path);
+        assert!(path.exists(), "small files are left alone");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
