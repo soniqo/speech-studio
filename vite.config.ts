@@ -39,6 +39,8 @@ export default defineConfig(async () => ({
   },
 
   test: {
+    // SwiftPM checkouts contain dependency tests outside the frontend suite.
+    include: ["src/**/*.{test,spec}.?(c|m)[jt]s?(x)"],
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
