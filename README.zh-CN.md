@@ -204,6 +204,7 @@ WAV 文件；**Activity** 面板会显示文件路径和采样点数：
 
 不加载模型即可运行音频清理测试：
 `cd swift-sidecar && swift test --filter AudioPostprocessingTests`。
+测试可执行文件旁仍需放置 MLX 的 Metal 库；CI 会自动完成这一步。
 
 可选的日文回归测试会使用系统语音生成文本完全匹配的参考音频，在两个固定 seed 下
 检查原始和最终音频的首词、中间音节及句末，并检查应用生成的各个句子分段。

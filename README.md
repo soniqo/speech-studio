@@ -214,6 +214,8 @@ fallback. Qwen language codes such as `ja` are sent as canonical names such as
 
 Run the audio cleanup checks without loading models with
 `cd swift-sidecar && swift test --filter AudioPostprocessingTests`.
+MLX's Metal library must still be available beside the test executable; CI
+stages it automatically.
 
 The opt-in Japanese regression generates a matched system-voice reference and
 checks the first word, middle syllables, and sentence ending in both raw and final

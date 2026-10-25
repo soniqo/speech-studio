@@ -80,7 +80,8 @@ jobs:
 
       - name: Build Swift sidecar
         working-directory: speech-studio/swift-sidecar
-        run: swift build -c release --build-tests
+        # Release tests import the executable target with @testable.
+        run: swift build -c release --build-tests -Xswiftc -enable-testing
 
       - name: Stage sidecar + metallib for Tauri bundler
         # Has to run before any `cargo` invocation: tauri-build verifies
@@ -497,7 +498,8 @@ jobs:
 
       - name: Build Swift sidecar
         working-directory: speech-studio/swift-sidecar
-        run: swift build -c release --build-tests
+        # Release tests import the executable target with @testable.
+        run: swift build -c release --build-tests -Xswiftc -enable-testing
 
       - name: Stage sidecar + metallib for Tauri bundler
         env:
