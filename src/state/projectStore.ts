@@ -36,6 +36,8 @@ interface ModelState {
   engine: TtsEngineId;
   /** Synthesis language id for engines that need one (Chatterbox `[lang]`). */
   language: string;
+  /** Keep the user's choice when an intervening engine needs a fallback. */
+  preferredLanguage?: string;
   engines: TtsEngineInfo[];
   status: ModelStatus;
   error?: string;
@@ -219,12 +221,14 @@ export const useProjectStore = create<ProjectStore>((set) => ({
   setTtsEngine: (engine) =>
     set((s) => {
       const nextEngine = s.model.engines.find((candidate) => candidate.id === engine);
-      const language = normalizeModelLanguage(nextEngine, s.model.language);
+      const preferredLanguage = s.model.preferredLanguage ?? s.model.language;
+      const language = normalizeModelLanguage(nextEngine, preferredLanguage);
       return {
         model: {
           ...s.model,
           engine,
           language,
+          preferredLanguage,
           error: undefined,
         },
       };
@@ -235,13 +239,16 @@ export const useProjectStore = create<ProjectStore>((set) => ({
       if (!active?.requiresLanguage || !active.languages.includes(language)) {
         return s;
       }
-      return { model: { ...s.model, language, error: undefined } };
+      return {
+        model: { ...s.model, language, preferredLanguage: language, error: undefined },
+      };
     }),
   setAvailableTtsEngines: (engines) =>
     set((s) => {
       const active = engines.find((candidate) => candidate.id === s.model.engine);
-      const language = normalizeModelLanguage(active, s.model.language);
-      return { model: { ...s.model, engines, language } };
+      const preferredLanguage = s.model.preferredLanguage ?? s.model.language;
+      const language = normalizeModelLanguage(active, preferredLanguage);
+      return { model: { ...s.model, engines, language, preferredLanguage } };
     }),
 
   demoProgress: null,

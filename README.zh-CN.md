@@ -181,6 +181,43 @@ MLX 缓冲缓存上限为 1 GB（可用 `SONIQO_MLX_CACHE_MB` 覆盖）——若
 
 点击顶栏的 **Load demo（加载演示）**。它会引导出一个 Scene 04 分镜，包含两个克隆音色（Anna 与 Marek）和四行对白——每行带一个情感标记——然后通过当前选择的引擎合成全部内容（macOS 默认是 CosyVoice 3）。
 
+### 比较 Qwen 清理前后的音频
+
+使用 `SONIQO_TTS_DEBUG_AUDIO=1 pnpm tauri dev` 启动开发版应用，然后通过 Qwen
+生成片段。每次生成会在 `~/Library/Caches/audio.soniqo.studio/clips/` 保存三个本地
+WAV 文件；**Activity** 面板会显示文件路径和采样点数：
+
+- `<take>.raw.wav`：运行时移除参考音频后的输出，尚未经过 Studio 清理。
+- `<take>.trimmed.wav`：移除开头杂音后、处理音频边缘前的输出。
+- `<take>.wav`：最终输出，包含开头 20 毫秒的裁剪、边缘淡入淡出和静音填充。
+
+直接调用 sidecar 时，也可以在 `synthesize_icl` 请求中传入 `"debugAudio": true`。
+三个文件都来自同一次生成，因此 seed、语言、token 预算、参考音频和采样参数完全一致。
+对于长片段，请先检查各个分段的文件，再检查拼接后的输出。如果某个音节在原始波形中
+就已缺失，则不是 Studio 清理时删除的；如果它在两个阶段之间消失，则可以据此确定
+需要检查的处理步骤。默认不保存这些诊断文件。
+
+日文、中文和韩文文本的音频 token 预算会考虑字符数量，分段会识别相应的句末和
+分句标点。在同一会话内切换引擎时，会保留所选语言，即使中间使用的引擎需要回退到
+其他语言。Qwen 语言代码（如 `ja`）会转换为完整名称（如 `japanese`）；这两种写法
+在运行时对应同一个语言 token。
+
+不加载模型即可运行音频清理测试：
+`cd swift-sidecar && swift test --filter AudioPostprocessingTests`。
+测试可执行文件旁仍需放置 MLX 的 Metal 库；CI 会自动完成这一步。
+
+可选的日文回归测试会使用系统语音生成文本完全匹配的参考音频，在两个固定 seed 下
+检查原始和最终音频的首词、中间音节及句末，并检查应用生成的各个句子分段。
+测试使用支持日文的 Qwen ASR，并在加载识别模型之前结束 TTS 进程：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --test sidecar \
+  qwen_japanese_preserves_first_word_and_sentence_end -- --ignored --nocapture
+```
+
+测试需要 macOS 的 Kyoko 语音和 `speech` CLI。如果 CLI 不在 `PATH` 中，请设置
+`SONIQO_TEST_SPEECH_CLI`。设置 `QWEN_TTS_TEST_OUTPUT_DIR` 可以保留验证后的 WAV 文件。
+
 ### 打包你自己的 .app / .dmg
 
 ```bash

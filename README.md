@@ -187,6 +187,51 @@ Hit **Load demo** in the top bar. It bootstraps a Scene 04 storyboard with two c
 
 The **Activity** button in the transport bar opens a live log of what the engine is doing: model downloads and loads, every synthesis step, and the sidecar's memory snapshots after each load and render (MLX active/peak plus the real process footprint). *Copy* puts the visible log on the clipboard for a bug report; *Log file* reveals the full, rotating file — `~/Library/Logs/audio.soniqo.studio/speech-studio.log` on macOS, `%LOCALAPPDATA%\audio.soniqo.studio\logs\` on Windows, `~/.local/share/audio.soniqo.studio/logs/` on Linux.
 
+### Compare Qwen audio before and after cleanup
+
+Launch the development app with `SONIQO_TTS_DEBUG_AUDIO=1 pnpm tauri dev`, then
+generate a Qwen clip. Each take saves three local WAVs in
+`~/Library/Caches/audio.soniqo.studio/clips/`; the Activity log lists their paths
+and sample counts:
+
+- `<take>.raw.wav`: the runtime's output after reference separation, before Studio cleanup.
+- `<take>.trimmed.wav`: after leading-junk detection, before edge conditioning.
+- `<take>.wav`: the final output, including the 20 ms pre-trim, edge fades, and silence padding.
+
+Direct sidecar callers can instead send `"debugAudio": true` with
+`synthesize_icl`. All three files come from the same generation, so comparisons
+keep the seed, language, token budget, reference, and sampling settings fixed.
+For a long clip, inspect each chunk's files before the concatenated output.
+If a syllable is already absent in the raw waveform, Studio's cleanup did not
+remove it. If it disappears between stages, the difference identifies the
+cleanup step to investigate. Debug capture is off by default.
+
+Japanese, Chinese, and Korean text receive character-aware audio budgets and
+chunking at their sentence/clause punctuation. Language choices are retained
+across engine switches for the session, even when an intervening engine uses a
+fallback. Qwen language codes such as `ja` are sent as canonical names such as
+`japanese`; both aliases resolve to the same runtime language token.
+
+Run the audio cleanup checks without loading models with
+`cd swift-sidecar && swift test --filter AudioPostprocessingTests`.
+MLX's Metal library must still be available beside the test executable; CI
+stages it automatically.
+
+The opt-in Japanese regression generates a matched system-voice reference and
+checks the first word, middle syllables, and sentence ending in both raw and final
+audio at two fixed seeds, plus the app's individual sentence chunks. It uses
+Japanese-capable Qwen ASR and releases the TTS
+process before loading the recognizer:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --test sidecar \
+  qwen_japanese_preserves_first_word_and_sentence_end -- --ignored --nocapture
+```
+
+The test requires macOS's Kyoko voice and the `speech` CLI. Set
+`SONIQO_TEST_SPEECH_CLI` if the CLI is not on `PATH`.
+Set `QWEN_TTS_TEST_OUTPUT_DIR` to retain the verified WAVs.
+
 ### Packaging your own .app / .dmg
 
 ```bash

@@ -40,6 +40,14 @@ let package = Package(
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
+        ),
+        .testTarget(
+            name: "SidecarAudioTests",
+            dependencies: [
+                "soniqo-tts-sidecar",
+                .product(name: "AudioCommon", package: "speech-swift")
+            ],
+            path: "Tests/SidecarAudioTests"
         )
     ]
 )
