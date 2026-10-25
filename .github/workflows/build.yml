@@ -80,11 +80,7 @@ jobs:
 
       - name: Build Swift sidecar
         working-directory: speech-studio/swift-sidecar
-        run: swift build -c release
-
-      - name: Test audio cleanup and debug capture
-        working-directory: speech-studio/swift-sidecar
-        run: swift test -c release --filter AudioPostprocessingTests
+        run: swift build -c release --build-tests
 
       - name: Stage sidecar + metallib for Tauri bundler
         # Has to run before any `cargo` invocation: tauri-build verifies
@@ -114,7 +110,19 @@ jobs:
             -o /tmp/speech-release.tar.gz
           tar -xzf /tmp/speech-release.tar.gz -C /tmp mlx.metallib
           cp /tmp/mlx.metallib src-tauri/binaries/mlx.metallib
+          # MLX initializes at test-process shutdown, including CPU-only tests.
+          # Stage its library beside both the sidecar and test executable.
+          cp /tmp/mlx.metallib swift-sidecar/.build/release/mlx.metallib
+          for test_dir in swift-sidecar/.build/release/*.xctest/Contents/MacOS; do
+            if [[ -d "$test_dir" ]]; then
+              cp /tmp/mlx.metallib "$test_dir/"
+            fi
+          done
           ls -la src-tauri/binaries/
+
+      - name: Test audio cleanup and debug capture
+        working-directory: speech-studio/swift-sidecar
+        run: swift test -c release --skip-build --filter AudioPostprocessingTests
 
       - name: Run Rust unit tests
         working-directory: speech-studio/src-tauri
@@ -489,11 +497,7 @@ jobs:
 
       - name: Build Swift sidecar
         working-directory: speech-studio/swift-sidecar
-        run: swift build -c release
-
-      - name: Test audio cleanup and debug capture
-        working-directory: speech-studio/swift-sidecar
-        run: swift test -c release --filter AudioPostprocessingTests
+        run: swift build -c release --build-tests
 
       - name: Stage sidecar + metallib for Tauri bundler
         env:
@@ -508,6 +512,16 @@ jobs:
             -o /tmp/speech-release.tar.gz
           tar -xzf /tmp/speech-release.tar.gz -C /tmp mlx.metallib
           cp /tmp/mlx.metallib src-tauri/binaries/mlx.metallib
+          cp /tmp/mlx.metallib swift-sidecar/.build/release/mlx.metallib
+          for test_dir in swift-sidecar/.build/release/*.xctest/Contents/MacOS; do
+            if [[ -d "$test_dir" ]]; then
+              cp /tmp/mlx.metallib "$test_dir/"
+            fi
+          done
+
+      - name: Test audio cleanup and debug capture
+        working-directory: speech-studio/swift-sidecar
+        run: swift test -c release --skip-build --filter AudioPostprocessingTests
 
       # A release build is still a tested build.
       - name: Run Rust unit tests
