@@ -11,6 +11,7 @@ use std::sync::{
 use std::time::Instant;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use unicode_segmentation::UnicodeSegmentation;
 
 // ── Activity log ────────────────────────────────────────────────────────────
 //
@@ -966,18 +967,21 @@ impl TtsEngine {
 fn normalize_sidecar_language(engine: TtsEngine, language: Option<&str>) -> Option<String> {
     let trimmed = language.map(str::trim).filter(|value| !value.is_empty());
     match engine {
-        TtsEngine::CosyVoice => trimmed.map(|value| match value.to_ascii_lowercase().as_str() {
-            "zh" | "zho" | "cmn" | "chinese" => "chinese".to_string(),
-            "en" | "eng" | "english" => "english".to_string(),
-            "ja" | "jpn" | "japanese" => "japanese".to_string(),
-            "ko" | "kor" | "korean" => "korean".to_string(),
-            "de" | "deu" | "ger" | "german" => "german".to_string(),
-            "es" | "spa" | "spanish" => "spanish".to_string(),
-            "fr" | "fra" | "fre" | "french" => "french".to_string(),
-            "it" | "ita" | "italian" => "italian".to_string(),
-            "ru" | "rus" | "russian" => "russian".to_string(),
-            _ => value.to_string(),
-        }),
+        TtsEngine::CosyVoice | TtsEngine::Qwen3 => {
+            trimmed.map(|value| match value.to_ascii_lowercase().as_str() {
+                "zh" | "zho" | "cmn" | "chinese" => "chinese".to_string(),
+                "en" | "eng" | "english" => "english".to_string(),
+                "ja" | "jpn" | "japanese" => "japanese".to_string(),
+                "ko" | "kor" | "korean" => "korean".to_string(),
+                "de" | "deu" | "ger" | "german" => "german".to_string(),
+                "es" | "spa" | "spanish" => "spanish".to_string(),
+                "fr" | "fra" | "fre" | "french" => "french".to_string(),
+                "it" | "ita" | "italian" => "italian".to_string(),
+                "ru" | "rus" | "russian" => "russian".to_string(),
+                "pt" | "por" | "portuguese" => "portuguese".to_string(),
+                _ => value.to_string(),
+            })
+        }
         // The UI keeps BCP-47-ish ids because Chatterbox expects `[hi]`, but
         // OmniVoice gives cleaner Hindi output with the spelled language item.
         TtsEngine::OmniVoice | TtsEngine::IndicMio => {
@@ -1572,15 +1576,18 @@ struct SynthesizeResult {
     elapsed_sec: f64,
 }
 
-/// Split text into sentences on terminal punctuation, including the
-/// Devanagari danda/double-danda. The terminator stays attached to its
+/// Split text into sentences on terminal punctuation, including CJK stops and
+/// the Devanagari danda/double-danda. The terminator stays attached to its
 /// sentence so the model gets a clean stop cue per chunk.
 fn split_sentences(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     for ch in text.chars() {
         cur.push(ch);
-        if matches!(ch, '.' | '!' | '?' | '\u{0964}' | '\u{0965}' | '\n') {
+        if matches!(
+            ch,
+            '.' | '!' | '?' | '。' | '！' | '？' | '\u{0964}' | '\u{0965}' | '\n'
+        ) {
             let t = cur.trim();
             if !t.is_empty() {
                 out.push(t.to_string());
@@ -1604,7 +1611,10 @@ fn split_clauses(sent: &str) -> Vec<String> {
     let mut cur = String::new();
     for ch in sent.chars() {
         cur.push(ch);
-        if matches!(ch, ',' | ';' | ':' | '\u{060C}' | '\u{061B}') {
+        if matches!(
+            ch,
+            ',' | ';' | ':' | '、' | '，' | '；' | '：' | '\u{060C}' | '\u{061B}'
+        ) {
             let t = cur.trim();
             if !t.is_empty() {
                 out.push(t.to_string());
@@ -1619,23 +1629,73 @@ fn split_clauses(sent: &str) -> Vec<String> {
     out
 }
 
-/// Greedily pack sentences into chunks of at most `max_words` words. A
+fn is_cjk_speech_character(ch: char) -> bool {
+    ch.is_alphanumeric()
+        && matches!(ch as u32,
+            0x3005 | 0x303B | 0x3040..=0x30FF | 0x3100..=0x312F |
+            0x31A0..=0x31BF | 0x31F0..=0x31FF | 0x3400..=0x4DBF |
+            0x4E00..=0x9FFF | 0x1100..=0x11FF | 0x3130..=0x318F |
+            0xA960..=0xA97F | 0xAC00..=0xD7FF | 0xF900..=0xFAFF |
+            0xFF66..=0xFF9D | 0x20000..=0x323AF)
+}
+
+/// Whitespace-delimited words and CJK graphemes contribute separately: an
+/// unspaced Japanese sentence is not one spoken word. Count graphemes so kana
+/// with a combining voicing mark receive the same allowance as composed kana.
+fn synthesis_text_length(text: &str) -> (usize, usize) {
+    let mut spaced_text = String::new();
+    let mut cjk_characters = 0;
+    for grapheme in text.graphemes(true) {
+        if grapheme.chars().any(is_cjk_speech_character) {
+            cjk_characters += 1;
+            spaced_text.push(' ');
+        } else {
+            spaced_text.push_str(grapheme);
+        }
+    }
+    (canon_tokens(&spaced_text).len(), cjk_characters)
+}
+
+fn synthesis_word_count(text: &str) -> usize {
+    let (words, cjk_characters) = synthesis_text_length(text);
+    // A pair of CJK characters is a rough word equivalent for chunk sizing.
+    words + cjk_characters.div_ceil(2)
+}
+
+/// Greedily pack sentences into chunks of at most `max_words` word equivalents. A
 /// sentence longer than the cap is broken down first — at clause punctuation
 /// where possible, then into balanced word groups — so no chunk ever exceeds
 /// the cap. An over-cap chunk pushes the stop-step floor past the natural end
 /// of the audio, and the AR fills the gap with babble (the >12 s degradation
-/// on undelimited Hindi paragraphs). Word counting mirrors canon_tokens
-/// (Unicode-aware), so Devanagari counts correctly.
+/// on undelimited Hindi paragraphs). CJK runs are split at grapheme boundaries
+/// when there is no punctuation or whitespace to break on.
 fn chunk_text_for_synthesis(text: &str, max_words: usize) -> Vec<String> {
+    let max_words = max_words.max(1);
     let mut units: Vec<String> = Vec::new();
     for sent in split_sentences(text) {
-        if canon_tokens(&sent).len() <= max_words {
+        if synthesis_word_count(&sent) <= max_words {
             units.push(sent);
             continue;
         }
         for clause in split_clauses(&sent) {
-            if canon_tokens(&clause).len() <= max_words {
+            if synthesis_word_count(&clause) <= max_words {
                 units.push(clause);
+                continue;
+            }
+            if synthesis_text_length(&clause).1 > 0 {
+                let mut current = String::new();
+                for grapheme in clause.graphemes(true) {
+                    let previous_end = current.len();
+                    current.push_str(grapheme);
+                    if synthesis_word_count(&current) > max_words && previous_end > 0 {
+                        let next = current.split_off(previous_end);
+                        units.push(current.trim().to_string());
+                        current = next;
+                    }
+                }
+                if !current.trim().is_empty() {
+                    units.push(current.trim().to_string());
+                }
                 continue;
             }
             // Balanced groups read better than a full chunk plus a stub.
@@ -1651,7 +1711,7 @@ fn chunk_text_for_synthesis(text: &str, max_words: usize) -> Vec<String> {
     let mut cur = String::new();
     let mut cur_words = 0usize;
     for sent in units {
-        let w = canon_tokens(&sent).len();
+        let w = synthesis_word_count(&sent);
         if cur_words > 0 && cur_words + w > max_words {
             chunks.push(cur.trim().to_string());
             cur = String::new();
@@ -1672,20 +1732,31 @@ fn chunk_text_for_synthesis(text: &str, max_words: usize) -> Vec<String> {
     chunks
 }
 
-fn synth_max_tokens(engine: TtsEngine, target_word_count: usize) -> usize {
+fn synth_max_tokens(engine: TtsEngine, text: &str) -> usize {
+    let clean_text = strip_style_markers_for_grading(text);
+    let (words, cjk_characters) = synthesis_text_length(&clean_text);
     if engine == TtsEngine::Qwen3 {
-        // Qwen3 frames are ~80 ms each. The generic cap lets short lines run
-        // to 96 frames (~7.7 s of audio, ~12 s wall time) whenever EOS fails.
-        // Keep enough headroom for slow speech, but prevent minute-long retry
-        // ladders for one short utterance.
-        (target_word_count.saturating_mul(4) + 20).clamp(40, 96)
+        // Qwen3 frames are ~80 ms each. Reserve up to 320 ms per CJK
+        // character, since a kanji can encode several spoken syllables. Keep
+        // the existing short-line bound for spaced scripts; CJK chunks need
+        // more than 96 frames to finish a slow read.
+        let ceiling = if cjk_characters > 0 { 320 } else { 96 };
+        words
+            .saturating_add(cjk_characters)
+            .saturating_mul(4)
+            .saturating_add(20)
+            .clamp(40, ceiling)
     } else {
-        (target_word_count.saturating_mul(12) + 40).clamp(60, 320)
+        let word_equivalents = words.saturating_add(cjk_characters.div_ceil(2));
+        word_equivalents
+            .saturating_mul(12)
+            .saturating_add(40)
+            .clamp(60, 320)
     }
 }
 
-/// One synthesis pass (seed/cfg retry ladder + optional ASR grading) for a
-/// single piece of text. Returns (audio_path, duration_sec) of the accepted
+/// One synthesis pass for a single piece of text.
+/// Returns (audio_path, duration_sec) of the generated
 /// take. Extracted from synthesize_clip so long-form chunking can call it
 /// once per sentence group.
 #[allow(clippy::too_many_arguments)]
@@ -1702,9 +1773,9 @@ fn synth_one_line(
     invocation_salt: &str,
     part_idx: usize,
 ) -> Result<(String, f64), String> {
-    // Token budget: ~12 steps/word + headroom (each step ≈ 50 ms of audio).
+    // Budget audio frames using spoken text length, including unspaced CJK.
     let target_word_count = canon_tokens(&strip_style_markers_for_grading(text)).len();
-    let max_tokens = synth_max_tokens(engine, target_word_count);
+    let max_tokens = synth_max_tokens(engine, text);
     // Floor under the model's stop signal: VoxCPM2 fires its stop token
     // prematurely on long non-Latin-script lines (a 19-word Hindi sentence
     // stops at ~40 steps ≈ 6 s, cutting the sentence). The model speaks
@@ -3730,10 +3801,90 @@ mod tests {
 
     #[test]
     fn qwen_synth_budget_is_bounded_for_short_lines() {
-        assert_eq!(synth_max_tokens(TtsEngine::Qwen3, 2), 40);
-        assert_eq!(synth_max_tokens(TtsEngine::Qwen3, 6), 44);
-        assert_eq!(synth_max_tokens(TtsEngine::Qwen3, 20), 96);
-        assert_eq!(synth_max_tokens(TtsEngine::CosyVoice, 6), 112);
+        assert_eq!(synth_max_tokens(TtsEngine::Qwen3, "Hello there."), 40);
+        let six_words = "Today we test a short sentence.";
+        assert_eq!(synth_max_tokens(TtsEngine::Qwen3, six_words), 44);
+        assert_eq!(synth_max_tokens(TtsEngine::Qwen3, &"word ".repeat(20)), 96);
+        assert_eq!(synth_max_tokens(TtsEngine::CosyVoice, six_words), 112);
+    }
+
+    #[test]
+    fn qwen_budget_counts_japanese_characters_instead_of_unspaced_runs() {
+        let text = "タロットで読み取っていきましょう。まずは、ゆっくりと心を落ち着けてください。";
+        assert!(canon_tokens(text).len() < 4);
+        assert!(synth_max_tokens(TtsEngine::Qwen3, text) > 96);
+        assert_eq!(
+            synth_max_tokens(TtsEngine::Qwen3, &format!("<whisper>{text}</whisper>")),
+            synth_max_tokens(TtsEngine::Qwen3, text)
+        );
+        assert!(synth_max_tokens(TtsEngine::Qwen3, "落ち着いてください。") > 40);
+        assert_eq!(synth_max_tokens(TtsEngine::Qwen3, &text.repeat(100)), 320);
+    }
+
+    #[test]
+    fn synthesis_length_handles_mixed_scripts_and_combining_kana() {
+        assert_eq!(synthesis_text_length("Hello 日本語 world"), (2, 3));
+        assert_eq!(synthesis_text_length("日本語、。！？"), (0, 3));
+        assert_eq!(
+            synthesis_text_length("がガ"),
+            synthesis_text_length("か\u{3099}カ\u{3099}")
+        );
+        assert_eq!(synthesis_text_length("你好世界"), (0, 4));
+        assert_eq!(synthesis_text_length("안녕하세요"), (0, 5));
+        let hindi = "नमस्ते आज मौसम अच्छा है।";
+        assert_eq!(synthesis_text_length(hindi), (canon_tokens(hindi).len(), 0));
+        assert_eq!(synth_max_tokens(TtsEngine::Qwen3, "Hello 日本語 world"), 40);
+    }
+
+    #[test]
+    fn japanese_chunks_respect_sentence_and_clause_boundaries() {
+        assert_eq!(
+            split_sentences("こんにちは。元気ですか？はい！"),
+            ["こんにちは。", "元気ですか？", "はい！"]
+        );
+        assert_eq!(
+            split_clauses("まずは、ゆっくりと、落ち着いて。"),
+            ["まずは、", "ゆっくりと、", "落ち着いて。"]
+        );
+        let text = "タロットで読み取っていきましょう。まずは、ゆっくりと心を落ち着けてください。";
+        let chunks = chunk_text_for_synthesis(text, max_chunk_words(TtsEngine::Qwen3));
+        assert_eq!(
+            chunks,
+            [
+                "タロットで読み取っていきましょう。",
+                "まずは、ゆっくりと心を落ち着けてください。"
+            ]
+        );
+        assert!(chunks
+            .iter()
+            .all(|chunk| synth_max_tokens(TtsEngine::Qwen3, chunk) > 40));
+    }
+
+    #[test]
+    fn unpunctuated_cjk_chunks_preserve_text_and_graphemes() {
+        for text in [
+            "か\u{3099}きくけこ".repeat(30),
+            "今日は日本語とEnglishを一緒にテストします".repeat(10),
+        ] {
+            let chunks = chunk_text_for_synthesis(&text, 14);
+            assert!(chunks.len() > 1);
+            assert!(chunks.iter().all(|chunk| synthesis_word_count(chunk) <= 14));
+            assert_eq!(chunks.concat(), text);
+            assert!(chunks.iter().all(|chunk| !chunk.starts_with('\u{3099}')));
+        }
+    }
+
+    #[test]
+    fn spaced_script_chunking_keeps_its_word_limit() {
+        for text in [
+            "This is a short sentence. This is another short sentence.",
+            "नमस्ते आज मौसम अच्छा है। हम आज घर पर काम करेंगे।",
+        ] {
+            let chunks = chunk_text_for_synthesis(text, 6);
+            assert!(chunks.len() > 1);
+            assert!(chunks.iter().all(|chunk| canon_tokens(chunk).len() <= 6));
+            assert_eq!(canon_tokens(&chunks.join(" ")), canon_tokens(text));
+        }
     }
 
     #[test]
@@ -3763,6 +3914,39 @@ mod tests {
         assert_eq!(
             normalize_sidecar_language(TtsEngine::IndicMio, Some("hin")).as_deref(),
             Some("hindi")
+        );
+    }
+
+    #[test]
+    fn qwen_language_normalization_uses_canonical_names() {
+        for (code, name) in [
+            ("zh", "chinese"),
+            ("en", "english"),
+            ("ja", "japanese"),
+            ("ko", "korean"),
+            ("de", "german"),
+            ("fr", "french"),
+            ("ru", "russian"),
+            ("pt", "portuguese"),
+            ("es", "spanish"),
+            ("it", "italian"),
+        ] {
+            assert_eq!(
+                normalize_sidecar_language(TtsEngine::Qwen3, Some(code)).as_deref(),
+                Some(name)
+            );
+            assert_eq!(
+                normalize_sidecar_language(TtsEngine::Qwen3, Some(name)).as_deref(),
+                Some(name)
+            );
+        }
+        assert_eq!(
+            normalize_sidecar_language(TtsEngine::Qwen3, Some(" JA ")).as_deref(),
+            Some("japanese")
+        );
+        assert_eq!(
+            normalize_sidecar_language(TtsEngine::Qwen3, Some("  ")),
+            None
         );
     }
 

@@ -3567,7 +3567,7 @@ dependencies = [
 
 [[package]]
 name = "speech-studio"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3580,6 +3580,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "unicode-segmentation",
  "uuid",
 ]
 

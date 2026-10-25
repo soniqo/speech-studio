@@ -41,7 +41,7 @@ jobs:
         with:
           repository: soniqo/speech-swift
           path: speech-swift
-          ref: main
+          ref: aa0c0dacfc14778c4b9a20f0a67095eb75a3df85
 
       - name: Show Xcode version
         run: xcodebuild -version
@@ -81,6 +81,10 @@ jobs:
       - name: Build Swift sidecar
         working-directory: speech-studio/swift-sidecar
         run: swift build -c release
+
+      - name: Test audio cleanup and debug capture
+        working-directory: speech-studio/swift-sidecar
+        run: swift test -c release --filter AudioPostprocessingTests
 
       - name: Stage sidecar + metallib for Tauri bundler
         # Has to run before any `cargo` invocation: tauri-build verifies
@@ -451,7 +455,7 @@ jobs:
         with:
           repository: soniqo/speech-swift
           path: speech-swift
-          ref: main
+          ref: aa0c0dacfc14778c4b9a20f0a67095eb75a3df85
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -486,6 +490,10 @@ jobs:
       - name: Build Swift sidecar
         working-directory: speech-studio/swift-sidecar
         run: swift build -c release
+
+      - name: Test audio cleanup and debug capture
+        working-directory: speech-studio/swift-sidecar
+        run: swift test -c release --filter AudioPostprocessingTests
 
       - name: Stage sidecar + metallib for Tauri bundler
         env:

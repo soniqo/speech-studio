@@ -1158,6 +1158,162 @@ fn assert_onset_is_speech(audio_path: &str, target_text: &str) {
 
 #[test]
 #[ignore]
+#[cfg(target_os = "macos")]
+fn qwen_japanese_preserves_first_word_and_sentence_end() {
+    let speech = std::env::var_os("SONIQO_TEST_SPEECH_CLI").unwrap_or_else(|| "speech".into());
+    let help = Command::new(&speech)
+        .args(["transcribe", "--help"])
+        .output()
+        .expect("set SONIQO_TEST_SPEECH_CLI to an installed speech CLI before running this test");
+    assert!(help.status.success(), "speech transcribe is unavailable");
+    let dir = std::env::temp_dir().join(format!("qwen-japanese-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create reference directory");
+    let reference = dir.join("reference.aiff");
+    let reference_text = "こんにちは。今日は落ち着いた声で、日本語の音声をゆっくり読み上げます。";
+    let status = Command::new("say")
+        .args(["-v", "Kyoko", "-r", "165", "-o"])
+        .arg(&reference)
+        .arg(reference_text)
+        .status()
+        .expect("Japanese reference generation requires macOS say");
+    assert!(status.success(), "the Kyoko reference voice is unavailable");
+
+    let target = "タロットで読み取っていきましょう。まずは、ゆっくりと心を落ち着けてください。";
+    let cases = [
+        ("full", 1596910849u64, target, 160, 4),
+        ("full", 1000, target, 160, 4),
+        (
+            "first",
+            1596910849,
+            "タロットで読み取っていきましょう。",
+            84,
+            1,
+        ),
+        (
+            "second",
+            1596910849,
+            "まずは、ゆっくりと心を落ち着けてください。",
+            96,
+            2,
+        ),
+    ];
+    let paths = {
+        let mut sidecar = SidecarHandle::spawn();
+        cases.map(|(part, seed, text, max_tokens, min_seconds)| {
+            let path = synth_expect_ok(
+                &mut sidecar,
+                serde_json::json!({
+                    "id": format!("japanese-{}-{}-{}", uuid::Uuid::new_v4(), part, seed),
+                    "command": "synthesize_icl",
+                    "engine": "qwen3",
+                    "modelId": "aufklarer/Qwen3-TTS-12Hz-1.7B-Base-MLX-bf16",
+                    "text": text,
+                    "referenceAudioPath": reference.to_string_lossy(),
+                    "referenceText": reference_text,
+                    "language": "japanese",
+                    "seed": seed,
+                    "temperature": 0.3,
+                    "maxTokens": max_tokens,
+                    "debugAudio": true,
+                }),
+            );
+            (part, seed, PathBuf::from(path), min_seconds)
+        })
+    }; // Release the TTS process before loading the ASR model.
+
+    for (part, seed, final_path, min_seconds) in paths {
+        let raw_path = final_path.with_extension("raw.wav");
+        let trimmed_path = final_path.with_extension("trimmed.wav");
+        let (raw, rate) = read_wav_samples(raw_path.to_str().unwrap());
+        assert_eq!(rate, 24_000);
+        assert_eq!(
+            raw.len() % 1920,
+            0,
+            "decoder lost codec samples for seed {seed}"
+        );
+        assert!(
+            raw.len() > min_seconds * rate,
+            "the {part} sentence was truncated for seed {seed}"
+        );
+        for path in [&raw_path, &final_path] {
+            let output = Command::new(&speech)
+                .args([
+                    "transcribe",
+                    "--engine",
+                    "qwen3",
+                    "--model",
+                    "aufklarer/Qwen3-ASR-1.7B-MLX-8bit",
+                    "--language",
+                    "Japanese",
+                ])
+                .arg(path)
+                .output()
+                .expect("Japanese regression requires the speech CLI");
+            assert!(
+                output.status.success(),
+                "ASR failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let transcript = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("Result: "))
+                .expect("missing Japanese ASR result")
+                .trim();
+            let first_word = if part == "second" {
+                "まずは"
+            } else {
+                "タロット"
+            };
+            assert!(
+                transcript.starts_with(first_word),
+                "first word, seed {seed}: {transcript}"
+            );
+            if part != "second" {
+                assert!(
+                    transcript.contains("ましょう"),
+                    "first sentence, seed {seed}: {transcript}"
+                );
+            }
+            if part != "first" {
+                assert!(
+                    transcript.contains("ゆっくり"),
+                    "middle syllables, seed {seed}: {transcript}"
+                );
+                assert!(
+                    transcript.contains("心を落ち着けてください"),
+                    "sentence ending, seed {seed}: {transcript}"
+                );
+            }
+            eprintln!(
+                "Japanese {part} seed {seed}, {}: {transcript}",
+                path.display()
+            );
+        }
+        if let Some(output) = std::env::var_os("QWEN_TTS_TEST_OUTPUT_DIR") {
+            let output = PathBuf::from(output);
+            std::fs::create_dir_all(&output).expect("create test output directory");
+            for (path, suffix) in [
+                (&raw_path, "raw.wav"),
+                (&trimmed_path, "trimmed.wav"),
+                (&final_path, "wav"),
+            ] {
+                std::fs::copy(
+                    path,
+                    output.join(format!("japanese-{part}-{seed}.{suffix}")),
+                )
+                .expect("save verified test audio");
+            }
+        }
+        for path in [raw_path, trimmed_path, final_path] {
+            std::fs::remove_file(path).expect("remove generated test audio");
+        }
+    }
+    std::fs::remove_dir_all(dir).expect("remove generated reference");
+}
+
+#[test]
+#[ignore]
 fn qwen_onset_is_speech_not_junk() {
     let marek = bundled_voice_path("marek");
     let mut s = SidecarHandle::spawn();

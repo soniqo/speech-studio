@@ -56,6 +56,7 @@ beforeEach(() => {
     project: emptyProject("Test"),
     selection: { kind: "none" },
     transport: { playing: false, positionSec: 0, zoomPxPerSec: 100 },
+    model: { ...useProjectStore.getInitialState().model },
   });
 });
 
@@ -111,6 +112,41 @@ describe("projectStore model defaults", () => {
 
     useProjectStore.getState().setTtsLanguage("ru");
     expect(useProjectStore.getState().model.language).toBe("zh");
+  });
+
+  it("restores Japanese after switching through an engine without Japanese", () => {
+    const engines = [
+      engineInfo("qwen3", { languages: ["zh", "en", "ja"], requiresLanguage: true }),
+      engineInfo("chatterbox", { languages: ["en", "hi"], requiresLanguage: true }),
+      engineInfo("voxcpm2"),
+    ];
+    const store = useProjectStore.getState();
+    store.setAvailableTtsEngines(engines);
+    store.setTtsEngine("qwen3");
+    store.setTtsLanguage("ja");
+    store.setTtsEngine("chatterbox");
+    expect(useProjectStore.getState().model.language).toBe("en");
+    // Descriptor refreshes (including variant changes) must preserve the choice.
+    store.setAvailableTtsEngines(engines);
+    store.setTtsEngine("voxcpm2");
+    store.setTtsEngine("qwen3");
+    expect(useProjectStore.getState().model.language).toBe("ja");
+  });
+
+  it("uses an explicit new language choice after an engine fallback", () => {
+    const store = useProjectStore.getState();
+    store.setAvailableTtsEngines([
+      engineInfo("qwen3", { languages: ["zh", "en", "ja"], requiresLanguage: true }),
+      engineInfo("chatterbox", { languages: ["en", "hi"], requiresLanguage: true }),
+    ]);
+    store.setTtsEngine("qwen3");
+    store.setTtsLanguage("ja");
+    store.setTtsEngine("chatterbox");
+    store.setTtsLanguage("hi");
+    store.setTtsEngine("qwen3");
+    expect(useProjectStore.getState().model.language).toBe("zh");
+    store.setTtsEngine("chatterbox");
+    expect(useProjectStore.getState().model.language).toBe("hi");
   });
 
   it("ignores language changes for engines that do not expose a language selector", () => {

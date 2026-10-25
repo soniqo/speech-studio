@@ -72,6 +72,8 @@ beforeEach(() => {
     model: {
       ...s.model,
       engine: "cosyvoice",
+      language: "en",
+      preferredLanguage: undefined,
       engines: [engineInfo()],
       status: "ready",
     },
@@ -79,6 +81,26 @@ beforeEach(() => {
 });
 
 describe("useSynthesizeAll", () => {
+  it("sends the restored Japanese selection to Qwen after engine switches", async () => {
+    const store = useProjectStore.getState();
+    store.setAvailableTtsEngines([
+      { ...engineInfo(), id: "qwen3", languages: ["zh", "en", "ja"], requiresLanguage: true },
+      { ...engineInfo(), id: "chatterbox", languages: ["en", "hi"], requiresLanguage: true },
+    ]);
+    store.setTtsEngine("qwen3");
+    store.setTtsLanguage("ja");
+    store.setTtsEngine("chatterbox");
+    store.setTtsEngine("qwen3");
+    vi.mocked(synthesizeClip).mockResolvedValue({
+      audioPath: "/tmp/japanese.wav", durationSec: 5.9, elapsedSec: 2,
+    });
+    const { result } = renderHook(() => useSynthesizeAll());
+    await act(() => result.current.run("all"));
+    expect(synthesizeClip).toHaveBeenCalledWith(expect.objectContaining({
+      engine: "qwen3", language: "ja",
+    }));
+  });
+
   it("pauses and seeks to regenerated audio before replacing clip media", async () => {
     vi.mocked(synthesizeClip).mockResolvedValue({
       audioPath: "/tmp/rendered-new.wav",

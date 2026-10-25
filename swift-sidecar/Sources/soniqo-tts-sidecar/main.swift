@@ -58,6 +58,8 @@ struct Request: Decodable {
     let cfgValue: Float?
     // Optional synthesis language for engines that declare requiresLanguage.
     let language: String?
+    // Save Qwen's raw and onset-trimmed audio beside the final WAV for A/B checks.
+    let debugAudio: Bool?
     // Chatterbox: direct exaggeration override (emotion intensity). When nil the
     // handler maps the inline emotion marker to a value.
     let exaggeration: Float?
@@ -845,14 +847,15 @@ func conditionSynthOutput(
     leadInMs: Int = 100,
     postRollMs: Int = 240,
     fadeInMs: Int = 40,
-    fadeOutMs: Int = 40
+    fadeOutMs: Int = 40,
+    debugOutputURL: URL? = nil
 ) -> [Float] {
     let dejunked = trimLeadingJunk(generated, sampleRate: sampleRate)
     if dejunked.count != generated.count {
         let trimmedMs = (generated.count - dejunked.count) * 1000 / sampleRate
         logErr("[sidecar] \(engine) onset junk: trimmed leading \(trimmedMs)ms")
     }
-    return conditionAudioEdges(
+    let conditioned = conditionAudioEdges(
         dejunked,
         sampleRate: sampleRate,
         preTrimMs: preTrimMs,
@@ -861,6 +864,19 @@ func conditionSynthOutput(
         fadeInMs: fadeInMs,
         fadeOutMs: fadeOutMs
     )
+    if let outputURL = debugOutputURL {
+        let stem = outputURL.deletingPathExtension()
+        let rawURL = stem.appendingPathExtension("raw.wav")
+        let trimmedURL = stem.appendingPathExtension("trimmed.wav")
+        do {
+            try WAVWriter.write(samples: generated, sampleRate: sampleRate, to: rawURL)
+            try WAVWriter.write(samples: dejunked, sampleRate: sampleRate, to: trimmedURL)
+            logErr("[sidecar] \(engine) debug audio raw=\(rawURL.path) trimmed=\(trimmedURL.path) final=\(outputURL.path) samples=\(generated.count)/\(dejunked.count)/\(conditioned.count)")
+        } catch {
+            logErr("[sidecar] \(engine) debug audio could not be saved: \(error)")
+        }
+    }
+    return conditioned
 }
 
 func safeFilename(_ s: String) -> String {
@@ -1694,7 +1710,7 @@ while let line = readLine(strippingNewline: true) {
             let finalLanguage = language?.isEmpty == false ? language! : "english"
             let seed = request.seed ?? 1000
             MLX.seed(seed)
-            logErr("[sidecar] qwen seed=\(seed) language=\(finalLanguage) sampling t=\(sampling.temperature) topK=\(sampling.topK) maxTok=\(sampling.maxTokens) rp=\(sampling.repetitionPenalty)")
+            logErr("[sidecar] qwen seed=\(seed) language=\(finalLanguage) requested sampling t=\(sampling.temperature) topK=\(sampling.topK) maxTok=\(sampling.maxTokens) rp=\(sampling.repetitionPenalty)")
             let generatedAudio = model.synthesizeWithVoiceCloneICL(
                 text: cleanText,
                 referenceAudio: refSamples,
@@ -1706,7 +1722,12 @@ while let line = readLine(strippingNewline: true) {
             )
 
             let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
-            let audio = conditionSynthOutput(generatedAudio, sampleRate: 24000, engine: "qwen", preTrimMs: 20)
+            let debugAudio = request.debugAudio == true
+                || ProcessInfo.processInfo.environment["SONIQO_TTS_DEBUG_AUDIO"] == "1"
+            let audio = conditionSynthOutput(
+                generatedAudio, sampleRate: 24000, engine: "qwen", preTrimMs: 20,
+                debugOutputURL: debugAudio ? outURL : nil
+            )
             try WAVWriter.write(samples: audio, sampleRate: 24000, to: outURL)
 
             let durationSec = Double(audio.count) / 24000.0
