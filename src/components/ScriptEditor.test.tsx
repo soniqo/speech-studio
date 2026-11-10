@@ -53,6 +53,7 @@ describe("ScriptEditor", () => {
   beforeEach(() => {
     mockRecorder();
     useProjectStore.setState({
+      locale: "en",
       model: {
         engine: "voxcpm2",
         language: "en",
@@ -67,6 +68,14 @@ describe("ScriptEditor", () => {
     render(<ScriptEditor value="Hello world" onChange={onChange} />);
     fireEvent.click(screen.getByRole("button", { name: "excited" }));
     expect(onChange).toHaveBeenCalledWith("(excited) Hello world");
+  });
+
+  it("shows a translated marker while preserving the model syntax", () => {
+    useProjectStore.setState({ locale: "zh-TW" });
+    const onChange = vi.fn();
+    render(<ScriptEditor value="你好" onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "興奮（excited）" }));
+    expect(onChange).toHaveBeenCalledWith("(excited) 你好");
   });
 
   it("replaces an existing parenthetical tag instead of stacking", () => {

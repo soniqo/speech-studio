@@ -301,6 +301,16 @@ export function TopBar() {
         />
       </div>
       <div className="ml-auto flex min-w-0 items-center gap-2">
+        <Select value={locale} onValueChange={(value) => useProjectStore.getState().setLocale(value as AppLocale)}>
+          <SelectTrigger className="h-7 w-[116px] shrink-0 text-xs" title={t.locale.selectorTitle} aria-label={t.locale.selectorTitle}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="en">{t.locale.english}</SelectItem>
+            <SelectItem value="ru">{t.locale.russian}</SelectItem>
+            <SelectItem value="zh-TW">{t.locale.traditionalChinese}</SelectItem>
+          </SelectContent>
+        </Select>
         <UpdateChip />
         {model.engines.length > 1 && (
           <Select
