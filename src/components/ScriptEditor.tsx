@@ -56,8 +56,15 @@ function bracketMarker(marker: string): string {
   return value.startsWith("[") && value.endsWith("]") ? value : `[${value}]`;
 }
 
+const ZH_MARKERS: Record<string, string> = {
+  soft: "輕柔", warm: "溫暖", whispering: "耳語", whisper: "耳語", intense: "強烈",
+  excited: "興奮", happy: "開心", calm: "平靜", serious: "嚴肅", surprised: "驚訝",
+  sad: "難過", angry: "生氣", dramatic: "戲劇化", laughs: "笑", laughter: "笑聲",
+  shouting: "大喊", fear: "害怕", disgust: "厭惡", neutral: "自然",
+};
+
 export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
-  const { messages: m } = useI18n();
+  const { locale, messages: m } = useI18n();
   const ref = useRef<HTMLTextAreaElement>(null);
   const { recording, busy, error: dictationError, start, stopAndTranscribe } =
     useDictationRecorder();
@@ -184,7 +191,7 @@ export function ScriptEditor({ value, onChange }: ScriptEditorProps) {
               }
               className="h-6 px-2 text-[11px] font-normal"
             >
-              {rawTag}
+              {locale === "zh-TW" && ZH_MARKERS[rawTag] ? `${ZH_MARKERS[rawTag]}（${rawTag}）` : rawTag}
             </Button>
           );
         })}
