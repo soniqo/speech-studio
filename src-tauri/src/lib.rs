@@ -1,3 +1,4 @@
+mod speech_runtime;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -651,6 +652,7 @@ enum TtsEngine {
     IndicMio,
     #[serde(rename = "fish-audio")]
     FishAudio,
+    ESpeech,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1819,6 +1821,7 @@ fn synth_one_line(
         "cfgValue": 2.0,
         "maxTokens": max_tokens,
         "minStopSteps": min_stop_steps,
+        "steps": 24,
     });
     let raw = manager.request(&payload)?;
     let env: SidecarResponse = serde_json::from_value(raw).map_err(|e| e.to_string())?;
@@ -2034,6 +2037,7 @@ fn equalize_chunk_loudness(rendered: &mut [Vec<f32>], rate: u32) {
 
 #[tauri::command]
 async fn synthesize_clip(
+    app: tauri::AppHandle,
     manager: State<'_, SidecarManager>,
     settings: State<'_, ModelSettingsState>,
     args: SynthesizeArgs,
@@ -2061,6 +2065,39 @@ async fn synthesize_clip(
     let reference_audio_path = import_reference_audio_path(&args.reference_audio_path)?
         .to_string_lossy()
         .into_owned();
+
+    // Shared Runtime mode: the daemon owns the model process, so this app must
+    // not spin up its own sidecar (a second copy of the same weights).
+    if load_runtime_mode(&app).use_shared_runtime && !runtime_engine_name(args.engine).is_empty() {
+        let request_id = uuid::Uuid::new_v4().simple().to_string();
+        let runtime = speech_runtime::speech_runtime_tts_synthesize(
+            speech_runtime::RuntimeSynthesizeArgs {
+                request_id,
+                model: runtime_engine_name(args.engine).to_string(),
+                voice_id: None,
+                reference_audio_path: Some(reference_audio_path),
+                reference_text: Some(args.reference_text.clone()),
+                // Runtime engines have no instruct channel in the shared
+                // contract yet: strip inline style markers instead of letting
+                // the model speak "(whisper)" literally.
+                text: preprocess_target(&strip_style_markers_for_grading(&args.text)),
+                language: args.language.clone(),
+                seed: Some(uuid::Uuid::new_v4().as_u128() as u64),
+            },
+        )
+        .await?;
+        studio_log!(
+            "[synth] clip {} rendered through Speech Runtime {} ({:.2}s)",
+            args.clip_id,
+            runtime_engine_name(args.engine),
+            runtime.duration_sec
+        );
+        return Ok(SynthesizeResult {
+            audio_path: runtime.audio_path,
+            duration_sec: runtime.duration_sec,
+            elapsed_sec: synth_started.elapsed().as_secs_f64(),
+        });
+    }
 
     // Period→comma preprocessing was a CosyVoice-specific workaround for its
     // EOS attractor on inline periods. VoxCPM2 doesn't share that quirk, but
@@ -2402,7 +2439,10 @@ fn normalize_synthesis_text(engine: TtsEngine, text: &str) -> (String, Option<St
         }
         // Qwen3 ignores style entirely. Strip stale Studio markers so they are
         // not rendered literally after switching from a style-aware engine.
-        TtsEngine::Qwen3 => (strip_style_markers_for_grading(text), None),
+        // F5/ESpeech has no style conditioning; strip Studio markers.
+        TtsEngine::Qwen3 | TtsEngine::ESpeech => {
+            (strip_style_markers_for_grading(text), None)
+        }
         _ => (text.to_string(), None),
     }
 }
@@ -2552,6 +2592,272 @@ fn short_hash(s: &str) -> u32 {
         h = h.wrapping_mul(0x01000193);
     }
     h
+}
+
+
+// ---------- model artifacts, shared runtime mode, WAV export ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TtsArtifactInfo {
+    engine: TtsEngine,
+    model_id: String,
+    paths: Vec<String>,
+    exists: bool,
+    bytes: u64,
+    loaded: bool,
+}
+
+async fn fetch_tts_artifact(
+    manager: &SidecarManager,
+    settings: &ModelSettingsState,
+    engine: TtsEngine,
+) -> Result<TtsArtifactInfo, String> {
+    ensure_engine_supported(engine)?;
+    let model_id = {
+        let settings = settings.0.lock().map_err(|e| e.to_string())?;
+        resolve_tts_engine_info(engine, &settings).model_id
+    };
+    let raw = manager.request(&serde_json::json!({
+        "id": format!("model-info-{}-{}", engine.sidecar_command(), uuid::Uuid::new_v4().simple()),
+        "command": "model_info",
+        "engine": engine,
+        "modelId": model_id,
+    }))?;
+    let env: SidecarResponse = serde_json::from_value(raw).map_err(|e| e.to_string())?;
+    if !env.ok {
+        return Err(env.error.unwrap_or_else(|| "sidecar model_info failed".into()));
+    }
+    let result = env.result.unwrap_or_default();
+    Ok(TtsArtifactInfo {
+        engine,
+        model_id: result
+            .get("modelId")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&model_id)
+            .to_string(),
+        paths: result
+            .get("paths")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        exists: result.get("exists").and_then(|v| v.as_bool()).unwrap_or(false),
+        bytes: result.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+        loaded: result.get("loaded").and_then(|v| v.as_bool()).unwrap_or(false),
+    })
+}
+
+#[tauri::command]
+async fn tts_model_artifact(
+    manager: State<'_, SidecarManager>,
+    settings: State<'_, ModelSettingsState>,
+    engine: TtsEngine,
+) -> Result<TtsArtifactInfo, String> {
+    fetch_tts_artifact(&manager, &settings, engine).await
+}
+
+/// Remove the cached weights for one engine. Paths are validated to stay under
+/// a model cache; the sidecar unloads the engine first so no mapped file
+/// survives the delete.
+#[tauri::command]
+async fn delete_tts_model(
+    manager: State<'_, SidecarManager>,
+    settings: State<'_, ModelSettingsState>,
+    engine: TtsEngine,
+) -> Result<TtsArtifactInfo, String> {
+    let info = fetch_tts_artifact(&manager, &settings, engine).await?;
+    let _ = manager.request(&serde_json::json!({
+        "id": format!("unload-{}-{}", engine.sidecar_command(), uuid::Uuid::new_v4().simple()),
+        "command": "unload_model",
+        "engine": engine,
+    }));
+    let cache_root = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("qwen3-speech");
+    for path in &info.paths {
+        let candidate = PathBuf::from(path);
+        if !candidate.starts_with(&cache_root) {
+            studio_log!("[models] refusing to delete path outside model cache: {path}");
+            continue;
+        }
+        if candidate.exists() {
+            std::fs::remove_dir_all(&candidate)
+                .map_err(|e| format!("Could not delete {}: {e}", candidate.display()))?;
+        }
+    }
+    studio_log!("[models] deleted {} weights for {}", info.paths.len(), info.model_id);
+    fetch_tts_artifact(&manager, &settings, engine).await
+}
+
+/// Import a locally converted TTS bundle (ESpeech is not published on the
+/// Hub, so its weights arrive as a directory) into the Studio model cache.
+#[tauri::command]
+async fn import_tts_bundle(
+    app: tauri::AppHandle,
+    manager: State<'_, SidecarManager>,
+    settings: State<'_, ModelSettingsState>,
+    engine: TtsEngine,
+) -> Result<TtsArtifactInfo, String> {
+    if engine != TtsEngine::ESpeech {
+        return Err("Only local ESpeech bundles can be imported".into());
+    }
+    let info = fetch_tts_artifact(&manager, &settings, engine).await?;
+    let Some(target) = info.paths.first().map(PathBuf::from) else {
+        return Err("The sidecar did not report a bundle path".into());
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog()
+        .file()
+        .set_title("Choose an ESpeech MLX bundle")
+        .pick_folder(move |path| {
+            let _ = tx.send(path);
+        });
+    let picked = rx.recv().map_err(|e| e.to_string())?;
+    let Some(source) = picked else {
+        return fetch_tts_artifact(&manager, &settings, engine).await;
+    };
+    let source = source.into_path().map_err(|e| e.to_string())?;
+    for required in ["config.json", "model.safetensors", "vocos.safetensors", "vocab.txt"] {
+        if !source.join(required).is_file() {
+            return Err(format!("Bundle is missing {required}"));
+        }
+    }
+    if source == target {
+        return fetch_tts_artifact(&manager, &settings, engine).await;
+    }
+    if target.exists() {
+        std::fs::remove_dir_all(&target)
+            .map_err(|e| format!("Could not replace {}: {e}", target.display()))?;
+    }
+    copy_dir_all(&source, &target)
+        .map_err(|e| format!("Could not import bundle: {e}"))?;
+    studio_log!("[models] imported {} bundle from {}", engine.display_name(), source.display());
+    fetch_tts_artifact(&manager, &settings, engine).await
+}
+
+fn copy_dir_all(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let path = entry.path();
+        let destination = target.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_all(&path, &destination)?;
+        } else if path.is_file() {
+            std::fs::copy(&path, &destination)?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveAudioAsArgs {
+    audio_path: String,
+    suggested_name: Option<String>,
+}
+
+#[tauri::command]
+async fn save_audio_as(app: tauri::AppHandle, args: SaveAudioAsArgs) -> Result<Option<String>, String> {
+    let source = PathBuf::from(&args.audio_path);
+    if !source.is_file() {
+        return Err(format!("Audio file not found: {}", source.display()));
+    }
+    let suggested = args
+        .suggested_name
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| {
+            source
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "take.wav".into())
+        });
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog()
+        .file()
+        .add_filter("WAV", &["wav"])
+        .set_file_name(&suggested)
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let picked = rx.recv().map_err(|e| e.to_string())?;
+    let Some(target) = picked else { return Ok(None) };
+    let target = target.to_string();
+    std::fs::copy(&source, &target)
+        .map_err(|e| format!("Could not save WAV: {e}"))?;
+    Ok(Some(target))
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeModeSettings {
+    /// Route synthesis through the shared Speech Runtime daemon instead of this
+    /// process's own sidecar. The daemon keeps one model resident across apps.
+    #[serde(default)]
+    use_shared_runtime: bool,
+}
+
+const RUNTIME_MODE_FILE: &str = "runtime-settings.json";
+
+fn runtime_mode_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    Ok(dir.join(RUNTIME_MODE_FILE))
+}
+
+fn load_runtime_mode(app: &tauri::AppHandle) -> RuntimeModeSettings {
+    let Ok(path) = runtime_mode_path(app) else {
+        return RuntimeModeSettings::default();
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn runtime_mode_settings(app: tauri::AppHandle) -> RuntimeModeSettings {
+    load_runtime_mode(&app)
+}
+
+#[tauri::command]
+fn set_runtime_mode(app: tauri::AppHandle, settings: RuntimeModeSettings) -> Result<RuntimeModeSettings, String> {
+    let path = runtime_mode_path(&app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let raw = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(&path, raw).map_err(|e| format!("Could not save runtime settings: {e}"))?;
+    Ok(settings)
+}
+
+fn runtime_engine_name(engine: TtsEngine) -> &'static str {
+    match engine {
+        TtsEngine::Qwen3 => "qwen3",
+        TtsEngine::VoxCPM2 => "voxcpm2",
+        TtsEngine::ESpeech => "espeech",
+        _ => "",
+    }
+}
+
+/// Registry entry for an engine the shared Speech Runtime daemon can host,
+/// looked up by the daemon-side engine key ("qwen3", "voxcpm2", …). Used by
+/// the client-mode config writer in `speech_runtime` to declare Studio's
+/// engines to the daemon.
+fn runtime_client_engine_info(engine: &str) -> Option<&TtsEngineInfo> {
+    let key: TtsEngine = serde_json::from_value(serde_json::Value::String(engine.to_string())).ok()?;
+    MODEL_REGISTRY
+        .tts_engines
+        .iter()
+        .find(|entry| entry.info.id == key)
+        .map(|entry| &entry.info)
 }
 
 // Per-clip audio cache. Must stay in sync with the sidecar's own cache dir
@@ -3280,6 +3586,24 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ping_sidecar,
+            speech_runtime::speech_runtime_health,
+            speech_runtime::speech_runtime_transcribe_reference,
+            speech_runtime::speech_runtime_tts_models,
+            speech_runtime::speech_runtime_tts_load,
+            speech_runtime::speech_runtime_tts_unload,
+            speech_runtime::speech_runtime_tts_voices,
+            speech_runtime::speech_runtime_tts_register_voice,
+            speech_runtime::speech_runtime_tts_delete_voice,
+            speech_runtime::speech_runtime_tts_synthesize,
+            speech_runtime::speech_runtime_tts_cancel,
+            speech_runtime::speech_runtime_write_tts_config,
+            speech_runtime::speech_runtime_restart,
+            tts_model_artifact,
+            import_tts_bundle,
+            delete_tts_model,
+            save_audio_as,
+            runtime_mode_settings,
+            set_runtime_mode,
             activity_log_snapshot,
             activity_log_info,
             reveal_activity_log,
@@ -3313,6 +3637,74 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_tts_config_merge_preserves_other_keys() {
+        let existing = serde_json::json!({
+            "port": 8599,
+            "batchChunkMs": 10000,
+            "idleUnloadSeconds": 900,
+            "models": {
+                "parakeet-ultra": {
+                    "backend": "ane",
+                    "languages": ["ru", "en"],
+                    "path": "/some/where/parakeet.gguf"
+                }
+            }
+        })
+        .to_string();
+        let block = serde_json::json!({
+            "binary": "/path/to/sidecar",
+            "models": {
+                "qwen3": {"engine": "qwen3", "modelId": "aufklarer/Qwen3", "sampleRate": 24000},
+                "voxcpm2": {"engine": "voxcpm2", "modelId": "aufklarer/VoxCPM2", "sampleRate": 48000}
+            }
+        });
+        let merged = speech_runtime::merge_runtime_tts_config(&existing, &block).unwrap();
+        assert_eq!(merged["port"], 8599);
+        assert_eq!(merged["batchChunkMs"], 10000);
+        assert_eq!(merged["idleUnloadSeconds"], 900);
+        assert_eq!(merged["models"]["parakeet-ultra"]["backend"], "ane");
+        assert_eq!(merged["tts"]["binary"], "/path/to/sidecar");
+        assert_eq!(merged["tts"]["models"]["qwen3"]["engine"], "qwen3");
+        assert_eq!(merged["tts"]["models"]["voxcpm2"]["modelId"], "aufklarer/VoxCPM2");
+    }
+
+    #[test]
+    fn runtime_tts_config_merge_keeps_unknown_engines_and_replaces_known() {
+        let existing = serde_json::json!({
+            "tts": {
+                "binary": "/old/sidecar",
+                "models": {
+                    "qwen3": {"engine": "qwen3", "modelId": "stale/id", "sampleRate": 16000},
+                    "cosyvoice": {"engine": "cosyvoice", "modelId": "some/cosyvoice", "sampleRate": 24000}
+                }
+            }
+        })
+        .to_string();
+        let block = serde_json::json!({
+            "binary": "/new/sidecar",
+            "models": {
+                "qwen3": {"engine": "qwen3", "modelId": "fresh/id", "sampleRate": 24000}
+            }
+        });
+        let merged = speech_runtime::merge_runtime_tts_config(&existing, &block).unwrap();
+        // Known engine: replaced by the fresh entry.
+        assert_eq!(merged["tts"]["models"]["qwen3"]["modelId"], "fresh/id");
+        // Unknown engine: preserved verbatim.
+        assert_eq!(merged["tts"]["models"]["cosyvoice"]["modelId"], "some/cosyvoice");
+        assert_eq!(merged["tts"]["binary"], "/new/sidecar");
+    }
+
+    #[test]
+    fn runtime_tts_config_merge_rejects_invalid_json() {
+        let block = serde_json::json!({"binary": "/s", "models": {}});
+        let err = speech_runtime::merge_runtime_tts_config("{not json", &block).unwrap_err();
+        assert!(err.contains("not valid JSON"), "unexpected error: {err}");
+        // A valid non-object root is also rejected, not silently reset.
+        let err = speech_runtime::merge_runtime_tts_config("[1,2]", &block).unwrap_err();
+        assert!(err.contains("JSON object"), "unexpected error: {err}");
+    }
 
     #[test]
     fn tts_engine_protocol_names_are_stable() {
@@ -3783,6 +4175,7 @@ mod tests {
                 TtsEngine::OmniVoice,
                 TtsEngine::IndicMio,
                 TtsEngine::FishAudio,
+                TtsEngine::ESpeech,
             ]
         );
 

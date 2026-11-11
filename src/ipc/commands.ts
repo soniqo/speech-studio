@@ -1,6 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Project, Voice } from "../types/project";
 
+export interface SpeechRuntimeHealth {
+  connected: boolean;
+  detail: string;
+}
+
+/** The optional local daemon runs independently of the Studio MLX sidecar. */
+export function speechRuntimeHealth(): Promise<SpeechRuntimeHealth> {
+  return invoke<SpeechRuntimeHealth>("speech_runtime_health");
+}
+
+/** The daemon accepts 16 kHz WAV; the Rust adapter converts the reference. */
+export function speechRuntimeTranscribeReference(audioPath: string): Promise<string> {
+  return invoke<string>("speech_runtime_transcribe_reference", { args: { audioPath } });
+}
+
 export interface PingResult {
   id: string;
   ok: boolean;
@@ -19,7 +34,8 @@ export type TtsEngineId =
   | "chatterbox"
   | "omnivoice"
   | "indic-mio"
-  | "fish-audio";
+  | "fish-audio"
+  | "espeech";
 
 /** One selectable artifact of an engine — same architecture, different
  * weights (precision / size / memory footprint). */
@@ -343,4 +359,155 @@ export function clearActivityLog(): Promise<void> {
  * sidecar lines, so the panel and the log file tell the whole story. */
 export function noteActivity(text: string): Promise<void> {
   return invoke<void>("activity_log_note", { args: { text } });
+}
+
+export interface TtsArtifactInfo {
+  engine: TtsEngineId;
+  modelId: string;
+  paths: string[];
+  exists: boolean;
+  bytes: number;
+  loaded: boolean;
+}
+
+/** On-disk state of the artifact the engine would load right now. */
+export function ttsModelArtifact(engine: TtsEngineId): Promise<TtsArtifactInfo> {
+  return invoke<TtsArtifactInfo>("tts_model_artifact", { args: { engine } });
+}
+
+/** Copies a locally converted ESpeech bundle into the Studio model cache. */
+export function importTtsBundle(engine: TtsEngineId): Promise<TtsArtifactInfo> {
+  return invoke<TtsArtifactInfo>("import_tts_bundle", { args: { engine } });
+}
+
+/** Unloads the engine and removes its cached weights. */
+export function deleteTtsModel(engine: TtsEngineId): Promise<TtsArtifactInfo> {
+  return invoke<TtsArtifactInfo>("delete_tts_model", { args: { engine } });
+}
+
+export function saveAudioAs(audioPath: string, suggestedName?: string): Promise<string | null> {
+  return invoke<string | null>("save_audio_as", { args: { audioPath, suggestedName } });
+}
+
+export interface RuntimeModeSettings {
+  useSharedRuntime: boolean;
+}
+
+export function runtimeModeSettings(): Promise<RuntimeModeSettings> {
+  return invoke<RuntimeModeSettings>("runtime_mode_settings");
+}
+
+export function setRuntimeMode(settings: RuntimeModeSettings): Promise<RuntimeModeSettings> {
+  return invoke<RuntimeModeSettings>("set_runtime_mode", { args: { settings } });
+}
+
+export interface RuntimeTtsModel {
+  id: string;
+  displayName: string;
+  modelId: string;
+  languages: string[];
+  variants?: Array<{ id: string; modelId: string; precision?: string; label?: string }>;
+  loaded: boolean;
+  loadedModelId?: string | null;
+}
+
+export interface RuntimeTtsVoice {
+  id: string;
+  name: string;
+  language?: string;
+  referenceText: string;
+  audioPath: string;
+  createdAt?: string;
+}
+
+export interface RuntimeTtsCatalog {
+  models: RuntimeTtsModel[];
+}
+
+export function speechRuntimeTtsModels(): Promise<RuntimeTtsCatalog> {
+  return invoke<RuntimeTtsCatalog>("speech_runtime_tts_models");
+}
+
+export function speechRuntimeTtsLoad(model: string, variant?: string): Promise<unknown> {
+  return invoke("speech_runtime_tts_load", { args: { model, variant } });
+}
+
+export function speechRuntimeTtsUnload(model: string): Promise<unknown> {
+  return invoke("speech_runtime_tts_unload", { args: { model } });
+}
+
+export function speechRuntimeTtsVoices(): Promise<{ voices: RuntimeTtsVoice[] }> {
+  return invoke<{ voices: RuntimeTtsVoice[] }>("speech_runtime_tts_voices");
+}
+
+export interface RegisterRuntimeVoiceArgs {
+  name: string;
+  language?: string;
+  referenceText: string;
+  audioPath: string;
+}
+
+export function speechRuntimeTtsRegisterVoice(
+  args: RegisterRuntimeVoiceArgs,
+): Promise<RuntimeTtsVoice> {
+  return invoke<RuntimeTtsVoice>("speech_runtime_tts_register_voice", { args });
+}
+
+export function speechRuntimeTtsDeleteVoice(id: string): Promise<unknown> {
+  return invoke("speech_runtime_tts_delete_voice", { args: { id } });
+}
+
+export interface RuntimeSynthesizeArgs {
+  requestId: string;
+  model: string;
+  voiceId?: string;
+  referenceAudioPath?: string;
+  referenceText?: string;
+  text: string;
+  language?: string;
+  seed?: number;
+}
+
+export interface RuntimeSynthesizeResult {
+  audioPath: string;
+  sampleRate: number;
+  durationSec: number;
+}
+
+export function speechRuntimeTtsSynthesize(
+  args: RuntimeSynthesizeArgs,
+): Promise<RuntimeSynthesizeResult> {
+  return invoke<RuntimeSynthesizeResult>("speech_runtime_tts_synthesize", { args });
+}
+
+export function speechRuntimeTtsCancel(requestId: string): Promise<unknown> {
+  return invoke("speech_runtime_tts_cancel", { args: { requestId } });
+}
+
+export interface RuntimeTtsConfigResult {
+  /** Absolute path of the daemon's app-config.json that was written. */
+  path: string;
+  /** TTS model names declared in the merged config. */
+  models: string[];
+  /** The daemon must be restarted for the config to take effect. */
+  restartedRequired: true;
+}
+
+/** Merge Studio's engines into the Speech Runtime daemon's app-config.json
+ * (preserving port/models/other keys); macOS only. Requires a runtime
+ * build with the /v1/tts/* routes. */
+export function speechRuntimeWriteTtsConfig(): Promise<RuntimeTtsConfigResult> {
+  return invoke<RuntimeTtsConfigResult>("speech_runtime_write_tts_config");
+}
+
+export interface RuntimeRestartResult {
+  restarted: boolean;
+  /** Present when restarted is false, e.g. "not running under launchd". */
+  reason: string | null;
+}
+
+/** Restart the daemon via launchd kickstart; never touches a process not
+ * identified through launchctl. macOS only. */
+export function speechRuntimeRestart(): Promise<RuntimeRestartResult> {
+  return invoke<RuntimeRestartResult>("speech_runtime_restart");
 }
