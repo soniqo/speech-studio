@@ -59,7 +59,7 @@ export function Inspector() {
   const { locale, messages: t } = useI18n();
   const selection = useProjectStore((s) => s.selection);
   const project = useProjectStore((s) => s.project);
-  const setProject = useProjectStore((s) => s.setProject);
+  const setTimelineLength = useProjectStore((s) => s.setTimelineLength);
   const updateClip = useProjectStore((s) => s.updateClip);
   const assignVoiceToTrack = useProjectStore((s) => s.assignVoiceToTrack);
   const removeClip = useProjectStore((s) => s.removeClip);
@@ -103,7 +103,7 @@ export function Inspector() {
                 onChange={(e) => {
                   const v = Number(e.target.value);
                   if (!Number.isFinite(v)) return;
-                  setProject({ ...project, durationSec: Math.max(5, v) });
+                  setTimelineLength(v);
                 }}
                 className="w-24"
               />
