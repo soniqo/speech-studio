@@ -1,5 +1,6 @@
 import { Pause, Play } from "lucide-react";
 import { useProjectStore } from "../state/projectStore";
+import { projectTimelineEnd } from "../types/project";
 import { useAnyClipRendered } from "../hooks/useSynthesizeAll";
 import { Button } from "./ui/button";
 import { ActivityToggle } from "./ActivityPanel";
@@ -17,10 +18,12 @@ export function Transport() {
   const { messages: t } = useI18n();
   const transport = useProjectStore((s) => s.transport);
   const project = useProjectStore((s) => s.project);
+  const selection = useProjectStore((s) => s.selection);
+  const select = useProjectStore((s) => s.select);
   const setPlaying = useProjectStore((s) => s.setPlaying);
   const seek = useProjectStore((s) => s.seek);
 
-  const duration = Math.max(project.durationSec, 5);
+  const duration = Math.max(projectTimelineEnd(project), 5);
   const hasContent = project.tracks.length > 0;
   const anyRendered = useAnyClipRendered();
   const synthBusy = useProjectStore((s) => s.synthesisStatus === "running");
@@ -83,6 +86,12 @@ export function Transport() {
           )}
         />
       </div>
+      {selection.kind !== "none" && (
+        <Button variant="ghost" size="sm" className="shrink-0"
+          onClick={() => select({ kind: "none" })} title={t.transport.playAllTitle}>
+          {t.transport.playAll}
+        </Button>
+      )}
       <ActivityToggle />
     </footer>
   );

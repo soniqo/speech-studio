@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { VoiceCompare } from "./VoiceCompare";
 import { TopBar } from "./TopBar";
 import { LeftRail } from "./LeftRail";
 import { Timeline } from "./Timeline";
@@ -55,6 +57,9 @@ function ModelLoadingBanner() {
 }
 
 export function AppShell() {
+  const [page, setPage] = useState<"studio" | "compare">("studio");
+  const locale = useProjectStore((s) => s.locale);
+  const busy = useProjectStore((s) => s.synthesisStatus === "running");
   usePlayheadTick();
   useAudioScheduler();
   useDemoProgress();
@@ -64,13 +69,29 @@ export function AppShell() {
       <div className="flex h-screen flex-col bg-background text-foreground">
         <TopBar />
         <ModelLoadingBanner />
-        <div className="flex min-h-0 flex-1">
-          <LeftRail />
-          <Timeline />
-          <Inspector />
-        </div>
+        <nav className="flex gap-1 border-b border-border bg-card/30 px-3 py-1" aria-label="Workspace">
+          <button type="button" disabled={busy} onClick={() => setPage("studio")}
+            aria-current={page === "studio" ? "page" : undefined}
+            className={`rounded px-3 py-1.5 text-xs ${page === "studio" ? "bg-muted font-semibold" : "text-muted-foreground hover:text-foreground"}`}>
+            Studio
+          </button>
+          <button type="button" disabled={busy} onClick={() => setPage("compare")}
+            aria-current={page === "compare" ? "page" : undefined}
+            className={`rounded px-3 py-1.5 text-xs ${page === "compare" ? "bg-muted font-semibold" : "text-muted-foreground hover:text-foreground"}`}>
+            {locale === "ru" ? "Сравнение голосов" : "Compare voices"}
+          </button>
+        </nav>
+        {page === "studio" ? (
+          <div className="flex min-h-0 flex-1">
+            <LeftRail />
+            <Timeline />
+            <Inspector />
+          </div>
+        ) : (
+          <VoiceCompare />
+        )}
         <ActivityPanel />
-        <Transport />
+        {page === "studio" && <Transport />}
       </div>
     </TooltipProvider>
   );

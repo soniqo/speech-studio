@@ -287,3 +287,85 @@ describe("projectStore.transport", () => {
     expect(t.zoomPxPerSec).toBe(200);
   });
 });
+
+describe("projectStore timeline length", () => {
+  // Regression: a 10 s recording drawn on a stale 30 s canvas. The track
+  // looked 30 s long with sound only in the first 10 s because
+  // project.durationSec never followed the clips.
+  it("shrinks a stale 30 s canvas down to the recorded clip", () => {
+    const track = speakerTrack();
+    useProjectStore.getState().addTrack(track);
+    useProjectStore.setState((s) => ({
+      project: { ...s.project, durationSec: 30 },
+    }));
+
+    const clip = newClip({ trackId: track.id, startSec: 0, endSec: 10, text: "запись" });
+    useProjectStore.getState().addClip(clip);
+
+    expect(useProjectStore.getState().project.durationSec).toBe(10);
+  });
+
+  it("follows a synthesized clip that leaves the canvas", () => {
+    const track = speakerTrack();
+    useProjectStore.getState().addTrack(track);
+    const clip = newClip({ trackId: track.id, startSec: 0, endSec: 2, text: "line" });
+    useProjectStore.getState().addClip(clip);
+    useProjectStore.getState().updateClip(clip.id, { endSec: 41.5 });
+
+    expect(useProjectStore.getState().project.durationSec).toBe(41.5);
+  });
+
+  it("shrinks back when the last clip is removed", () => {
+    const track = speakerTrack();
+    useProjectStore.getState().addTrack(track);
+    const clip = newClip({ trackId: track.id, startSec: 0, endSec: 10, text: "запись" });
+    useProjectStore.getState().addClip(clip);
+    useProjectStore.getState().removeClip(clip.id);
+
+    expect(useProjectStore.getState().project.durationSec).toBe(5);
+  });
+
+  it("keeps the minimum canvas when clips are shorter than it", () => {
+    const track = speakerTrack();
+    useProjectStore.getState().addTrack(track);
+    const clip = newClip({ trackId: track.id, startSec: 0, endSec: 3, text: "short" });
+    useProjectStore.getState().addClip(clip);
+
+    expect(useProjectStore.getState().project.durationSec).toBe(5);
+  });
+
+  it("replays an older saved project at its real clip length", () => {
+    const track = speakerTrack();
+    const clip = newClip({ trackId: track.id, startSec: 0, endSec: 10, text: "запись" });
+    useProjectStore.getState().setProject({
+      ...emptyProject("Legacy"),
+      durationSec: 30,
+      tracks: [{ ...track, clips: [clip] }],
+    });
+
+    expect(useProjectStore.getState().project.durationSec).toBe(10);
+  });
+});
+
+describe("projectStore explicit canvas length", () => {
+  it("keeps a longer canvas through clip edits", () => {
+    const track = speakerTrack();
+    useProjectStore.getState().addTrack(track);
+    useProjectStore.getState().setTimelineLength(60);
+    const clip = newClip({ trackId: track.id, startSec: 0, endSec: 10, text: "запись" });
+    useProjectStore.getState().addClip(clip);
+    useProjectStore.getState().updateClip(clip.id, { text: "изменено" });
+
+    expect(useProjectStore.getState().project.durationSec).toBe(60);
+  });
+
+  it("never clips content shorter than the requested canvas", () => {
+    const track = speakerTrack();
+    useProjectStore.getState().addTrack(track);
+    useProjectStore.getState().setTimelineLength(5);
+    const clip = newClip({ trackId: track.id, startSec: 0, endSec: 12, text: "длинно" });
+    useProjectStore.getState().addClip(clip);
+
+    expect(useProjectStore.getState().project.durationSec).toBe(12);
+  });
+});

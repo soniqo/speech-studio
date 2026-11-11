@@ -1,4 +1,4 @@
-import { Plus, Video, Mic, AudioWaveform, Trash2, ListPlus } from "lucide-react";
+import { Plus, Video, Mic, AudioWaveform, Trash2, ListPlus, Volume2, VolumeX } from "lucide-react";
 import { useProjectStore, newClip } from "../state/projectStore";
 import type { SpeakerTrack, Track } from "../types/project";
 import { Button } from "./ui/button";
@@ -26,6 +26,8 @@ export function TrackList() {
   const select = useProjectStore((s) => s.select);
   const renameTrack = useProjectStore((s) => s.renameTrack);
   const removeTrack = useProjectStore((s) => s.removeTrack);
+  const toggleTrackMuted = useProjectStore((s) => s.toggleTrackMuted);
+  const toggleTrackSolo = useProjectStore((s) => s.toggleTrackSolo);
   const addTrack = useProjectStore((s) => s.addTrack);
   const addClip = useProjectStore((s) => s.addClip);
 
@@ -113,6 +115,38 @@ export function TrackList() {
                   {metaForTrack(trackItem, m, voiceName)}
                 </div>
               </div>
+              {trackItem.kind !== "video" && (
+                <>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleTrackMuted(trackItem.id);
+                    }}
+                    title={trackItem.muted ? m.tracks.unmute : m.tracks.mute}
+                    aria-label={trackItem.muted ? m.tracks.unmute : m.tracks.mute}
+                    aria-pressed={!!trackItem.muted}
+                    className={cn("h-6 w-6 shrink-0", trackItem.muted && "text-destructive")}
+                  >
+                    {trackItem.muted ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
+                  </Button>
+                  <Button
+                    variant={trackItem.solo ? "secondary" : "ghost"}
+                    size="icon"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleTrackSolo(trackItem.id);
+                    }}
+                    title={m.tracks.solo}
+                    aria-label={m.tracks.solo}
+                    aria-pressed={!!trackItem.solo}
+                    className={cn("h-6 w-6 shrink-0 text-[11px] font-semibold", trackItem.solo && "text-primary")}
+                  >
+                    S
+                  </Button>
+                </>
+              )}
               {trackItem.kind === "speaker" && (
                 <Button
                   variant="ghost"

@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useProjectStore } from "../state/projectStore";
+import { projectTimelineEnd } from "../types/project";
 
 export function usePlayheadTick() {
   const playing = useProjectStore((s) => s.transport.playing);
@@ -16,7 +17,7 @@ export function usePlayheadTick() {
       lastTs = ts;
       const { transport, project } = useProjectStore.getState();
       const next = transport.positionSec + dt;
-      const duration = Math.max(project.durationSec, 5);
+      const duration = Math.max(projectTimelineEnd(project), 5);
       if (next >= duration) {
         seek(duration);
         setPlaying(false);

@@ -15,6 +15,12 @@ This file is for any AI coding agent working in this repo (Claude, Codex, Cursor
 
 Status: the clone → script → synthesize → export pipeline works end to end. macOS runs the MLX engines — `CosyVoice3` by default, with `VoxCPM2`, `Qwen3-TTS`, `Chatterbox`, `OmniVoice`, `Indic-Mio`, and `Fish Audio S2 Pro` selectable from the toolbar; Windows/Linux run `VoxCPM2` and `Indic-Mio` through speech-core's LiteRT backend.
 
+### Local fork additions
+
+- **Compare page** (`src/components/VoiceCompare.tsx`, `Compare` in the left rail) drives three cloning engines over one shared reference sample and one shared text: `qwen3` (Qwen3-TTS Base 1.7B, bf16/8-bit), `voxcpm2` (bf16/int8) and `espeech`. Each engine keeps its own result, seed, cold/warm timing, RTF and peak-memory sample. Model artifacts (size, existence, loaded state) come from the sidecar's `model_info`, downloads are the sidecar's own Hugging Face fetch, and `delete_tts_model` removes the cached bundle from disk.
+- **ESpeech-TTS-1 RL-V2** is an F5-TTS v1 Russian fine-tune that the sidecar runs through `speech-swift`'s `F5TTS` module (`synthesize_espeech`). Weights are not on the Hub: `scripts/convert_espeech_checkpoint.py` converts the PyTorch `.pt` into an MLX bundle (`config.json`, `model.safetensors`, `vocos.safetensors`, `vocab.txt`) under `~/Library/Caches/qwen3-speech/models/local/ESpeech-TTS-1-RL-V2-MLX-fp16` (or `SONIQO_ESPEECH_BUNDLE_DIR`), and the Compare page can import it with `import_tts_bundle`. `F5TTSRussian` adds Russian number expansion and keeps RUAccent `+` stress markup, which the vocabulary carries as its own token.
+- **Speech Runtime client mode** (`src-tauri/src/speech_runtime.rs`, toggle in Compare): talks to the loopback daemon only (`127.0.0.1:8477`, bearer token from `~/Library/Application Support/SpeechRuntime/token`). Reference transcription uses Parakeet Ultra; reference audio is normalized with `/usr/bin/afconvert` to 16 kHz mono PCM WAV. When shared mode is on, synthesis goes through `/v1/tts/*` so the daemon's single resident model serves Studio instead of a second sidecar. `SPEECH_RUNTIME_URL` / `SPEECH_RUNTIME_TOKEN_FILE` override the endpoint for tests.
+
 ## Stack
 
 **Tauri** (Rust shell + web frontend) wrapping the Soniqo speech engines.

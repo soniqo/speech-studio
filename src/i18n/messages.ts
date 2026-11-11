@@ -113,7 +113,7 @@ const en = {
       "Nothing to synthesize — clips need text and an assigned voice (locked clips are skipped)",
     clipsFailed: (failed: number, total: number) =>
       `${failed}/${total} clips failed — see the Activity log`,
-    exportMixTitle: "Export mix as WAV",
+    exportMixTitle: "Export audio mix",
     wavAudio: "WAV audio",
     exportFailed: (error: string) => `export failed: ${error}`,
     switchLoadingEngine: (engine: string) =>
@@ -133,9 +133,9 @@ const en = {
     synthesizeMissingTitle: (count: number) =>
       `Synthesize ${count} clip(s) that don't have audio yet`,
     resynthesizeTitle: "Re-synthesize all non-locked clips",
-    exportDisabledTitle: "Synthesize at least one clip before exporting",
+    exportDisabledTitle: "Add or synthesize at least one audio clip before exporting",
     exportTitle: (count: number) =>
-      `Export a WAV mix of ${count} clip${count === 1 ? "" : "s"}`,
+      `Export ${count} audio clip${count === 1 ? "" : "s"} in the selected format`,
     exportButton: "Export",
     save: "Save",
     saved: "Saved",
@@ -172,6 +172,9 @@ const en = {
     noVoice: "No voice assigned",
     deleteTitle: "Delete track and its clips",
     deleteAria: "Delete track",
+    mute: "Mute track",
+    unmute: "Unmute track",
+    solo: "Solo: play only soloed tracks",
     addLineTitle: "Add a script line to this track",
     addLineAria: "Add script line",
   },
@@ -248,6 +251,8 @@ const en = {
     waitSynthesizing: "Wait — still synthesizing",
     pause: "Pause",
     play: "Play",
+    playAll: "All tracks",
+    playAllTitle: "Clear selection to play all unmuted tracks",
   },
   clip: {
     emptyPreview: "(empty)",
@@ -406,7 +411,7 @@ const ru: typeof en = {
       "Нечего синтезировать: клипам нужны текст и назначенный голос, заблокированные клипы пропускаются",
     clipsFailed: (failed, total) =>
       `Не удалось синтезировать ${failed} из ${total}; подробности в панели «Активность»`,
-    exportMixTitle: "Экспорт микса в WAV",
+    exportMixTitle: "Экспорт звукового микса",
     wavAudio: "Аудио WAV",
     exportFailed: (error) => `Не удалось экспортировать: ${error}`,
     switchLoadingEngine: (engine) => `Переключить движок и прервать загрузку ${engine}`,
@@ -425,9 +430,9 @@ const ru: typeof en = {
     synthesizeMissingTitle: (count) =>
       `Синтезировать ${count} ${ruPlural(count, "клип", "клипа", "клипов")} без аудио`,
     resynthesizeTitle: "Повторно синтезировать все незаблокированные клипы",
-    exportDisabledTitle: "Перед экспортом синтезируйте хотя бы один клип",
+    exportDisabledTitle: "Перед экспортом добавьте или синтезируйте аудио",
     exportTitle: (count) =>
-      `Экспортировать WAV-микс из ${count} ${ruPlural(count, "клипа", "клипов", "клипов")}`,
+      `Экспортировать ${count} ${ruPlural(count, "клип", "клипа", "клипов")} в выбранном формате`,
     exportButton: "Экспорт",
     save: "Сохранить",
     saved: "Сохранено",
@@ -464,6 +469,9 @@ const ru: typeof en = {
     noVoice: "Голос не назначен",
     deleteTitle: "Удалить дорожку и её клипы",
     deleteAria: "Удалить дорожку",
+    mute: "Выключить звук дорожки",
+    unmute: "Включить звук дорожки",
+    solo: "Слушать только дорожки Solo",
     addLineTitle: "Добавить строку сценария на эту дорожку",
     addLineAria: "Добавить строку сценария",
   },
@@ -540,6 +548,8 @@ const ru: typeof en = {
     waitSynthesizing: "Подождите: синтез ещё идёт",
     pause: "Пауза",
     play: "Воспроизвести",
+    playAll: "Все дорожки",
+    playAllTitle: "Снять выделение и слушать все дорожки без Mute",
   },
   clip: {
     emptyPreview: "(пусто)",

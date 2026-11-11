@@ -174,6 +174,7 @@ export function useUnsynthesizedCount(): number {
 export function useAnyClipRendered(): boolean {
   return useProjectStore((s) => {
     for (const t of s.project.tracks) {
+      if (t.kind === "audio" && t.sourcePath) return true;
       if (t.kind !== "speaker") continue;
       for (const c of t.clips) {
         if (clipAudioPath(c)) return true;

@@ -511,6 +511,29 @@
       "readiness": "benchmark",
       "sidecarCommand": "synthesize_fish_audio",
       "macosOnly": true
+    },
+    {
+      "id": "espeech",
+      "displayName": "ESpeech-TTS-1 (F5)",
+      "modelName": "espeech-tts-1-rl-v2-mlx-fp16",
+      "modelId": "local/ESpeech-TTS-1-RL-V2-MLX-fp16",
+      "modelSize": "F5 1.0B",
+      "runtime": "MLX",
+      "precision": "fp16",
+      "languages": ["ru"],
+      "voiceProfileModes": ["reference-clone"],
+      "requiresReferenceAudio": true,
+      "requiresReferenceTranscript": true,
+      "requiresLanguage": false,
+      "styleMode": "none",
+      "supportsInstruct": false,
+      "supportedMarkers": [],
+      "needsTrim": true,
+      "sampleRate": 24000,
+      "usePolicy": "commercial-safe",
+      "readiness": "production",
+      "sidecarCommand": "synthesize_espeech",
+      "macosOnly": true
     }
   ],
   "asrModels": [
