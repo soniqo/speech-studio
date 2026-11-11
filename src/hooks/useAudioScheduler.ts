@@ -1,20 +1,42 @@
 import { useEffect, useRef } from "react";
 import { useProjectStore } from "../state/projectStore";
-import type { Clip, Project } from "../types/project";
+import type { Project } from "../types/project";
 import { clipAudioPath, clipAudioVersion } from "../lib/clipAudio";
 import { mediaFileSrc } from "../lib/mediaSrc";
+import { audibleTrackIds } from "../lib/trackAudibility";
 
 // A jump in positionSec larger than this is treated as a seek (we re-sync
 // the active clip's currentTime). Smaller jumps come from the playhead RAF
 // tick (~16ms at 60fps) and don't need a re-sync.
 const SEEK_THRESHOLD_SEC = 0.05;
 
-function clipsWithAudio(project: Project): Clip[] {
-  const out: Clip[] = [];
+interface PlaybackItem {
+  id: string;
+  trackId: string;
+  startSec: number;
+  endSec: number;
+  audioPath: string;
+  version?: string;
+  gainDb: number;
+}
+
+function clipsWithAudio(project: Project): PlaybackItem[] {
+  const out: PlaybackItem[] = [];
   for (const t of project.tracks) {
+    if (t.kind === "audio") {
+      if (t.sourcePath) out.push({
+        id: `track:${t.id}`, trackId: t.id, startSec: 0,
+        endSec: Infinity, audioPath: t.sourcePath, gainDb: t.gainDb,
+      });
+      continue;
+    }
     if (t.kind === "speaker") {
       for (const c of t.clips) {
-        if (clipAudioPath(c)) out.push(c);
+        const audioPath = clipAudioPath(c);
+        if (audioPath) out.push({
+          id: c.id, trackId: t.id, startSec: c.startSec,
+          endSec: c.endSec, audioPath, version: clipAudioVersion(c), gainDb: 0,
+        });
       }
     }
   }
@@ -23,6 +45,7 @@ function clipsWithAudio(project: Project): Clip[] {
 
 export function useAudioScheduler() {
   const project = useProjectStore((s) => s.project);
+  const selection = useProjectStore((s) => s.selection);
   const playing = useProjectStore((s) => s.transport.playing);
   const audiosRef = useRef<Map<string, HTMLAudioElement>>(new Map());
 
@@ -33,19 +56,21 @@ export function useAudioScheduler() {
 
     for (const c of clipsWithAudio(project)) {
       wanted.add(c.id);
-      const path = clipAudioPath(c);
-      if (!path) continue;
-      const expectedSrc = mediaFileSrc(path, clipAudioVersion(c));
+      const expectedSrc = mediaFileSrc(c.audioPath, c.version);
       const existing = map.get(c.id);
       if (!existing) {
         const a = new Audio(expectedSrc);
         a.preload = "auto";
+        a.volume = Math.max(0, Math.min(1, Math.pow(10, c.gainDb / 20)));
         a.load();
         map.set(c.id, a);
-      } else if (existing.src !== expectedSrc) {
-        existing.pause();
-        existing.src = expectedSrc;
-        existing.load();
+      } else {
+        existing.volume = Math.max(0, Math.min(1, Math.pow(10, c.gainDb / 20)));
+        if (existing.src !== expectedSrc) {
+          existing.pause();
+          existing.src = expectedSrc;
+          existing.load();
+        }
       }
     }
 
@@ -73,11 +98,15 @@ export function useAudioScheduler() {
     }
 
     const syncAt = (pos: number, treatAsSeek: boolean) => {
-      const clips = clipsWithAudio(useProjectStore.getState().project);
+      const state = useProjectStore.getState();
+      const clips = clipsWithAudio(state.project);
+      const audible = audibleTrackIds(state.project, state.selection, "preview");
       for (const c of clips) {
         const audio = map.get(c.id);
         if (!audio) continue;
-        const inRange = pos >= c.startSec && pos < c.endSec;
+        const knownLength = Number.isFinite(audio.duration) ? audio.duration : Infinity;
+        const inRange = audible.has(c.trackId) && pos >= c.startSec &&
+          pos < Math.min(c.endSec, c.startSec + knownLength);
         if (inRange) {
           const offset = Math.max(0, pos - c.startSec);
           // The clip's timeline slot can be wider than the actual rendered
@@ -118,5 +147,6 @@ export function useAudioScheduler() {
       unsub();
       pauseAll();
     };
-  }, [playing]);
+  // Changing Mute/Solo or selecting a track updates playback immediately.
+  }, [playing, project, selection]);
 }

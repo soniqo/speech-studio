@@ -7,6 +7,7 @@ import {
   Track,
   Voice,
   emptyProject,
+  projectTimelineEnd,
 } from "../types/project";
 import type { TtsEngineId, TtsEngineInfo } from "../ipc/commands";
 import {
@@ -96,6 +97,8 @@ interface ProjectStore {
   addTrack: (track: Track) => void;
   removeTrack: (trackId: string) => void;
   renameTrack: (trackId: string, name: string) => void;
+  toggleTrackMuted: (trackId: string) => void;
+  toggleTrackSolo: (trackId: string) => void;
 
   addClip: (clip: Clip) => void;
   updateClip: (clipId: string, patch: Partial<Clip>) => void;
@@ -259,7 +262,12 @@ export const useProjectStore = create<ProjectStore>((set) => ({
   setSynthesisStatus: (synthesisStatus) => set(() => ({ synthesisStatus })),
   setSynthesisProgress: (synthesisProgress) => set(() => ({ synthesisProgress })),
 
-  setProject: (project) => set({ project, selection: { kind: "none" } }),
+  setProject: (project) =>
+    set((s) => ({
+      project: { ...project, durationSec: projectTimelineEnd(project) },
+      selection: { kind: "none" },
+      transport: { ...s.transport, playing: false, positionSec: 0 },
+    })),
   resetProject: (name) =>
     set((s) => {
       const project = emptyProject(name ?? messages[s.locale].defaults.untitledProject);
@@ -295,6 +303,24 @@ export const useProjectStore = create<ProjectStore>((set) => ({
     set((s) => ({
       project: { ...s.project, tracks: mapTracks(s.project, trackId, (t) => ({ ...t, name })) },
     })),
+  toggleTrackMuted: (trackId) =>
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: mapTracks(s.project, trackId, (t) =>
+          t.kind === "video" ? t : { ...t, muted: !t.muted },
+        ),
+      },
+    })),
+  toggleTrackSolo: (trackId) =>
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: mapTracks(s.project, trackId, (t) =>
+          t.kind === "video" ? t : { ...t, solo: !t.solo },
+        ),
+      },
+    })),
 
   addClip: (clip) =>
     set((s) => {
@@ -313,13 +339,14 @@ export const useProjectStore = create<ProjectStore>((set) => ({
     set((s) => {
       const track = findClipTrack(s.project, clipId);
       if (!track) return s;
+      // A synthesized clip may be longer than the initial timeline. Do not
+      // keep the old duration: playback and exports would truncate the tail.
+      const updatedTracks = mapSpeakerClips(s.project, track.id, (clips) =>
+        clips.map((c) => (c.id === clipId ? { ...c, ...patch } : c)),
+      );
+      const project = { ...s.project, tracks: updatedTracks };
       return {
-        project: {
-          ...s.project,
-          tracks: mapSpeakerClips(s.project, track.id, (clips) =>
-            clips.map((c) => (c.id === clipId ? { ...c, ...patch } : c)),
-          ),
-        },
+        project: { ...project, durationSec: projectTimelineEnd(project) },
       };
     }),
 

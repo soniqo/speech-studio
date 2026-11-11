@@ -244,6 +244,8 @@ export function transcribeAudio(args: TranscribeAudioArgs): Promise<TranscribeAu
 export interface ExportClip {
   startSec: number;
   audioPath: string;
+  /** Linear mix gain (dB); speaker clips default to 0. */
+  gainDb?: number;
 }
 
 export interface ExportProjectArgs {

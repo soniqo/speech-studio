@@ -3200,12 +3200,13 @@ async fn seed_hindi_demo(app: tauri::AppHandle) -> Result<DemoSeed, String> {
     Ok(DemoSeed { voices, clips })
 }
 
+mod export_audio;
+
 #[derive(Deserialize)]
 struct ExportArgs {
     #[serde(rename = "outPath")]
     out_path: String,
-    /// Project duration in seconds. Determines the length of the output mix
-    /// buffer; clips past this point are truncated, gaps stay as silence.
+    /// Requested canvas length; actual clip ends are never truncated.
     #[serde(rename = "durationSec")]
     duration_sec: f64,
     /// Flat list of clips to mix in. The Rust side doesn't need the full
@@ -3219,6 +3220,8 @@ struct ExportClip {
     start_sec: f64,
     #[serde(rename = "audioPath")]
     audio_path: String,
+    #[serde(rename = "gainDb", default)]
+    gain_db: f32,
 }
 
 #[derive(Serialize)]
@@ -3374,76 +3377,7 @@ async fn delete_project(app: tauri::AppHandle, args: LoadProjectArgs) -> Result<
 
 #[tauri::command]
 async fn export_project(args: ExportArgs) -> Result<ExportResult, String> {
-    if args.clips.is_empty() {
-        return Err("no clips with rendered audio to export".into());
-    }
-    if args.duration_sec <= 0.0 {
-        return Err("project duration must be > 0".into());
-    }
-
-    // Probe the sample rate from the first clip. All synth output uses the
-    // same engine, so every clip is at the same rate (24 kHz for CosyVoice,
-    // 48 kHz for VoxCPM2); mixing different rates without resampling would
-    // pitch-shift, so reject any mismatched clip explicitly.
-    let first = &args.clips[0];
-    let (first_rate, _, _) = read_wav_header(std::path::Path::new(&first.audio_path))?;
-    let sample_rate = first_rate;
-    let total_frames = (args.duration_sec * sample_rate as f64).ceil() as usize;
-    let mut mix: Vec<f32> = vec![0.0; total_frames];
-
-    for (idx, clip) in args.clips.iter().enumerate() {
-        let path = std::path::Path::new(&clip.audio_path);
-        let (rate, channels, samples) = read_wav_pcm_mono(path)?;
-        if rate != sample_rate {
-            return Err(format!(
-                "clip {} sample rate {} Hz differs from project rate {} Hz; resampling not implemented",
-                idx, rate, sample_rate
-            ));
-        }
-        let _ = channels; // already collapsed to mono by read_wav_pcm_mono.
-        let start_frame = (clip.start_sec * sample_rate as f64).round() as isize;
-        // Drop frames that fall before t=0 or past the project end. We don't
-        // expect either in practice (the UI clamps clip start to >= 0 and the
-        // mix buffer is sized to project duration) but handle them safely.
-        for (i, &s) in samples.iter().enumerate() {
-            let frame = start_frame + i as isize;
-            if frame < 0 {
-                continue;
-            }
-            let frame = frame as usize;
-            if frame >= mix.len() {
-                break;
-            }
-            mix[frame] += s;
-        }
-    }
-
-    // Soft clip in case overlapping clips on different speaker tracks summed
-    // past ±1.0. A hard clamp keeps the WAV writable without distortion at
-    // the obvious cost of squashing transients past the threshold.
-    for s in mix.iter_mut() {
-        if *s > 1.0 {
-            *s = 1.0;
-        } else if *s < -1.0 {
-            *s = -1.0;
-        }
-    }
-
-    write_wav_pcm16_mono(std::path::Path::new(&args.out_path), sample_rate, &mix)?;
-    studio_log!(
-        "[export] wrote {} ({} frames @ {} Hz from {} clips)",
-        args.out_path,
-        mix.len(),
-        sample_rate,
-        args.clips.len()
-    );
-
-    Ok(ExportResult {
-        out_path: args.out_path,
-        sample_rate,
-        duration_sec: mix.len() as f64 / sample_rate as f64,
-        clip_count: args.clips.len(),
-    })
+    export_audio::write_export(&args)
 }
 
 /// Read the basic WAV format chunk: returns (sample_rate, channels, bits).
