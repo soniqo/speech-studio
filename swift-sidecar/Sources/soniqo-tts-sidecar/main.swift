@@ -3,6 +3,7 @@ import AudioCommon
 import MLX
 import ChatterboxTTS
 import CosyVoiceTTS
+import F5TTS
 import FishAudioTTS
 import IndicMioTTS
 import OmniVoiceTTS
@@ -63,6 +64,8 @@ struct Request: Decodable {
     // Chatterbox: direct exaggeration override (emotion intensity). When nil the
     // handler maps the inline emotion marker to a value.
     let exaggeration: Float?
+    // F5/ESpeech diffusion steps (default 16 in the library; Studio uses 24).
+    let steps: Int?
 }
 
 struct PingResult: Encodable {
@@ -168,6 +171,8 @@ final class ModelHolder: @unchecked Sendable {
         logErr("[sidecar] model ready")
         return result
     }
+
+    var isLoaded: Bool { model != nil }
 
     func unload() {
         model?.unload()
@@ -292,6 +297,8 @@ final class CosyHolder: @unchecked Sendable {
         return "\(path)#\(Int(mtime))#\(size)#\(textHash)"
     }
 
+    var isLoaded: Bool { model != nil }
+
     func unload() {
         model?.unload()
         model = nil
@@ -380,6 +387,8 @@ final class VoxCPM2Holder: @unchecked Sendable {
         return m
     }
 
+    var isLoaded: Bool { model != nil }
+
     func unload() {
         model?.unload()
         model = nil
@@ -419,6 +428,8 @@ final class ChatterboxHolder: @unchecked Sendable {
         return m
     }
 
+    var isLoaded: Bool { model != nil }
+
     func unload() {
         // ChatterboxTTSModel has no explicit teardown; drop the reference and let
         // ARC + MLX.Memory.clearCache() (in unloadInactiveModels) reclaim Metal.
@@ -457,6 +468,8 @@ final class OmniVoiceHolder: @unchecked Sendable {
         logErr("[sidecar] omni ready")
         return m
     }
+
+    var isLoaded: Bool { model != nil }
 
     func unload() {
         model = nil
@@ -521,6 +534,8 @@ final class IndicMioHolder: @unchecked Sendable {
         return (embedding, false)
     }
 
+    var isLoaded: Bool { model != nil }
+
     func unload() {
         model = nil
         loadedModelId = nil
@@ -558,6 +573,8 @@ final class FishAudioHolder: @unchecked Sendable {
         return m
     }
 
+    var isLoaded: Bool { model != nil }
+
     func unload() {
         model = nil
         loadedModelId = nil
@@ -565,6 +582,123 @@ final class FishAudioHolder: @unchecked Sendable {
 }
 
 let fishAudioHolder = FishAudioHolder()
+
+// MARK: - ESpeech (F5-TTS) model state
+
+/// ESpeech-TTS-1 RL-V2 is an F5-TTS v1 Russian fine-tune converted to the
+/// same MLX bundle layout. It is loaded from a local bundle directory (the
+/// converted weights are not published on the Hub) and shares the F5 runtime.
+final class ESpeechHolder: @unchecked Sendable {
+    private var model: F5TTSModel?
+    private var loadedModelId: String?
+
+    static func bundleDirectory() -> URL {
+        if let raw = ProcessInfo.processInfo.environment["SONIQO_ESPEECH_BUNDLE_DIR"],
+           !raw.isEmpty {
+            return URL(fileURLWithPath: raw, isDirectory: true)
+        }
+        if let cached = try? HuggingFaceDownloader.getCacheDirectory(
+            for: "local/ESpeech-TTS-1-RL-V2-MLX-fp16"
+        ) {
+            return cached
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/qwen3-speech/models/local/ESpeech-TTS-1-RL-V2-MLX-fp16")
+    }
+
+    func load(modelId requestedId: String? = nil) async throws -> F5TTSModel {
+        let modelId = requestedId ?? "local/ESpeech-TTS-1-RL-V2-MLX-fp16"
+        if let m = model, loadedModelId == modelId { return m }
+        if model != nil { unload() }
+        let dir = ESpeechHolder.bundleDirectory()
+        guard FileManager.default.fileExists(atPath: dir.path) else {
+            throw F5TTSError.missingRequiredFile(
+                "ESpeech bundle not found at \(dir.path). Run scripts/convert_espeech_checkpoint.py first.")
+        }
+        logErr("[sidecar] loading ESpeech-TTS bundle \(dir.path)…")
+        let m = try await F5TTSModel.fromBundle(dir) { progress, message in
+            logProgress("espeech", progress, message)
+        }
+        try m.prepareRuntime { progress, message in
+            logProgress("espeech", 0.7 + progress * 0.3, message)
+        }
+        model = m
+        loadedModelId = modelId
+        logErr("[sidecar] espeech ready (\(m.sampleRate) Hz)")
+        return m
+    }
+
+    var isLoaded: Bool { model != nil }
+
+    func unload() {
+        model?.unload()
+        model = nil
+        loadedModelId = nil
+    }
+}
+
+let espeechHolder = ESpeechHolder()
+
+/// Resolve the on-disk locations for one engine artifact. The Studio uses
+/// these to show download state and to delete cached weights.
+func artifactPaths(engine: TTSEngine, modelId: String) -> [URL] {
+    switch engine {
+    case .espeech:
+        return [ESpeechHolder.bundleDirectory()]
+    case .qwen3, .cosyvoice, .voxcpm2:
+        var paths: [URL] = []
+        if let dir = try? HuggingFaceDownloader.getCacheDirectory(for: modelId) {
+            paths.append(dir)
+            // Qwen3/CosyVoice keep the tokenizer in a sibling directory.
+            paths.append(dir.deletingLastPathComponent().appendingPathComponent("tokenizer"))
+        }
+        return paths
+    default:
+        if let dir = try? HuggingFaceDownloader.getCacheDirectory(for: modelId) {
+            return [dir]
+        }
+        return []
+    }
+}
+
+func directorySize(_ url: URL) -> Int64 {
+    let fm = FileManager.default
+    guard let enumerator = fm.enumerator(
+        at: url,
+        includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+        options: [.skipsHiddenFiles]
+    ) else { return 0 }
+    var total: Int64 = 0
+    for case let file as URL in enumerator {
+        let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        if values?.isRegularFile == true {
+            total += Int64(values?.fileSize ?? 0)
+        }
+    }
+    return total
+}
+
+struct ModelArtifactResult: Encodable {
+    let engine: String
+    let modelId: String
+    let paths: [String]
+    let exists: Bool
+    let bytes: Int64
+    let loaded: Bool
+}
+
+func isEngineLoaded(_ engine: TTSEngine) -> Bool {
+    switch engine {
+    case .voxcpm2: return voxHolder.isLoaded
+    case .cosyvoice: return cosyHolder.isLoaded
+    case .qwen3: return holder.isLoaded
+    case .chatterbox: return chatterboxHolder.isLoaded
+    case .omnivoice: return omnivoiceHolder.isLoaded
+    case .indicMio: return indicMioHolder.isLoaded
+    case .fishAudio: return fishAudioHolder.isLoaded
+    case .espeech: return espeechHolder.isLoaded
+    }
+}
 
 // MARK: - Parakeet ASR model state
 
@@ -598,6 +732,8 @@ final class ParakeetHolder: @unchecked Sendable {
             ?? ParakeetASRModel.defaultModelId
     }
 
+    var isLoaded: Bool { model != nil }
+
     func unload() {
         model = nil
         loadedModelId = nil
@@ -613,6 +749,7 @@ enum TTSEngine: String {
     case voxcpm2, cosyvoice, qwen3, chatterbox, omnivoice
     case indicMio = "indic-mio"
     case fishAudio = "fish-audio"
+    case espeech
 }
 
 let defaultEngine: TTSEngine = {
@@ -643,6 +780,7 @@ func unloadInactiveModels(keeping engine: TTSEngine) {
     if engine != .omnivoice { omnivoiceHolder.unload() }
     if engine != .indicMio { indicMioHolder.unload() }
     if engine != .fishAudio { fishAudioHolder.unload() }
+    if engine != .espeech { espeechHolder.unload() }
     MLX.Memory.clearCache()
 }
 
@@ -1113,6 +1251,8 @@ while let line = readLine(strippingNewline: true) {
                 _ = try await indicMioHolder.load(modelId: request.modelId)
             case .fishAudio:
                 _ = try await fishAudioHolder.load(modelId: request.modelId)
+            case .espeech:
+                _ = try await espeechHolder.load(modelId: request.modelId)
             }
             logMemorySnapshot("post-load-\(engine.rawValue)")
             emit(SuccessResponse(
@@ -1124,6 +1264,61 @@ while let line = readLine(strippingNewline: true) {
             logErr("[sidecar] init_model failed: \(error)")
             emit(ErrorResponse(id: request.id, ok: false, error: "\(error)"))
         }
+
+    case "model_info":
+        guard let engine = requestedEngine(for: request) else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "unsupported engine: \(request.engine ?? "")"
+            ))
+            continue
+        }
+        let modelId = request.modelId ?? ""
+        let paths = artifactPaths(engine: engine, modelId: modelId)
+        let bytes = paths.reduce(Int64(0)) { $0 + directorySize($1) }
+        let exists = paths.contains { FileManager.default.fileExists(atPath: $0.path) }
+            && bytes > 0
+        emit(SuccessResponse(
+            id: request.id,
+            ok: true,
+            result: ModelArtifactResult(
+                engine: engine.rawValue,
+                modelId: modelId,
+                paths: paths.map(\.path),
+                exists: exists,
+                bytes: bytes,
+                loaded: isEngineLoaded(engine)
+            )
+        ))
+
+    case "unload_model":
+        guard let engine = requestedEngine(for: request) else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "unsupported engine: \(request.engine ?? "")"
+            ))
+            continue
+        }
+        switch engine {
+        case .voxcpm2: voxHolder.unload()
+        case .cosyvoice: cosyHolder.unload()
+        case .qwen3: holder.unload()
+        case .chatterbox: chatterboxHolder.unload()
+        case .omnivoice: omnivoiceHolder.unload()
+        case .indicMio: indicMioHolder.unload()
+        case .fishAudio: fishAudioHolder.unload()
+        case .espeech: espeechHolder.unload()
+        }
+        if residentEngine == engine { residentEngine = nil }
+        MLX.Memory.clearCache()
+        logMemorySnapshot("post-unload-\(engine.rawValue)")
+        emit(SuccessResponse(
+            id: request.id,
+            ok: true,
+            result: InitResult(ready: false)
+        ))
 
     case "transcribe_parakeet":
         guard let audioPath = request.audioPath, !audioPath.isEmpty else {
@@ -1672,6 +1867,76 @@ while let line = readLine(strippingNewline: true) {
             ))
         } catch {
             logErr("[sidecar] fish-audio synthesis failed: \(error)")
+            emit(ErrorResponse(id: request.id, ok: false, error: "\(error)"))
+        }
+
+    case "synthesize_espeech":
+        guard requestMatchesEngine(request, .espeech) else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "synthesize_espeech requires engine espeech"
+            ))
+            continue
+        }
+        guard let refPath = request.referenceAudioPath, !refPath.isEmpty,
+              let refText = request.referenceText,
+              !refText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let targetText = request.text, !targetText.isEmpty else {
+            emit(ErrorResponse(
+                id: request.id,
+                ok: false,
+                error: "synthesize_espeech requires referenceAudioPath, referenceText, and text"
+            ))
+            continue
+        }
+
+        do {
+            activateEngine(.espeech)
+            let model = try await espeechHolder.load(modelId: request.modelId)
+            let seed = request.seed ?? 1000
+            let options = try F5TTSSynthesisOptions(
+                steps: request.steps ?? 24,
+                cfgStrength: request.cfgValue ?? 2.0,
+                seed: seed
+            )
+            logErr("[sidecar] espeech synth voice=\(request.voiceId ?? "?") seed=\(seed) chars=\(targetText.count) refTextChars=\(refText.count) steps=\(options.steps)")
+            let started = CFAbsoluteTimeGetCurrent()
+            let generatedAudio = try await model.generate(
+                text: targetText,
+                referenceAudio: URL(fileURLWithPath: refPath),
+                referenceText: refText,
+                options: options,
+                progressHandler: { progress, message in
+                    logProgress("espeech", progress, message)
+                }
+            )
+            let elapsed = CFAbsoluteTimeGetCurrent() - started
+            let sampleRate = model.sampleRate
+            let audio = conditionSynthOutput(
+                generatedAudio,
+                sampleRate: sampleRate,
+                engine: "espeech",
+                leadInMs: 100,
+                postRollMs: 220
+            )
+            let outURL = clipsCacheDir().appendingPathComponent("\(safeFilename(request.id)).wav")
+            try WAVWriter.write(samples: audio, sampleRate: sampleRate, to: outURL)
+            let durationSec = Double(audio.count) / Double(sampleRate)
+            logErr(String(format: "[sidecar] espeech wrote %.2fs in %.2fs → %@", durationSec, elapsed, outURL.path))
+            logMemorySnapshot("post-espeech-synth")
+
+            emit(SuccessResponse(
+                id: request.id,
+                ok: true,
+                result: SynthResult(
+                    audioPath: outURL.path,
+                    sampleRate: sampleRate,
+                    durationSec: durationSec
+                )
+            ))
+        } catch {
+            logErr("[sidecar] espeech synthesis failed: \(error)")
             emit(ErrorResponse(id: request.id, ok: false, error: "\(error)"))
         }
 
