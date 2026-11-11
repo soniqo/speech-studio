@@ -20,6 +20,8 @@ import { Badge } from "./ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { cn } from "@/lib/utils";
 import { clipAudioPath } from "../lib/clipAudio";
+import { audibleTrackIds } from "../lib/trackAudibility";
+import { projectTimelineEnd } from "../types/project";
 import { clampPercent, formatPercent } from "../lib/formatPercent";
 import { languageLabel } from "../lib/languageLabels";
 import { localizeModelProgressMessage, type AppLocale } from "../i18n/messages";
@@ -163,6 +165,7 @@ export function TopBar() {
   const { run: runSynthesize } = useSynthesizeAll();
   const [actionError, setActionError] = useState<string | null>(null);
   const [enginePickerOpen, setEnginePickerOpen] = useState(false);
+  const [exportFormat, setExportFormat] = useState("wav");
 
   const synthBusy = synthesisStatus === "running";
   const synthElapsed = useElapsedSeconds(
@@ -239,17 +242,19 @@ export function TopBar() {
     return parts.length > 0 ? parts.join(" · ") : null;
   }
 
-  // Flatten every rendered clip into the {startSec, audioPath} payload the
-  // Rust mixer expects. Clips without renderedAudioPath are skipped — they'd
-  // become silent gaps in the mix, which is the desired behaviour.
+  // Export ignores transient track selection, but obeys explicit Mute/Solo.
   function exportClips(): ExportClip[] {
     const clips: ExportClip[] = [];
+    const enabled = audibleTrackIds(project, { kind: "none" }, "export");
     for (const t of project.tracks) {
-      if (t.kind !== "speaker") continue;
-      for (const c of t.clips) {
-        const audioPath = clipAudioPath(c);
-        if (!audioPath) continue;
-        clips.push({ startSec: c.startSec, audioPath });
+      if (!enabled.has(t.id)) continue;
+      if (t.kind === "audio") {
+        if (t.sourcePath) clips.push({ startSec: 0, audioPath: t.sourcePath, gainDb: t.gainDb });
+      } else if (t.kind === "speaker") {
+        for (const c of t.clips) {
+          const audioPath = clipAudioPath(c);
+          if (audioPath) clips.push({ startSec: c.startSec, audioPath });
+        }
       }
     }
     return clips;
@@ -260,17 +265,18 @@ export function TopBar() {
   async function onExport() {
     const clips = exportClips();
     if (clips.length === 0) return;
-    const defaultName = `${project.name.trim() || t.defaults.exportFileBase}.wav`;
+    setActionError(null);
+    const defaultName = `${project.name.trim() || t.defaults.exportFileBase}.${exportFormat}`;
     const chosen = await save({
       title: t.topBar.exportMixTitle,
       defaultPath: defaultName,
-      filters: [{ name: t.topBar.wavAudio, extensions: ["wav"] }],
+      filters: [{ name: exportFormat.toUpperCase(), extensions: [exportFormat] }],
     });
     if (!chosen) return;
     try {
       const result = await exportProject({
         outPath: chosen,
-        durationSec: Math.max(project.durationSec, 1),
+        durationSec: Math.max(projectTimelineEnd(project), 0),
         clips,
       });
       console.log("[export] ok", result);
@@ -443,6 +449,20 @@ export function TopBar() {
           )}
           {dirty || saving ? t.topBar.save : t.topBar.saved}
         </Button>
+        <Select value={exportFormat} onValueChange={setExportFormat}>
+          <SelectTrigger className="h-7 w-[83px] shrink-0 text-xs" title="Audio export format">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="wav">WAV</SelectItem>
+            <SelectItem value="mp3">MP3</SelectItem>
+            <SelectItem value="ogg">OGG</SelectItem>
+            <SelectItem value="opus">Opus</SelectItem>
+            <SelectItem value="flac">FLAC</SelectItem>
+            <SelectItem value="m4a">M4A</SelectItem>
+            <SelectItem value="aiff">AIFF</SelectItem>
+          </SelectContent>
+        </Select>
         <Button
           variant="default"
           size="sm"

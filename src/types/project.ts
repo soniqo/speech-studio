@@ -77,6 +77,9 @@ export interface SpeakerTrack {
   name: string;
   voiceId?: string;
   referenceClipId?: string;
+  /** Optional to remain compatible with previously saved projects. */
+  muted?: boolean;
+  solo?: boolean;
   clips: Clip[];
 }
 
@@ -86,6 +89,8 @@ export interface AudioTrack {
   name: string;
   sourcePath: string;
   gainDb: number;
+  muted?: boolean;
+  solo?: boolean;
 }
 
 export type Track = VideoTrack | SpeakerTrack | AudioTrack;
@@ -104,7 +109,18 @@ export type Selection =
   | { kind: "voice"; id: string }
   | { kind: "none" };
 
-export const DEFAULT_PROJECT_DURATION_SEC = 30;
+// The 30-second starting canvas was incorrectly treated as an output limit.
+export const DEFAULT_PROJECT_DURATION_SEC = 5;
+
+/** Derive the timeline end from clips as well as user-specified project length. */
+export function projectTimelineEnd(project: Project): number {
+  return project.tracks.reduce((end, track) =>
+    track.kind === "speaker"
+      ? track.clips.reduce((clipEnd, clip) => Math.max(clipEnd, clip.endSec), end)
+      : end,
+    Math.max(0, project.durationSec),
+  );
+}
 
 export function emptyProject(name = "Untitled"): Project {
   return {

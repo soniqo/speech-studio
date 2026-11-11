@@ -1,6 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Project, Voice } from "../types/project";
 
+export interface SpeechRuntimeHealth {
+  connected: boolean;
+  detail: string;
+}
+
+/** The optional local daemon runs independently of the Studio MLX sidecar. */
+export function speechRuntimeHealth(): Promise<SpeechRuntimeHealth> {
+  return invoke<SpeechRuntimeHealth>("speech_runtime_health");
+}
+
+/** The daemon accepts 16 kHz WAV; the Rust adapter converts the reference. */
+export function speechRuntimeTranscribeReference(audioPath: string): Promise<string> {
+  return invoke<string>("speech_runtime_transcribe_reference", { args: { audioPath } });
+}
+
 export interface PingResult {
   id: string;
   ok: boolean;
@@ -228,6 +243,8 @@ export function transcribeAudio(args: TranscribeAudioArgs): Promise<TranscribeAu
 export interface ExportClip {
   startSec: number;
   audioPath: string;
+  /** Linear mix gain (dB); speaker clips default to 0. */
+  gainDb?: number;
 }
 
 export interface ExportProjectArgs {
