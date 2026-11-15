@@ -199,7 +199,7 @@ describe("interface language", () => {
     fireEvent.click(screen.getByRole("combobox", { name: "Interface language" }));
     fireEvent.click(screen.getByRole("option", { name: "繁體中文" }));
     expect(useProjectStore.getState().locale).toBe("zh-TW");
-    expect(localStorage.getItem("speech-studio.locale")).toBe("zh-TW");
+    expect(window.localStorage.getItem("speech-studio.locale")).toBe("zh-TW");
     expect(screen.getByRole("combobox", { name: "介面語言" })).toBeInTheDocument();
     useProjectStore.getState().setLocale("en");
   });
