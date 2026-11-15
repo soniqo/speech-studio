@@ -69,6 +69,7 @@ export interface VideoTrack {
   id: string;
   name: string;
   sourcePath: string;
+  durationSec?: number;
 }
 
 export interface SpeakerTrack {
@@ -77,6 +78,9 @@ export interface SpeakerTrack {
   name: string;
   voiceId?: string;
   referenceClipId?: string;
+  /** Optional to remain compatible with previously saved projects. */
+  muted?: boolean;
+  solo?: boolean;
   clips: Clip[];
 }
 
@@ -85,7 +89,10 @@ export interface AudioTrack {
   id: string;
   name: string;
   sourcePath: string;
+  durationSec?: number;
   gainDb: number;
+  muted?: boolean;
+  solo?: boolean;
 }
 
 export type Track = VideoTrack | SpeakerTrack | AudioTrack;
@@ -93,7 +100,16 @@ export type Track = VideoTrack | SpeakerTrack | AudioTrack;
 export interface Project {
   id: string;
   name: string;
+  /**
+   * Visible timeline length. Derived from the clips on load and after every
+   * structural edit; never a limit on what can be played or exported.
+   */
   durationSec: number;
+  /**
+   * Timeline length the user asked for explicitly. Optional so projects saved
+   * before this field existed preserve their saved canvas when loaded.
+   */
+  canvasSec?: number;
   tracks: Track[];
   voices: Voice[];
 }
@@ -104,13 +120,57 @@ export type Selection =
   | { kind: "voice"; id: string }
   | { kind: "none" };
 
-export const DEFAULT_PROJECT_DURATION_SEC = 30;
+// The 30-second starting canvas was incorrectly treated as an output limit:
+// a 10 s clip still drew a 30 s track, so the timeline looked half empty.
+export const DEFAULT_PROJECT_DURATION_SEC = 5;
+
+function validDuration(value: number | undefined): number {
+  return value != null && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/** End of the last clip or imported media file. */
+export function contentEndSec(project: Project): number {
+  return project.tracks.reduce(
+    (end, track) =>
+      track.kind === "speaker"
+        ? track.clips.reduce((clipEnd, clip) => Math.max(clipEnd, clip.endSec), end)
+        : Math.max(end, validDuration(track.durationSec)),
+    0,
+  );
+}
+
+/** Visible canvas: content, extended by a longer length the user asked for. */
+export function projectTimelineEnd(project: Project): number {
+  return Math.max(
+    DEFAULT_PROJECT_DURATION_SEC,
+    contentEndSec(project),
+    validDuration(project.canvasSec),
+  );
+}
+
+/**
+ * Project length after a structural edit: the canvas follows the clips, so a
+ * 10 s recording no longer sits on a stale 30 s track, and deleting a clip
+ * shortens the timeline. An explicit `canvasSec` still extends it.
+ */
+export function withContentDuration(project: Project): Project {
+  const durationSec = projectTimelineEnd(project);
+  return durationSec === project.durationSec ? project : { ...project, durationSec };
+}
+
+/** Older files cannot distinguish a default canvas from an explicit length. */
+export function migrateProject(project: Project): Project {
+  return withContentDuration(project.canvasSec == null
+    ? { ...project, canvasSec: validDuration(project.durationSec) }
+    : project);
+}
 
 export function emptyProject(name = "Untitled"): Project {
   return {
     id: crypto.randomUUID(),
     name,
     durationSec: DEFAULT_PROJECT_DURATION_SEC,
+    canvasSec: 0,
     tracks: [],
     voices: [],
   };

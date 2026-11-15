@@ -15,6 +15,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  frontend-integration:
+    name: Frontend and browser integration
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:browser
+      - name: Upload browser failure traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-results
+          path: test-results/
+          retention-days: 7
+
   build:
     name: macOS (Apple Silicon)
     # Tag pushes are handled by the release-macos job below (signed +
@@ -41,7 +70,7 @@ jobs:
         with:
           repository: soniqo/speech-swift
           path: speech-swift
-          ref: aa0c0dacfc14778c4b9a20f0a67095eb75a3df85
+          ref: 31d0b0650502957d4470b0b27645d1417a9bc0d0
 
       - name: Show Xcode version
         run: xcodebuild -version
@@ -82,6 +111,19 @@ jobs:
         working-directory: speech-studio/swift-sidecar
         # Release tests import the executable target with @testable.
         run: swift build -c release --build-tests -Xswiftc -enable-testing
+
+      - name: Set up Python for checkpoint conversion tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Test checkpoint conversion boundaries
+        working-directory: speech-studio
+        env:
+          SPEECH_SWIFT_DIR: ${{ github.workspace }}/speech-swift
+        run: |
+          python -m pip install -r scripts/requirements-conversion.txt
+          python -m unittest discover -s scripts/tests -p 'test_*.py'
 
       - name: Stage sidecar + metallib for Tauri bundler
         # Has to run before any `cargo` invocation: tauri-build verifies
@@ -128,6 +170,10 @@ jobs:
       - name: Run Rust unit tests
         working-directory: speech-studio/src-tauri
         run: cargo test --lib
+
+      - name: Test native IPC and shared runtime integration
+        working-directory: speech-studio/src-tauri
+        run: cargo test --lib --features integration-tests ipc_integration
 
       - name: Run frontend tests
         working-directory: speech-studio
@@ -464,7 +510,7 @@ jobs:
         with:
           repository: soniqo/speech-swift
           path: speech-swift
-          ref: aa0c0dacfc14778c4b9a20f0a67095eb75a3df85
+          ref: 31d0b0650502957d4470b0b27645d1417a9bc0d0
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

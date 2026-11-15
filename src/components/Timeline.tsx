@@ -1,6 +1,8 @@
 import { useMemo, useRef } from "react";
+import { Volume2, VolumeX } from "lucide-react";
 import { useProjectStore, newClip } from "../state/projectStore";
 import type { SpeakerTrack, Track } from "../types/project";
+import { projectTimelineEnd } from "../types/project";
 import { Clip } from "./Clip";
 import { EmptyState } from "./EmptyState";
 import { cn } from "@/lib/utils";
@@ -44,10 +46,12 @@ export function Timeline() {
   const selection = useProjectStore((s) => s.selection);
   const select = useProjectStore((s) => s.select);
   const addClip = useProjectStore((s) => s.addClip);
+  const toggleTrackMuted = useProjectStore((s) => s.toggleTrackMuted);
+  const toggleTrackSolo = useProjectStore((s) => s.toggleTrackSolo);
   const seek = useProjectStore((s) => s.seek);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const visibleDuration = Math.max(project.durationSec, 5);
+  const visibleDuration = Math.max(projectTimelineEnd(project), 5);
   const lanePxWidth = visibleDuration * transport.zoomPxPerSec;
   const ticks = useMemo(
     () => rulerTicks(visibleDuration, transport.zoomPxPerSec),
@@ -117,20 +121,58 @@ export function Timeline() {
             const selected = selection.kind === "track" && selection.id === t.id;
             return (
               <div key={t.id} className="flex border-b border-border/60">
-                <button
-                  type="button"
+                <div
                   className={cn(
-                    "shrink-0 border-r border-border px-3 py-2 text-left transition-colors",
+                    "flex shrink-0 items-center gap-1 border-r border-border px-2 py-2 text-left transition-colors",
                     selected ? "bg-primary/10" : "hover:bg-accent/30",
                   )}
                   style={{ width: TRACK_HEADER_W }}
-                  onClick={() => select({ kind: "track", id: t.id })}
                 >
-                  <div className="truncate text-sm font-medium">{t.name}</div>
-                  <div className="text-[11px] text-muted-foreground">
-                    {trackKindLabel(t, m)}
-                  </div>
-                </button>
+                  <button
+                    type="button"
+                    className="min-w-0 flex-1 text-left"
+                    onClick={() => select({ kind: "track", id: t.id })}
+                  >
+                    <div className="truncate text-sm font-medium">{t.name}</div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {trackKindLabel(t, m)}
+                    </div>
+                  </button>
+                  {t.kind !== "video" && (
+                    <>
+                      <button
+                        type="button"
+                        aria-label={t.muted ? m.tracks.unmute : m.tracks.mute}
+                        title={t.muted ? m.tracks.unmute : m.tracks.mute}
+                        aria-pressed={!!t.muted}
+                        className={cn(
+                          "rounded p-1",
+                          t.muted ? "text-destructive" : "text-muted-foreground",
+                        )}
+                        onClick={() => toggleTrackMuted(t.id)}
+                      >
+                        {t.muted ? (
+                          <VolumeX className="h-3.5 w-3.5" />
+                        ) : (
+                          <Volume2 className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={m.tracks.solo}
+                        title={m.tracks.solo}
+                        aria-pressed={!!t.solo}
+                        className={cn(
+                          "rounded px-1 text-[11px] font-semibold",
+                          t.solo ? "text-primary" : "text-muted-foreground",
+                        )}
+                        onClick={() => toggleTrackSolo(t.id)}
+                      >
+                        S
+                      </button>
+                    </>
+                  )}
+                </div>
                 <div
                   className={cn("relative h-16", laneTint(t))}
                   style={{ width: lanePxWidth }}

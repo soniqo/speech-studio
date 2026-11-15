@@ -20,8 +20,8 @@
 
 1. **拖入一小段说话人的参考音频** → 注册一个克隆音色。需要多少个说话人就重复多少次。
 2. **为每个片段编写一行脚本**并选择由哪个说话人朗读。用情感标记包裹该行——`(whispering) Just stay quiet for a moment, please.`——合成时就会遵循该指示。
-3. **点击 Synthesize（合成）**，用指定的克隆音色渲染每一行。合成流程会用端侧 ASR 自动为每次生成打分，若结果有误则换一个随机种子重试。
-4. **播放脚本**即可连续听到整个场景。导出为单个 WAV 混音（导出功能仍在开发中）。
+3. **点击 Synthesize（合成）**，用指定的克隆音色渲染每一行。每个片段只合成一次；点击 **Regenerate（重新生成）** 可获取新的结果。
+4. **播放脚本**即可连续听到整个场景。可直接导出 WAV 混音；其他支持的音频格式需要 FFmpeg。
 
 克隆在本地完成。合成在本地完成。没有任何音频离开你的机器。
 
@@ -45,8 +45,9 @@
 | **OmniVoice** | 仅 macOS | MLX | ✅ | 受限指令² | 600+ |
 | **Indic-Mio** | macOS · Windows · Linux | MLX / LiteRT | ✅³ | 后缀标签 | Indic |
 | **Fish Audio S2 Pro** | 仅 macOS | MLX | ✅⁴ | 方括号标签 | 80+ |
+| **ESpeech-TTS-1 RL-V2** | 仅 macOS | MLX / F5 | ✅ | — | 俄语 |
 
-CosyVoice 3、Qwen3-TTS、Chatterbox、OmniVoice 与 Fish Audio S2 Pro 在 Studio 中仍仅限 **macOS**。VoxCPM2 与 Indic-Mio 也可在 Windows/Linux 上通过 speech-core 的 LiteRT 后端运行。
+CosyVoice 3、Qwen3-TTS、Chatterbox、OmniVoice、Fish Audio S2 Pro 与 ESpeech 在 Studio 中仍仅限 **macOS**。VoxCPM2 与 Indic-Mio 也可在 Windows/Linux 上通过 speech-core 的 LiteRT 后端运行。
 
 ¹ Chatterbox 没有自由文本风格输入——情感标记映射为表现力/强度级别（更强或更弱），而非具体某种情感。
 
@@ -55,6 +56,23 @@ CosyVoice 3、Qwen3-TTS、Chatterbox、OmniVoice 与 Fish Audio S2 Pro 在 Studi
 ³ Indic-Mio 作为实验性 Hindi/Indic 情感标签引擎暴露。它使用 `<happy>` / `<angry>` 这类后缀标签，并通过 WavLM → MioCodec 全局说话人嵌入从参考音频克隆；不需要参考文本。Windows/Linux 使用 `soniqo/Indic-Mio-LiteRT` 模型包，并输出 24 kHz WAV 片段。
 
 ⁴ Fish Audio S2 Pro 使用 `[excited]`、`[angry]`、`[whisper]` 这类方括号标签。克隆需要准确的参考文本；公开权重为研究/非商业用途，商业使用需要单独授权。
+
+## 比较、播放与导出
+
+**Compare voices** 使用同一段参考音频和文本比较 Qwen3-TTS、VoxCPM2 与 ESpeech。
+界面支持英语、俄语和繁体中文，涵盖比较页面及导出设置。
+ESpeech 需要导入本地 MLX 模型包，详见 [SPEECH_COMPARISON.md](docs/SPEECH_COMPARISON.md)。
+共享 Speech Runtime 模式需要已配置 TTS API 的守护进程。启用时，Studio 会先释放
+本地模型，再通过守护进程加载受支持的引擎。
+
+音轨的静音和独奏设置同时用于播放与导出。选中音轨会单独预听该音轨，
+**All tracks** 恢复预听混音。导入音频后，时间轴会扩展至实际解码时长。
+打开旧项目时会保留原来保存的画布长度。
+
+WAV 可直接导出；MP3、OGG、Opus、FLAC、M4A 和 AIFF 需要包含相应编码器的 FFmpeg 版本
+（macOS 上可运行 `brew install ffmpeg-full` 安装）。
+详见[播放与导出说明](docs/LONG_AUDIO_AND_TRACK_CONTROLS.md)及
+[回归测试命令](docs/REGRESSION_TESTS.md)。
 
 ## 情感标记
 

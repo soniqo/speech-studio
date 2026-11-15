@@ -1,4 +1,5 @@
 import { zhTW } from "./zhTW";
+import { compareEn, compareRu } from "./compare";
 
 export const LOCALES = ["en", "ru", "zh-TW"] as const;
 export type AppLocale = (typeof LOCALES)[number];
@@ -56,6 +57,7 @@ function ruPlural(count: number, one: string, few: string, many: string): string
 }
 
 const en = {
+  compare: compareEn,
   locale: {
     english: "English",
     russian: "Русский",
@@ -117,9 +119,12 @@ const en = {
       "Nothing to synthesize — clips need text and an assigned voice (locked clips are skipped)",
     clipsFailed: (failed: number, total: number) =>
       `${failed}/${total} clips failed — see the Activity log`,
-    exportMixTitle: "Export mix as WAV",
+    exportMixTitle: "Export audio mix",
+    exportFormatTitle: "Audio export format",
     wavAudio: "WAV audio",
     exportFailed: (error: string) => `export failed: ${error}`,
+    exportFfmpegMissing: "Install FFmpeg to export this format. On macOS: brew install ffmpeg-full. Then restart Speech Studio.",
+    exportEncoderMissing: (encoder: string) => `Install an FFmpeg build with the ${encoder} encoder. On macOS: brew install ffmpeg-full. Then restart Speech Studio.`,
     switchLoadingEngine: (engine: string) =>
       `Switch engine and interrupt ${engine} loading`,
     switchEngineTitle: "Switches the loaded voice-cloning engine",
@@ -137,9 +142,9 @@ const en = {
     synthesizeMissingTitle: (count: number) =>
       `Synthesize ${count} clip(s) that don't have audio yet`,
     resynthesizeTitle: "Re-synthesize all non-locked clips",
-    exportDisabledTitle: "Synthesize at least one clip before exporting",
+    exportDisabledTitle: "Add or synthesize at least one audio clip before exporting",
     exportTitle: (count: number) =>
-      `Export a WAV mix of ${count} clip${count === 1 ? "" : "s"}`,
+      `Export ${count} audio clip${count === 1 ? "" : "s"} in the selected format`,
     exportButton: "Export",
     save: "Save",
     saved: "Saved",
@@ -176,6 +181,9 @@ const en = {
     noVoice: "No voice assigned",
     deleteTitle: "Delete track and its clips",
     deleteAria: "Delete track",
+    mute: "Mute track",
+    unmute: "Unmute track",
+    solo: "Solo: play only soloed tracks",
     addLineTitle: "Add a script line to this track",
     addLineAria: "Add script line",
   },
@@ -252,6 +260,8 @@ const en = {
     waitSynthesizing: "Wait — still synthesizing",
     pause: "Pause",
     play: "Play",
+    playAll: "All tracks",
+    playAllTitle: "Clear selection to play all unmuted tracks",
   },
   clip: {
     emptyPreview: "(empty)",
@@ -350,6 +360,7 @@ const en = {
 } satisfies Record<string, unknown>;
 
 const ru: typeof en = {
+  compare: compareRu,
   locale: {
     english: "English",
     russian: "Русский",
@@ -411,9 +422,12 @@ const ru: typeof en = {
       "Нечего синтезировать: клипам нужны текст и назначенный голос, заблокированные клипы пропускаются",
     clipsFailed: (failed, total) =>
       `Не удалось синтезировать ${failed} из ${total}; подробности в панели «Активность»`,
-    exportMixTitle: "Экспорт микса в WAV",
+    exportMixTitle: "Экспорт звукового микса",
+    exportFormatTitle: "Формат экспорта аудио",
     wavAudio: "Аудио WAV",
     exportFailed: (error) => `Не удалось экспортировать: ${error}`,
+    exportFfmpegMissing: "Для экспорта в этот формат установите FFmpeg. На macOS: brew install ffmpeg-full. Затем перезапустите Speech Studio.",
+    exportEncoderMissing: (encoder) => `Установите сборку FFmpeg с кодировщиком ${encoder}. На macOS: brew install ffmpeg-full. Затем перезапустите Speech Studio.`,
     switchLoadingEngine: (engine) => `Переключить движок и прервать загрузку ${engine}`,
     switchEngineTitle: "Переключает загруженный движок клонирования голоса",
     pickAnotherModel: "Выбрать другую модель",
@@ -430,9 +444,9 @@ const ru: typeof en = {
     synthesizeMissingTitle: (count) =>
       `Синтезировать ${count} ${ruPlural(count, "клип", "клипа", "клипов")} без аудио`,
     resynthesizeTitle: "Повторно синтезировать все незаблокированные клипы",
-    exportDisabledTitle: "Перед экспортом синтезируйте хотя бы один клип",
+    exportDisabledTitle: "Перед экспортом добавьте или синтезируйте аудио",
     exportTitle: (count) =>
-      `Экспортировать WAV-микс из ${count} ${ruPlural(count, "клипа", "клипов", "клипов")}`,
+      `Экспортировать ${count} ${ruPlural(count, "клип", "клипа", "клипов")} в выбранном формате`,
     exportButton: "Экспорт",
     save: "Сохранить",
     saved: "Сохранено",
@@ -469,6 +483,9 @@ const ru: typeof en = {
     noVoice: "Голос не назначен",
     deleteTitle: "Удалить дорожку и её клипы",
     deleteAria: "Удалить дорожку",
+    mute: "Выключить звук дорожки",
+    unmute: "Включить звук дорожки",
+    solo: "Слушать только дорожки Solo",
     addLineTitle: "Добавить строку сценария на эту дорожку",
     addLineAria: "Добавить строку сценария",
   },
@@ -545,6 +562,8 @@ const ru: typeof en = {
     waitSynthesizing: "Подождите: синтез ещё идёт",
     pause: "Пауза",
     play: "Воспроизвести",
+    playAll: "Все дорожки",
+    playAllTitle: "Снять выделение и слушать все дорожки без Mute",
   },
   clip: {
     emptyPreview: "(пусто)",
@@ -670,6 +689,13 @@ export function localizeModelProgressMessage(locale: AppLocale, message: string)
   if (message === messages.en.model.preparingDownload) return m.preparingDownload;
   if (message === messages.en.model.loadingModel) return m.loadingModel;
   return message.replace(messages.en.model.downloadingWeights, m.downloadingWeights);
+}
+
+export function localizeExportError(locale: AppLocale, error: string): string {
+  const t = messages[locale].topBar;
+  if (error === "FFmpeg unavailable") return t.exportFfmpegMissing;
+  const encoder = /^FFmpeg encoder unavailable: ([a-zA-Z0-9_]+)$/.exec(error)?.[1];
+  return encoder ? t.exportEncoderMissing(encoder) : error;
 }
 
 export function localizeDemoProgressMessage(locale: AppLocale, message: string): string {

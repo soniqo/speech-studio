@@ -1,7 +1,8 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AppShell } from "./components/AppShell";
-import { availableTtsEngines, initModel, type TtsEngineId } from "./ipc/commands";
+import { availableTtsEngines, initModel, runtimeModeSettings, type TtsEngineId } from "./ipc/commands";
+import { supportsSharedRuntime } from "./lib/runtimeEngines";
 import { useProjectStore } from "./state/projectStore";
 import "./index.css";
 
@@ -35,7 +36,7 @@ export default function App() {
         // Register the progress listener before init_model so first-run
         // download events are not missed.
         setModelStatus("loading");
-        const engines = await availableTtsEngines();
+        const [engines, mode] = await Promise.all([availableTtsEngines(), runtimeModeSettings()]);
         setAvailableTtsEngines(engines);
         let engine = useProjectStore.getState().model.engine;
         const configuredEngine = import.meta.env.VITE_TTS_ENGINE as TtsEngineId | undefined;
@@ -44,6 +45,12 @@ export default function App() {
           setTtsEngine(engine);
         } else if (!engines.some((candidate) => candidate.id === engine)) {
           engine = engines[0]?.id ?? "voxcpm2";
+          setTtsEngine(engine);
+        }
+        if (mode.useSharedRuntime && !supportsSharedRuntime(engine)) {
+          const sharedEngine = engines.find((candidate) => supportsSharedRuntime(candidate.id));
+          if (!sharedEngine) throw new Error("No engine is available through Shared Speech Runtime");
+          engine = sharedEngine.id;
           setTtsEngine(engine);
         }
         requestedEngine = engine;

@@ -1,6 +1,6 @@
 [package]
 name = "speech-studio"
-version = "0.0.11"
+version = "0.0.12"
 description = "Speech Studio — voice cloning + scripted synthesis"
 authors = ["Soniqo"]
 edition = "2021"
@@ -17,6 +17,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+integration-tests = ["tauri/test"]
+
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
@@ -30,3 +33,4 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 base64 = "0.22"
 unicode-segmentation = "1.13"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }

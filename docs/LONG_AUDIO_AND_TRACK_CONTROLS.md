@@ -1,0 +1,49 @@
+# Speech Studio: long synthesis, audio formats, and track monitoring
+
+Speech Studio derives new timeline lengths from content, saves track monitoring
+settings with the project, and exports a complete audio mix.
+
+- The initial 30-second canvas is no longer used as a hard duration limit, and
+  the canvas is no longer a fixed 30 s backdrop either: project length is
+  derived from clips and decoded imported audio in new projects and after
+  structural edits, so a new 10 s recording draws a 10 s track.
+  Older projects retain their saved canvas length: the old format cannot
+  distinguish a default 30 s canvas from a length the user chose. New projects
+  follow their clips and decoded imported-audio duration. An explicit length
+  typed into the Inspector is kept in `canvasSec` and extends the canvas; clips
+  running past it still expand it.
+  A successful long render expands its clip and project duration automatically.
+  The export mixer always includes complete decoded audio, even if older saved
+  projects have a stale 30-second duration. The *model itself* can still fail
+  or stop generating a sentence early; chunking reduces but does not eliminate
+  those model-specific limitations.
+- Output formats (TopBar format selector): WAV (native, no FFmpeg); MP3, OGG/Vorbis, Opus, FLAC,
+  M4A/AAC, AIFF (FFmpeg). The FFmpeg build must include the selected encoder;
+  some builds omit `libvorbis` and cannot export OGG. On macOS,
+  `brew install ffmpeg-full` provides the required encoders. Studio also checks
+  Homebrew's `ffmpeg-full` installation paths when the first FFmpeg on `PATH`
+  lacks an encoder. Missing encoders produce localized installation guidance.
+  FFmpeg is also used for decoding imported non-PCM audio. The backend checks the chosen
+  file extension and errors on unsupported extensions, never writes WAV data
+  into a misleading MP3/OGG filename.
+- Per-track Mute and Solo are saved in project JSON. Solo wins over automatic
+  selection; Mute always silences a track. Clicking a speaker or its clip
+  previews just that track. Clicking **All tracks** in Transport clears the
+  temporary selection so all unmuted tracks can play together. Export ignores
+  temporary selection but applies explicit Mute/Solo. Imported audio tracks
+  are also included in playback and export, with their configured gain.
+- The renderer normalizes mixed sample rates to 48 kHz before combining them.
+  The current mixer holds PCM in memory and creates a temporary WAV for
+  FFmpeg. Very long projects are bounded by the standard WAV/Riff ~4 GiB
+  intermediate limit; no arbitrary 30-second cut-off remains.
+
+Verification: run `pnpm test`, `pnpm build`, and `cargo test --manifest-path
+src-tauri/Cargo.toml` on a prepared macOS development machine. Check a >60 s
+synthesized clip, Mute/Solo changes while playing, a 60+ s export, WAV/OGG/MP3
+roundtrips, mixed Qwen3 (24 kHz) and VoxCPM2 (48 kHz) clips, and reopened
+projects with saved Mute/Solo state. Actual Swift/MLX inference needs Apple
+Silicon and installed model weights; the deterministic regression suites do
+not validate synthesis quality.
+
+The automated browser, IPC, migration and checkpoint regression checks are
+documented in [REGRESSION_TESTS.md](REGRESSION_TESTS.md).

@@ -20,8 +20,8 @@ A blind A/B/C — a real voice, the same voice cloned locally by Speech Studio o
 
 1. **Drop a short reference clip** of a speaker → register a cloned voice. Repeat for as many speakers as you need.
 2. **Write a script line per clip** and pick which speaker says it. Wrap the line in an emotion marker — `(whispering) Just stay quiet for a moment, please.` — and the synth will follow that direction.
-3. **Hit Synthesize** to render every line in the assigned cloned voice. The synth pipeline auto-grades each take with on-device ASR and retries with a different seed if the line came out wrong.
-4. **Play the script** to hear the whole scene back-to-back. Export a single WAV mix (export wiring is in progress).
+3. **Hit Synthesize** to render every line in the assigned cloned voice. Each clip is synthesized once; use **Regenerate** for a fresh take.
+4. **Play the script** to hear the whole scene back-to-back. Export the audio mix as WAV, or use FFmpeg for the other supported audio formats.
 
 The clone is local. The synth is local. No audio leaves your machine.
 
@@ -45,8 +45,9 @@ Switch engine from the toolbar dropdown. The list is filtered to engines support
 | **OmniVoice** | macOS only | MLX | ✅ | restricted instruct² | 600+ |
 | **Indic-Mio** | macOS · Windows · Linux | MLX / LiteRT | ✅³ | suffix tags | Indic |
 | **Fish Audio S2 Pro** | macOS only | MLX | ✅⁴ | bracket tags | 80+ |
+| **ESpeech-TTS-1 RL-V2** | macOS only | MLX / F5 | ✅ | — | Russian |
 
-CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice, and Fish Audio S2 Pro remain **macOS-only** in Studio. VoxCPM2 and Indic-Mio are also available on Windows/Linux through speech-core's LiteRT backend.
+CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice, Fish Audio S2 Pro, and ESpeech remain **macOS-only** in Studio. VoxCPM2 and Indic-Mio are also available on Windows/Linux through speech-core's LiteRT backend.
 
 ¹ Chatterbox has no free-text style input — emotion markers map to an expressiveness/intensity level (more vs. less expressive), not a specific emotion.
 
@@ -55,6 +56,26 @@ CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice, and Fish Audio S2 Pro remain **ma
 ³ Indic-Mio is exposed as an experimental Hindi/Indic emotion-marker engine. It uses suffix tags such as `<happy>` / `<angry>` and clones from reference audio through WavLM → MioCodec global speaker embeddings. It does not need a reference transcript. Windows/Linux use the `soniqo/Indic-Mio-LiteRT` bundle and output 24 kHz WAV clips.
 
 ⁴ Fish Audio S2 Pro uses bracket markers such as `[excited]`, `[angry]`, and `[whisper]`. It needs an accurate reference transcript for cloning, and the public weights are research/non-commercial unless separately licensed.
+
+## Comparison, playback and export
+
+**Compare voices** runs Qwen3-TTS, VoxCPM2 and ESpeech against one reference
+sample and text. The interface supports English, Russian and Traditional
+Chinese, including the Compare page and export controls. ESpeech needs an
+imported local MLX bundle; see
+[SPEECH_COMPARISON.md](docs/SPEECH_COMPARISON.md). Shared Speech Runtime mode
+requires a daemon with the TTS API configured and releases Studio's local
+model before loading a supported engine through the daemon.
+
+Track Mute/Solo settings apply to playback and export. Selecting a track
+isolates its preview; **All tracks** restores the preview mix. Imported audio
+extends the timeline to its decoded duration. Existing project canvas lengths
+are preserved when reopening older files.
+
+WAV export is native. MP3, OGG, Opus, FLAC, M4A and AIFF require an FFmpeg build
+with the corresponding encoders (`brew install ffmpeg-full` on macOS).
+See [playback/export details](docs/LONG_AUDIO_AND_TRACK_CONTROLS.md) and
+[regression test commands](docs/REGRESSION_TESTS.md).
 
 ## Emotion markers
 

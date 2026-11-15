@@ -1,0 +1,26 @@
+{
+  "model_type": "f5-tts",
+  "model_name": "F5TTS_v1_Base",
+  "source_repo": "fixture/f5",
+  "source_checkpoint": "fixture.safetensors",
+  "vocoder_repo": "fixture/vocos",
+  "license": "fixture-only",
+  "commercial_use": false,
+  "precision": "fp16",
+  "architecture": {
+    "backbone": "DiT", "dim": 4, "depth": 1, "heads": 1,
+    "ff_mult": 2, "text_dim": 4, "text_mask_padding": false,
+    "qk_norm": null, "conv_layers": 1, "pe_attn_head": null,
+    "attn_backend": "torch", "attn_mask_enabled": false,
+    "checkpoint_activations": false
+  },
+  "mel_spec": {
+    "target_sample_rate": 24000, "n_mel_channels": 100,
+    "hop_length": 256, "win_length": 1024, "n_fft": 1024,
+    "mel_spec_type": "vocos"
+  },
+  "files": {
+    "model": "model.safetensors", "vocoder": "vocos.safetensors",
+    "vocoder_config": "vocos_config.yaml", "vocab": "vocab.txt"
+  }
+}
