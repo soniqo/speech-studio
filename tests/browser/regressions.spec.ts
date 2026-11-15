@@ -86,3 +86,27 @@ test("Traditional Chinese track controls remain translated and reachable", async
     if (box) expect(box.x + box.width).toBeLessThanOrEqual(width);
   }
 });
+
+test("comparison locale switches preserve synthesis input and localize navigation and errors", async ({ page }) => {
+  await page.goto("/tests/browser/");
+  await expect.poll(() => page.evaluate(() => window.studioTest.store.getState().model.status)).toBe("ready");
+  await page.getByRole("button", { name: "Compare voices", exact: true }).click();
+  const text = "Keep this text: молок+о and Kubernetes.";
+  await page.getByRole("textbox", { name: "Text to synthesize", exact: true }).fill(text);
+  let selector = "Interface language";
+  for (const locale of [
+    { option: "Русский", selector: "Язык интерфейса", heading: "Сравнение клонирования голоса", target: "Текст синтеза", navigation: "Сравнение голосов", format: "Формат экспорта аудио" },
+    { option: "繁體中文", selector: "介面語言", heading: "聲音克隆比較", target: "要合成的文字", navigation: "音色比較", format: "音訊匯出格式" },
+  ]) {
+    await page.getByRole("combobox", { name: selector, exact: true }).click();
+    await page.getByRole("option", { name: locale.option, exact: true }).click();
+    selector = locale.selector;
+    await expect(page.getByRole("heading", { name: locale.heading, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: locale.navigation, exact: true })).toHaveAttribute("aria-current", "page");
+    await expect(page.getByRole("textbox", { name: locale.target, exact: true })).toHaveValue(text);
+    await expect(page.getByRole("combobox", { name: locale.format, exact: true })).toBeVisible();
+  }
+  await page.getByRole("button", { name: "全部合成", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("請選擇音色、輸入文字，並至少選擇一個模型。");
+  expect(await page.evaluate(() => window.studioTest.calls.filter(call => call.command === "init_model").length)).toBe(1);
+});

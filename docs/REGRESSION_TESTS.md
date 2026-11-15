@@ -18,7 +18,8 @@ The browser suite mounts the real application components and IPC wrappers,
 with a fixture replacing the native host. It decodes a generated 20-second
 WAV, checks playback beyond five seconds, opens and saves legacy projects,
 tests failed model-load recovery, restores shared-mode startup and switches
-to the Traditional Chinese track controls.
+the navigation, comparison form and export controls between supported locales
+without changing the synthesis input.
 
 For the native dispatcher and daemon boundary, prepare the normal Tauri build
 inputs described in `AGENTS.md`, then run:
@@ -40,11 +41,20 @@ The checkpoint reader has a separate security regression suite:
 
 ```sh
 python3 -m pip install -r scripts/requirements-conversion.txt
-python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+SPEECH_SWIFT_DIR=/path/to/speech-swift \
+  python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 ```
 
-It accepts a tensor state-dict fixture without installing PyTorch and rejects
-an executable pickle before its callable runs. It also checks strided tensor
+Set `SPEECH_SWIFT_DIR` to the same checkout consumed by the sidecar. The suite
+compiles the actual F5 bundle loader and configuration types with a small
+Foundation-only runner, converts a synthetic checkpoint through the real CLI,
+and checks the resulting bundle. Missing `README.md` and vocoder configuration
+are also rejected. This needs `swiftc`, but does not load MLX or model weights.
+The loader contract test is skipped when `SPEECH_SWIFT_DIR` is unset; macOS CI
+sets it to the pinned dependency checkout so that check is mandatory there.
+
+The suite also accepts a tensor state-dict fixture without installing PyTorch
+and rejects an executable pickle before its callable runs. It checks strided tensor
 bounds before copying data. Unsupported checkpoint globals are errors; they
 are never resolved through Python's general pickle loader.
 

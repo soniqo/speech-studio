@@ -2751,11 +2751,7 @@ async fn import_tts_bundle<R: tauri::Runtime>(
         return fetch_tts_artifact(&manager, &settings, engine).await;
     };
     let source = source.into_path().map_err(|e| e.to_string())?;
-    for required in ["config.json", "model.safetensors", "vocos.safetensors", "vocab.txt"] {
-        if !source.join(required).is_file() {
-            return Err(format!("Bundle is missing {required}"));
-        }
-    }
+    validate_espeech_bundle(&source)?;
     if source == target {
         return fetch_tts_artifact(&manager, &settings, engine).await;
     }
@@ -2767,6 +2763,22 @@ async fn import_tts_bundle<R: tauri::Runtime>(
         .map_err(|e| format!("Could not import bundle: {e}"))?;
     studio_log!("[models] imported {} bundle from {}", engine.display_name(), source.display());
     fetch_tts_artifact(&manager, &settings, engine).await
+}
+
+fn validate_espeech_bundle(source: &std::path::Path) -> Result<(), String> {
+    for required in [
+        "config.json",
+        "README.md",
+        "model.safetensors",
+        "vocos.safetensors",
+        "vocos_config.yaml",
+        "vocab.txt",
+    ] {
+        if !source.join(required).is_file() {
+            return Err(format!("Bundle is missing {required}"));
+        }
+    }
+    Ok(())
 }
 
 fn copy_dir_all(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
@@ -3625,6 +3637,27 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn espeech_import_rejects_missing_loader_metadata() {
+        let directory = std::env::temp_dir().join(format!("espeech-import-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        for name in ["config.json", "model.safetensors", "vocos.safetensors", "vocab.txt"] {
+            std::fs::write(directory.join(name), "fixture").unwrap();
+        }
+        assert_eq!(
+            validate_espeech_bundle(&directory).unwrap_err(),
+            "Bundle is missing README.md"
+        );
+        std::fs::write(directory.join("README.md"), "fixture").unwrap();
+        assert_eq!(
+            validate_espeech_bundle(&directory).unwrap_err(),
+            "Bundle is missing vocos_config.yaml"
+        );
+        std::fs::write(directory.join("vocos_config.yaml"), "fixture").unwrap();
+        validate_espeech_bundle(&directory).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn runtime_tts_config_merge_preserves_other_keys() {

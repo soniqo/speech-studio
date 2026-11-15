@@ -1,6 +1,8 @@
 import type { Messages } from "./messages";
+import { compareZhTW } from "./compare";
 
 export const zhTW: Messages = {
+  compare: compareZhTW,
   locale: { english: "English", russian: "Русский", traditionalChinese: "繁體中文", selectorTitle: "介面語言" },
   defaults: {
     untitledProject: "未命名", speakerTrack: (index) => `講者 ${index}`, exportFileBase: "soniqo-export",
@@ -21,7 +23,7 @@ export const zhTW: Messages = {
   topBar: {
     synthProgress: (current, total, elapsed, label) => `生成 ${current}/${total} ${elapsed} — ${label}`, synthesizing: "生成中…", synthMissing: (count) => `生成（${count}）`, resynthesizeAll: "重新生成全部",
     nothingToSynthesize: "沒有可生成的片段：請輸入文字並指定音色（已鎖定片段會跳過）", clipsFailed: (failed, total) => `${failed}/${total} 個片段生成失敗，請查看活動紀錄`,
-    exportMixTitle: "匯出音訊混音", wavAudio: "WAV 音訊", exportFailed: (error) => `匯出失敗：${error}`, switchLoadingEngine: (engine) => `切換引擎並中斷 ${engine} 載入`,
+    exportMixTitle: "匯出音訊混音", exportFormatTitle: "音訊匯出格式", wavAudio: "WAV 音訊", exportFailed: (error) => `匯出失敗：${error}`, switchLoadingEngine: (engine) => `切換引擎並中斷 ${engine} 載入`,
     switchEngineTitle: "切換載入的聲音克隆引擎", pickAnotherModel: "選擇其他模型", pickAnotherModelTitle: (engine) => `${engine} 載入失敗，請選擇其他引擎`,
     synthesisLanguageTitle: "多語言引擎的生成語言", variantLabel: "模型權重", variantTitle: (engine) => `${engine} 權重：較低精度使用較少記憶體；切換會重新載入模型`,
     variantDisk: (gb) => `${gb} GB`, variantRam: (gib) => `約 ${gib} GiB 記憶體`, waitModel: (engine) => `請等候 ${engine} 載入完成`, loadProjectFirst: "請先載入專案",

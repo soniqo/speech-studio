@@ -20,8 +20,8 @@
 
 1. **拖入一小段说话人的参考音频** → 注册一个克隆音色。需要多少个说话人就重复多少次。
 2. **为每个片段编写一行脚本**并选择由哪个说话人朗读。用情感标记包裹该行——`(whispering) Just stay quiet for a moment, please.`——合成时就会遵循该指示。
-3. **点击 Synthesize（合成）**，用指定的克隆音色渲染每一行。合成流程会用端侧 ASR 自动为每次生成打分，若结果有误则换一个随机种子重试。
-4. **播放脚本**即可连续听到整个场景。导出为单个 WAV 混音（导出功能仍在开发中）。
+3. **点击 Synthesize（合成）**，用指定的克隆音色渲染每一行。每个片段只合成一次；点击 **Regenerate（重新生成）** 可获取新的结果。
+4. **播放脚本**即可连续听到整个场景。可直接导出 WAV 混音；其他支持的音频格式需要 FFmpeg。
 
 克隆在本地完成。合成在本地完成。没有任何音频离开你的机器。
 
@@ -47,7 +47,7 @@
 | **Fish Audio S2 Pro** | 仅 macOS | MLX | ✅⁴ | 方括号标签 | 80+ |
 | **ESpeech-TTS-1 RL-V2** | 仅 macOS | MLX / F5 | ✅ | — | 俄语 |
 
-CosyVoice 3、Qwen3-TTS、Chatterbox、OmniVoice 与 Fish Audio S2 Pro 在 Studio 中仍仅限 **macOS**。VoxCPM2 与 Indic-Mio 也可在 Windows/Linux 上通过 speech-core 的 LiteRT 后端运行。
+CosyVoice 3、Qwen3-TTS、Chatterbox、OmniVoice、Fish Audio S2 Pro 与 ESpeech 在 Studio 中仍仅限 **macOS**。VoxCPM2 与 Indic-Mio 也可在 Windows/Linux 上通过 speech-core 的 LiteRT 后端运行。
 
 ¹ Chatterbox 没有自由文本风格输入——情感标记映射为表现力/强度级别（更强或更弱），而非具体某种情感。
 
@@ -60,6 +60,7 @@ CosyVoice 3、Qwen3-TTS、Chatterbox、OmniVoice 与 Fish Audio S2 Pro 在 Studi
 ## 比较、播放与导出
 
 **Compare voices** 使用同一段参考音频和文本比较 Qwen3-TTS、VoxCPM2 与 ESpeech。
+界面支持英语、俄语和繁体中文，涵盖比较页面及导出设置。
 ESpeech 需要导入本地 MLX 模型包，详见 [SPEECH_COMPARISON.md](docs/SPEECH_COMPARISON.md)。
 共享 Speech Runtime 模式需要已配置 TTS API 的守护进程。启用时，Studio 会先释放
 本地模型，再通过守护进程加载受支持的引擎。

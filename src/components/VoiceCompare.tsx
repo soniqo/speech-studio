@@ -12,6 +12,7 @@ import {
   Volume2,
 } from "lucide-react";
 import { useProjectStore } from "../state/projectStore";
+import { useI18n } from "../i18n/useI18n";
 import { subscribeSidecarMemory } from "../hooks/subscribeSidecarMemory";
 import { useActivityStore } from "../state/activityStore";
 import { useDictationRecorder } from "../hooks/useDictationRecorder";
@@ -113,8 +114,8 @@ function runtimePeakMemoryMb(model: RuntimeTtsModelWithMemory | undefined): numb
 }
 
 export function VoiceCompare() {
-  const locale = useProjectStore((s) => s.locale);
-  const ru = locale === "ru";
+  const { locale, messages: t } = useI18n();
+  const c = t.compare;
   const voices = useProjectStore((s) => s.project.voices);
   const engines = useProjectStore((s) => s.model.engines);
   const memory = useActivityStore((s) => s.memory);
@@ -294,7 +295,7 @@ export function VoiceCompare() {
       const imported = await importReferenceAudio(picked.path);
       const probe = await probeReference(imported.path);
       if (probe && probe.rms < 0.005) {
-        throw new Error(ru ? "Образец почти беззвучный. Запишите другой." : "Reference is nearly silent.");
+        throw new Error(c.nearlySilent);
       }
       const created = await cloneVoice({
         referencePath: imported.path,
@@ -319,7 +320,7 @@ export function VoiceCompare() {
       const probe = await probeReference(result.audioPath).catch(() => undefined);
       const created = await cloneVoice({
         referencePath: result.audioPath,
-        name: ru ? `Запись ${new Date().toLocaleTimeString()}` : `Recording ${new Date().toLocaleTimeString()}`,
+        name: c.recordingName(new Date().toLocaleTimeString(locale)),
         referenceText: result.text,
         referenceDurationSec: probe?.durationSec ?? result.durationSec,
         referenceSampleRate: probe?.sampleRate,
@@ -368,7 +369,7 @@ export function VoiceCompare() {
   async function loadEngine(engine: CompareEngine): Promise<number> {
     const info = engineInfo.get(engine);
     const choice = choices[engine];
-    if (!info) throw new Error(`Engine ${engine} is not available on this platform.`);
+    if (!info) throw new Error(c.engineUnavailable(ENGINE_LABELS[engine]));
     const store = useProjectStore.getState();
     if (store.model.engine !== engine) store.setTtsEngine(engine);
     store.setTtsLanguage(choice.language);
@@ -409,7 +410,7 @@ function textForEngine(engine: CompareEngine, text: string): string {
     if (busy || !voice?.referenceAudioPath || !targetText.trim()) return;
     setError(null);
     setBusyEngine(engine);
-    setStage(`${ENGINE_LABELS[engine]}: ${ru ? "запуск" : "starting"}`);
+    setStage(`${ENGINE_LABELS[engine]}: ${c.starting}`);
     const startedAt = Date.now();
     runMemory.current = { engine, startedAt, peakMb: 0 };
     try {
@@ -424,7 +425,7 @@ function textForEngine(engine: CompareEngine, text: string): string {
         const runtimePeakMb = runtimePeakMemoryMb(modelInfo);
         await speechRuntimeTtsLoad(engine, choices[engine].variant || undefined);
         const loadSec = (performance.now() - loadStarted) / 1000;
-        setStage(`${ENGINE_LABELS[engine]}: ${ru ? "синтез через Speech Runtime" : "synthesizing via Speech Runtime"}`);
+        setStage(`${ENGINE_LABELS[engine]}: ${c.synthesizingRuntime}`);
         const synthStarted = performance.now();
         const requestId = crypto.randomUUID();
         activeRequestId.current = requestId;
@@ -475,7 +476,7 @@ function textForEngine(engine: CompareEngine, text: string): string {
         }
       } else {
         const loadSec = (await loadEngine(engine)) / 1000;
-        setStage(`${ENGINE_LABELS[engine]}: ${ru ? "синтез" : "synthesizing"}`);
+        setStage(`${ENGINE_LABELS[engine]}: ${c.synthesizing}`);
         const synthStarted = performance.now();
         const synth = await synthesizeClip({
           clipId: crypto.randomUUID(),
@@ -523,12 +524,12 @@ function textForEngine(engine: CompareEngine, text: string): string {
     setError(null);
     const chosen = COMPARE_ENGINES.filter((engine) => enabled.includes(engine));
     if (!voice?.referenceAudioPath || !targetText.trim() || chosen.length === 0) {
-      setError(ru ? "Выберите голос, текст и хотя бы одну модель." : "Choose voice, text, and at least one model.");
+      setError(c.chooseInputs);
       return;
     }
     const needsTranscript = chosen.some((engine) => engineInfo.get(engine)?.requiresReferenceTranscript);
     if (needsTranscript && !referenceText.trim()) {
-      setError(ru ? "Для клонирования нужна точная расшифровка образца." : "Cloning requires an accurate reference transcript.");
+      setError(c.transcriptRequired);
       return;
     }
     const store = useProjectStore.getState();
@@ -621,7 +622,7 @@ function textForEngine(engine: CompareEngine, text: string): string {
 
   async function remove(engine: CompareEngine) {
     if (busy || managingEngine) return;
-    if (!window.confirm(ru ? `Удалить веса ${ENGINE_LABELS[engine]}?` : `Delete ${ENGINE_LABELS[engine]} weights?`)) {
+    if (!window.confirm(c.deleteWeights(ENGINE_LABELS[engine]))) {
       return;
     }
     setManagingEngine(engine);
@@ -650,28 +651,26 @@ function textForEngine(engine: CompareEngine, text: string): string {
       <div className="mx-auto max-w-6xl space-y-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1">
-            <h2 className="text-lg font-semibold">{ru ? "Сравнение клонирования голоса" : "Voice cloning comparison"}</h2>
+            <h2 className="text-lg font-semibold">{c.title}</h2>
             <p className="text-xs text-muted-foreground">
-              {ru
-                ? "Один образец и один текст для трёх движков. Локально модели загружаются последовательно; в общем Speech Runtime — по одной резидентной."
-                : "One reference and one text across three engines. Locally models load sequentially; through the shared Speech Runtime one stays resident."}
+              {c.description}
             </p>
           </div>
           <div className="flex items-center gap-2 text-xs">
             <span className={runtime?.connected ? "text-emerald-500" : "text-muted-foreground"}>
-              Speech Runtime: {runtime == null ? "…" : runtime.connected ? (ru ? "подключён" : "connected") : (ru ? "недоступен" : "offline")}
+              Speech Runtime: {runtime == null ? "…" : runtime.connected ? c.connected : c.offline}
             </span>
-            <Button size="sm" variant="ghost" className="h-6 px-1.5" disabled={transcribing} onClick={() => void refreshRuntime()}>
+            <Button size="sm" variant="ghost" className="h-6 px-1.5" disabled={transcribing} onClick={() => void refreshRuntime()} aria-label={c.refreshRuntime}>
               <RefreshCw className="h-3 w-3" />
             </Button>
-            <label className="ml-2 flex items-center gap-1.5" title={ru ? "Синтез выполняет общий демон, второй экземпляр модели не запускается" : "The daemon owns the model; no second copy is loaded"}>
+            <label className="ml-2 flex items-center gap-1.5" title={c.sharedRuntimeTitle}>
               <input
                 type="checkbox"
                 checked={sharedRuntime}
                 disabled={busy || !runtime?.connected}
                 onChange={(e) => void toggleSharedRuntime(e.target.checked)}
               />
-              {ru ? "Общий Speech Runtime" : "Shared Speech Runtime"}
+              {c.sharedRuntime}
             </label>
           </div>
         </div>
@@ -682,7 +681,7 @@ function textForEngine(engine: CompareEngine, text: string): string {
 
         <section className="space-y-3 rounded-xl border border-border bg-card/40 p-4">
           <div className="flex flex-wrap items-center gap-2">
-            <label className="text-xs font-medium" htmlFor="compare-voice">{ru ? "Голосовой профиль" : "Voice profile"}</label>
+            <label className="text-xs font-medium" htmlFor="compare-voice">{c.voiceProfile}</label>
             <select
               id="compare-voice"
               className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
@@ -693,22 +692,22 @@ function textForEngine(engine: CompareEngine, text: string): string {
                 setResults({});
               }}
             >
-              {voices.length === 0 && <option value="">{ru ? "Нет профилей" : "No voice profiles"}</option>}
+              {voices.length === 0 && <option value="">{c.noProfiles}</option>}
               {voices.map((candidate) => (
                 <option key={candidate.id} value={candidate.id}>{candidate.name}</option>
               ))}
             </select>
             <Button variant="outline" size="sm" disabled={busy} onClick={() => void importVoice()}>
-              <Upload className="mr-1 h-3.5 w-3.5" />{ru ? "Импорт аудио" : "Import audio"}
+              <Upload className="mr-1 h-3.5 w-3.5" />{c.importAudio}
             </Button>
             <Button variant={recorder.recording ? "destructive" : "outline"} size="sm" disabled={busy && !recorder.recording} onClick={() => void recordVoice()}>
               {recorder.recording ? <Square className="mr-1 h-3.5 w-3.5" /> : recorder.busy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Mic className="mr-1 h-3.5 w-3.5" />}
-              {recorder.recording ? (ru ? "Остановить и сохранить" : "Stop and save") : (ru ? "Записать с микрофона" : "Record from mic")}
+              {recorder.recording ? c.stopAndSave : c.record}
             </Button>
           </div>
           <div className="space-y-1">
             <label className="text-xs font-medium" htmlFor="compare-ref-text">
-              {ru ? "Расшифровка образца (обязательна для F5/ESpeech и Qwen3-ICL)" : "Reference transcript (required for F5/ESpeech and Qwen3-ICL)"}
+              {c.referenceTranscript}
             </label>
             <Textarea
               id="compare-ref-text"
@@ -716,20 +715,20 @@ function textForEngine(engine: CompareEngine, text: string): string {
               value={referenceText}
               disabled={busy || transcribing}
               onChange={(e) => setReferenceText(e.target.value)}
-              placeholder={ru ? "Точный текст эталонной записи" : "Exact words spoken in the reference"}
+              placeholder={c.referencePlaceholder}
             />
             <div className="flex flex-wrap gap-2">
               <Button variant="outline" size="sm" disabled={!runtime?.connected || !voice?.referenceAudioPath || busy || transcribing} onClick={() => void transcribeReference()}>
                 {transcribing && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
-                {ru ? "Распознать (Parakeet Ultra)" : "Transcribe (Parakeet Ultra)"}
+                {c.transcribe}
               </Button>
               <Button variant="outline" size="sm" disabled={!voice || busy || referenceText === voice.referenceText} onClick={saveVoiceProfile}>
-                <Save className="mr-1 h-3 w-3" />{ru ? "Сохранить профиль" : "Save profile"}
+                <Save className="mr-1 h-3 w-3" />{c.saveProfile}
               </Button>
             </div>
           </div>
           <div className="space-y-1">
-            <label className="text-xs font-medium" htmlFor="compare-target">{ru ? "Текст синтеза" : "Text to synthesize"}</label>
+            <label className="text-xs font-medium" htmlFor="compare-target">{c.targetText}</label>
             <Textarea id="compare-target" rows={3} value={targetText} disabled={busy} onChange={(e) => setTargetText(e.target.value)} />
           </div>
         </section>
@@ -748,22 +747,23 @@ function textForEngine(engine: CompareEngine, text: string): string {
                     {ENGINE_LABELS[engine]}
                   </label>
                   <div className="text-[11px] text-muted-foreground">
-                    {info ? `${info.runtime} · ${info.modelSize} · ${info.readiness}` : ru ? "недоступен на этой платформе" : "not available on this platform"}
+                    {info ? `${info.runtime} · ${info.modelSize} · ${c.readiness[info.readiness as keyof typeof c.readiness] ?? info.readiness}` : c.unavailable}
                     {artifact ? ` · ${formatGb(artifact.bytes)}` : ""}
-                    {engine === "espeech" ? ` · ${ru ? "локальный бандл" : "local bundle"}` : ""}
-                    {sharedRuntime && runtimeModel ? ` · runtime: ${runtimeModel.loaded ? (ru ? "загружена" : "loaded") : (ru ? "выгружена" : "not loaded")}` : ""}
+                    {engine === "espeech" ? ` · ${c.localBundle}` : ""}
+                    {sharedRuntime && runtimeModel ? ` · ${c.runtimeState(runtimeModel.loaded ? c.loaded : c.notLoaded)}` : ""}
                   </div>
                   <div className="flex items-center gap-1.5">
                     {info && info.variants.length > 0 && (
                       <select
                         className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-xs"
                         disabled={busy}
+                        aria-label={c.variantLabel(ENGINE_LABELS[engine])}
                         value={choices[engine].variant}
                         onChange={(e) => setChoices((current) => ({ ...current, [engine]: { ...current[engine], variant: e.target.value } }))}
                       >
                         {info.variants.map((variant) => (
                           <option key={variant.id} value={variant.id}>
-                            {variant.label} {variant.diskGb ? `· ${variant.diskGb} GB` : ""} {variant.ramGib ? `· ~${variant.ramGib} GiB RAM` : ""}
+                            {variant.label} {variant.diskGb ? `· ${t.topBar.variantDisk(String(variant.diskGb))}` : ""} {variant.ramGib ? `· ${t.topBar.variantRam(String(variant.ramGib))}` : ""}
                           </option>
                         ))}
                       </select>
@@ -772,6 +772,7 @@ function textForEngine(engine: CompareEngine, text: string): string {
                       <select
                         className="rounded border border-border bg-background px-2 py-1 text-xs"
                         disabled={busy}
+                        aria-label={c.languageLabel(ENGINE_LABELS[engine])}
                         value={choices[engine].language}
                         onChange={(e) => setChoices((current) => ({ ...current, [engine]: { ...current[engine], language: e.target.value } }))}
                       >
@@ -785,30 +786,28 @@ function textForEngine(engine: CompareEngine, text: string): string {
                         <Button size="sm" variant="outline" className="h-7 px-2 text-[11px]" disabled={busy || managingEngine !== null || !info} onClick={() => void importBundle(engine)}>
                           {managingEngine === engine ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <FolderInput className="mr-1 h-3 w-3" />}
                           {artifact?.exists
-                            ? (ru ? "Обновить бандл" : "Refresh bundle")
-                            : (ru ? "Импортировать бандл" : "Import bundle")}
+                            ? c.refreshBundle
+                            : c.importBundle}
                         </Button>
                         <Button size="sm" variant="ghost" className="h-7 px-2 text-[11px]" disabled={busy || managingEngine !== null || !info} onClick={() => void refreshArtifact(engine)}>
                           {managingEngine === engine ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1 h-3 w-3" />}
-                          {ru ? "Проверить" : "Check"}
+                          {c.check}
                         </Button>
                       </>
                     ) : (
                       <Button size="sm" variant="outline" className="h-7 px-2 text-[11px]" disabled={busy || managingEngine !== null || !info} onClick={() => void download(engine)}>
                         {managingEngine === engine ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Download className="mr-1 h-3 w-3" />}
-                        {artifact?.exists ? (ru ? "Загрузить в память" : "Load") : (ru ? "Скачать веса" : "Download weights")}
+                        {artifact?.exists ? c.loadModel : c.downloadWeights}
                       </Button>
                     )}
                     <Button size="sm" variant="ghost" className="h-7 px-2 text-[11px] text-destructive" disabled={busy || managingEngine !== null || !artifact?.exists} onClick={() => void remove(engine)}>
                       {managingEngine === engine ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Trash2 className="mr-1 h-3 w-3" />}
-                      {ru ? "Удалить" : "Delete"}
+                      {c.delete}
                     </Button>
                   </div>
                   {engine === "espeech" && (
                     <p className="text-[10px] leading-snug text-muted-foreground">
-                      {ru
-                        ? "Не скачивается с хаба. Положите сконвертированный бандл в ~/Library/Caches/qwen3-speech/models/local/ESpeech-TTS-1-RL-V2-MLX-fp16 и импортируйте."
-                        : "Not hub-downloadable. Place the converted bundle at ~/Library/Caches/qwen3-speech/models/local/ESpeech-TTS-1-RL-V2-MLX-fp16 and import it."}
+                      {c.bundleHint}
                     </p>
                   )}
                   {artifact?.paths.length ? (
@@ -820,31 +819,27 @@ function textForEngine(engine: CompareEngine, text: string): string {
           </div>
           {COMPARE_ENGINES.every((engine) => !engineInfo.get(engine)) && (
             <p className="text-xs text-muted-foreground">
-              {ru
-                ? "Каталог движков пуст: локальный реестр недоступен и Speech Runtime не прислал модели. Проверьте подключение демона и обновите страницу."
-                : "No engine info available: the local registry is empty and the Speech Runtime catalog returned no models. Check the daemon connection and refresh."}
+              {c.emptyRegistry}
             </p>
           )}
           <div className="flex flex-wrap items-center gap-3">
             <Button disabled={busy || enabled.length === 0} onClick={() => void runCompare()}>
               {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Volume2 className="mr-2 h-4 w-4" />}
-              {ru ? "Синтезировать все" : "Synthesize all"}
+              {c.synthesizeAll}
             </Button>
             {stage && <span className="text-xs text-muted-foreground">{stage}</span>}
             {cancellable ? (
               <Button size="sm" variant="outline" className="h-7 px-2 text-[11px]" onClick={() => void cancelSynth()}>
-                <Square className="mr-1 h-3 w-3" />{ru ? "Отменить" : "Cancel"}
+                <Square className="mr-1 h-3 w-3" />{c.cancel}
               </Button>
             ) : busyEngine !== null && !sharedRuntime ? (
               <span className="text-[10px] text-muted-foreground">
-                {ru
-                  ? "отмена недоступна для локального синтеза — нажмите «Повторить» после завершения"
-                  : "cancel is not available for local synthesis — Regenerate when it finishes"}
+                {c.localCancelHint}
               </span>
             ) : null}
             {memory && (
               <span className="ml-auto text-xs text-muted-foreground">
-                {ru ? "Память sidecar" : "Sidecar memory"}: {formatMb(memory.footprintMb)} ({memory.label})
+                {c.sidecarMemory}: {formatMb(memory.footprintMb)} ({memory.label})
               </span>
             )}
           </div>
@@ -867,22 +862,22 @@ function textForEngine(engine: CompareEngine, text: string): string {
                 </div>
                 {result.cancelled ? (
                   <p className="text-xs text-muted-foreground">
-                    {ru ? "Синтез отменён." : "Synthesis was cancelled."}
+                    {c.cancelled}
                   </p>
                 ) : result.audioPath ? (
                   <>
-                    <audio key={result.audioPath} title={result.audioPath} controls preload="none" className="w-full" src={mediaFileSrc(result.audioPath)} />
+                    <audio key={result.audioPath} title={result.audioPath} aria-label={c.resultAudio(ENGINE_LABELS[engine])} controls preload="none" className="w-full" src={mediaFileSrc(result.audioPath)} />
                     <dl className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
-                      <dt>{ru ? "Загрузка" : "Load"}</dt><dd>{result.loadSec == null ? "—" : `${result.loadSec.toFixed(2)} s`}</dd>
-                      <dt>{ru ? "Холодный синтез" : "Cold synth"}</dt><dd>{result.firstSynthSec == null ? "—" : `${result.firstSynthSec.toFixed(2)} s`}</dd>
-                      <dt>{ru ? "Прогретый синтез" : "Warm synth"}</dt><dd>{result.warmSynthSec == null ? "—" : `${result.warmSynthSec.toFixed(2)} s`}</dd>
-                      <dt>{ru ? "Аудио" : "Audio"}</dt><dd>{result.durationSec == null ? "—" : `${result.durationSec.toFixed(2)} s`}</dd>
+                      <dt>{c.loadTime}</dt><dd>{result.loadSec == null ? "—" : c.seconds(result.loadSec.toFixed(2))}</dd>
+                      <dt>{c.coldSynth}</dt><dd>{result.firstSynthSec == null ? "—" : c.seconds(result.firstSynthSec.toFixed(2))}</dd>
+                      <dt>{c.warmSynth}</dt><dd>{result.warmSynthSec == null ? "—" : c.seconds(result.warmSynthSec.toFixed(2))}</dd>
+                      <dt>{c.audio}</dt><dd>{result.durationSec == null ? "—" : c.seconds(result.durationSec.toFixed(2))}</dd>
                       <dt>RTF</dt><dd>{result.rtf == null ? "—" : result.rtf.toFixed(2)}</dd>
-                      <dt>{ru ? "Пик памяти" : "Peak memory"}</dt><dd>{formatMb(result.peakFootprintMb ?? null)}</dd>
+                      <dt>{c.peakMemory}</dt><dd>{formatMb(result.peakFootprintMb ?? null)}</dd>
                     </dl>
                     <div className="flex flex-wrap gap-1.5">
                       <Button size="sm" variant="outline" className="h-7 px-2 text-[11px]" disabled={busy} onClick={() => void regenerate(engine)}>
-                        <RefreshCw className="mr-1 h-3 w-3" />{ru ? "Повторить" : "Regenerate"}
+                        <RefreshCw className="mr-1 h-3 w-3" />{c.regenerate}
                       </Button>
                       <Button size="sm" variant="outline" className="h-7 px-2 text-[11px]" disabled={busy} onClick={() => void saveWav(engine, result.audioPath!)}>
                         <Save className="mr-1 h-3 w-3" />WAV
@@ -892,16 +887,14 @@ function textForEngine(engine: CompareEngine, text: string): string {
                 ) : result.error ? (
                   <p role="alert" className="break-words text-xs text-destructive">{result.error}</p>
                 ) : (
-                  <p className="text-xs text-muted-foreground">{ru ? "Нет результата" : "No result yet"}</p>
+                  <p className="text-xs text-muted-foreground">{c.noResult}</p>
                 )}
               </div>
             );
           })}
         </section>
         <p className="text-xs text-muted-foreground">
-          {ru
-            ? "RTF = время синтеза / длительность аудио. «Холодный» — первый запуск модели, загруженной этим запуском; «прогретый» — повторный запуск через «Повторить». Пик памяти — максимум из снимков sidecar за время запуска; в общем Speech Runtime — из отчёта демона."
-            : "RTF = synthesis time / audio duration. Cold is the first run of a model loaded by that run; warm is a Regenerate run. Peak memory is the max sidecar snapshot within the run window; via the shared Speech Runtime it is the daemon's report."}
+          {c.metricsHint}
         </p>
       </div>
     </main>

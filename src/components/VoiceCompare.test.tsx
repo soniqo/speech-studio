@@ -146,6 +146,7 @@ beforeEach(() => {
   useActivityStore.setState({ open: false, lines: [], memory: null, logPath: null });
   useProjectStore.setState((s) => ({
     ...s,
+    locale: "en",
     project: { ...s.project, voices: [voice] },
     model: { ...s.model, engines: [engineInfo("qwen3"), engineInfo("voxcpm2"), engineInfo("espeech")], status: "idle" },
     synthesisStatus: "idle" as const,
@@ -168,6 +169,33 @@ beforeEach(() => {
 import { initModel as initModelDefault } from "../ipc/commands";
 
 describe("VoiceCompare", () => {
+  it("switches interface language without changing the synthesis text or loading a model", async () => {
+    render(<VoiceCompare />);
+    await screen.findByText("offline", { selector: "p" });
+    const target = screen.getByLabelText("Text to synthesize");
+    fireEvent.change(target, { target: { value: "Keep these reference words: молок+о." } });
+    act(() => useProjectStore.getState().setLocale("ru"));
+    expect(screen.getByRole("heading", { name: "Сравнение клонирования голоса" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Синтезировать все" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Текст синтеза")).toHaveValue("Keep these reference words: молок+о.");
+    act(() => useProjectStore.getState().setLocale("zh-TW"));
+    expect(screen.getByRole("heading", { name: "聲音克隆比較" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "全部合成" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "共享 Speech Runtime" })).toBeInTheDocument();
+    expect(screen.getByLabelText("要合成的文字")).toHaveValue("Keep these reference words: молок+о.");
+    expect(screen.getByRole("button", { name: "匯入模型套件" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Synthesize all" })).not.toBeInTheDocument();
+    expect(initModelDefault).not.toHaveBeenCalled();
+  });
+
+  it("localizes comparison validation errors in Traditional Chinese", async () => {
+    useProjectStore.setState(s => ({ locale: "zh-TW", project: { ...s.project, voices: [] } }));
+    render(<VoiceCompare />);
+    await screen.findByText("offline", { selector: "p" });
+    fireEvent.click(screen.getByRole("button", { name: "全部合成" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("請選擇音色、輸入文字，並至少選擇一個模型。");
+  });
+
   it("keeps a failed model load in the recoverable error state", async () => {
     vi.mocked(initModelDefault).mockRejectedValueOnce(new Error("Model load failed"));
     render(<VoiceCompare />);

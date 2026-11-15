@@ -316,6 +316,15 @@ def main() -> int:
         "vocos": {"saved_tensors": 83, "size_mb": 25.9},
     }
     (out_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+    (out_dir / "README.md").write_text(
+        "# ESpeech-TTS-1 RL-V2 (MLX)\n\n"
+        "Local F5-TTS v1 bundle converted from an ESpeech checkpoint.\n\n"
+        f"Source checkpoint: `{args.checkpoint.name}`. "
+        "Model and vocoder metadata are recorded in `config.json`.\n\n"
+        "Synthesis requires reference audio and its exact transcript. "
+        "Conversion does not validate voice quality or acoustic stress control.\n",
+        encoding="utf-8",
+    )
     print(f"bundle at {out_dir}: sha256(model)={sha256(out_dir / 'model.safetensors')[:16]}…")
     return 0
 

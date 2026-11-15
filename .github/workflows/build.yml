@@ -119,6 +119,8 @@ jobs:
 
       - name: Test checkpoint conversion boundaries
         working-directory: speech-studio
+        env:
+          SPEECH_SWIFT_DIR: ${{ github.workspace }}/speech-swift
         run: |
           python -m pip install -r scripts/requirements-conversion.txt
           python -m unittest discover -s scripts/tests -p 'test_*.py'

@@ -1,4 +1,5 @@
 import { zhTW } from "./zhTW";
+import { compareEn, compareRu } from "./compare";
 
 export const LOCALES = ["en", "ru", "zh-TW"] as const;
 export type AppLocale = (typeof LOCALES)[number];
@@ -56,6 +57,7 @@ function ruPlural(count: number, one: string, few: string, many: string): string
 }
 
 const en = {
+  compare: compareEn,
   locale: {
     english: "English",
     russian: "Русский",
@@ -118,6 +120,7 @@ const en = {
     clipsFailed: (failed: number, total: number) =>
       `${failed}/${total} clips failed — see the Activity log`,
     exportMixTitle: "Export audio mix",
+    exportFormatTitle: "Audio export format",
     wavAudio: "WAV audio",
     exportFailed: (error: string) => `export failed: ${error}`,
     switchLoadingEngine: (engine: string) =>
@@ -355,6 +358,7 @@ const en = {
 } satisfies Record<string, unknown>;
 
 const ru: typeof en = {
+  compare: compareRu,
   locale: {
     english: "English",
     russian: "Русский",
@@ -417,6 +421,7 @@ const ru: typeof en = {
     clipsFailed: (failed, total) =>
       `Не удалось синтезировать ${failed} из ${total}; подробности в панели «Активность»`,
     exportMixTitle: "Экспорт звукового микса",
+    exportFormatTitle: "Формат экспорта аудио",
     wavAudio: "Аудио WAV",
     exportFailed: (error) => `Не удалось экспортировать: ${error}`,
     switchLoadingEngine: (engine) => `Переключить движок и прервать загрузку ${engine}`,

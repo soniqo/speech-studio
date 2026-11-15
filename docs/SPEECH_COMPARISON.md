@@ -1,34 +1,16 @@
-# Speech Studio: three cloning engines, comparison page, and the Speech Runtime adapter
+# Voice comparison and ESpeech bundles
 
-This fork turns Speech Studio's single-engine studio into a local voice-cloning
-workbench with a side-by-side comparison page and an optional Speech Runtime
-client mode. It was built on top of `speech-studio-voice-compare.patch`, which
-supplied the page skeleton, the loopback runtime adapter, and a two-engine
-comparison; everything below replaces or extends that skeleton.
+The Compare page uses one reference recording, transcript and target text to
+compare Qwen3-TTS, VoxCPM2 and ESpeech. Results, selected weights, language,
+regeneration, WAV saves, synthesis timing and memory measurements are kept
+separately for each engine.
 
-## What is in the fork
+The interface supports English, Russian and Traditional Chinese. Switching the
+interface language changes labels and validation messages; it preserves the
+reference transcript, target text and selected synthesis language. Voice names
+and backend diagnostic messages are displayed as supplied.
 
-- **Compare page** (`src/components/VoiceCompare.tsx`, left rail → `Compare`):
-  one reference sample and one text drive three cloning engines with fully
-  independent results. Per engine: precision variant, language, seed,
-  Regenerate, WAV export, cold/warm timing, RTF and peak unified memory. The
-  reference sample is imported from disk or recorded from the microphone, and
-  the verified reference transcript is editable before the take.
-- **Voice profiles** (`voiceStore` in the frontend + `VoiceStore` in Speech
-  Runtime): saved as `{name, language, referenceText, audio}` and reusable
-  across engines and sessions.
-- **Model management**: every engine reports artifact path, on-disk bytes,
-  existence, resident state and the sidecar's memory snapshot; bundles can be
-  downloaded (sidecar's Hugging Face fetch), imported from a local directory
-  (`import_tts_bundle`) and deleted from disk (`delete_tts_model`).
-- **Speech Runtime client mode** (toggle in Compare): reference transcription
-  through Parakeet Ultra and synthesis through the daemon's `/v1/tts/*` routes,
-  so the app and other clients share one resident model instead of loading a
-  second copy.
-- **Standalone mode** (default): everything runs in-process through the bundled
-  Swift/MLX sidecar, with no runtime installed.
-
-## Engines
+## Engines and local operation
 
 | Registry key | Weights | Runtime | Sample rate | Variants |
 | --- | --- | --- | --- | --- |
@@ -36,91 +18,100 @@ comparison; everything below replaces or extends that skeleton.
 | `voxcpm2` | `aufklarer/VoxCPM2-MLX-*` | MLX, reference clone | 48 kHz | bf16, int8 |
 | `espeech` | `local/ESpeech-TTS-1-RL-V2-MLX-fp16` | MLX F5-TTS v1 | 24 kHz | fp16 |
 
-Qwen3 and VoxCPM2 reuse the existing engines, holders, variant selection and
-download plumbing. ESpeech is new.
+This comparison workflow targets macOS on Apple Silicon. Qwen3 and ESpeech
+are macOS-only in Studio; Windows/Linux retain the standard LiteRT engines.
+Standalone mode uses the bundled sidecar without requiring a separate daemon.
 
-### ESpeech-TTS-1 RL-V2
+The project voice library accepts imported or recorded references and an
+editable transcript. Model controls report cached paths, file sizes and load
+state. Qwen3/VoxCPM2 weights can be downloaded; ESpeech requires a converted
+local bundle.
 
-ESpeech is an F5-TTS v1 Russian fine-tune published as a PyTorch `.pt` plus
-`vocab.txt`. `scripts/convert_espeech_checkpoint.py` maps the checkpoint into an
-MLX bundle that `speech-swift`'s `F5TTS` module loads:
+## Preparing an ESpeech bundle
 
-- DiT config is copied from the ESpeech checkpoint (`dim=1024, depth=22,
-  heads=16, ff_mult=2, text_dim=512, conv_layers=4, text_mask_padding=false`);
-- weights are renamed to the Swift module's layout and stored as
-  `model.safetensors`; the vocoder is `vocos.safetensors`;
-- `vocab.txt` is copied verbatim and parsed by the F5 tokenizer.
+ESpeech-TTS-1 RL-V2 is an F5-TTS v1 Russian fine-tune. Studio loads converted
+weights through the existing F5-TTS runtime and its local-bundle API; it does
+not add a separate ESpeech runtime or Russian text-normalization module.
 
-The bundle lives at
-`~/Library/Caches/qwen3-speech/models/local/ESpeech-TTS-1-RL-V2-MLX-fp16`
-(overridable with `SONIQO_ESPEECH_BUNDLE_DIR`), which is also what
-`import_tts_bundle` writes to. The sidecar exposes it as
-`synthesize_espeech`; the registry entry lists `languages: ["ru"]` and was
-registered after the real-audio checks below passed.
+Install the development dependency, then convert a trusted checkpoint using a
+compatible F5-TTS v1 MLX reference bundle:
 
-Two library bugs had to be fixed before Russian synthesis worked at all:
+```sh
+python3 -m pip install -r scripts/requirements-conversion.txt
+python3 scripts/convert_espeech_checkpoint.py \
+    --checkpoint /path/to/espeech_tts_rlv2.pt \
+    --f5-bundle /path/to/F5TTS-v1-Base-MLX-fp16 \
+    --out /path/to/ESpeech-TTS-1-RL-V2-MLX-fp16
+```
 
-1. **CRLF vocab parsing.** The tokenizer split the vocab into `Character`s with
-   a CRLF-sensitive rule, so the published CRLF vocabularies produced phantom
-   entries and Cyrillic text tokenised into unknown tokens — output was noise.
-   It now splits on newlines, strips the CR, and tokenises by Unicode scalar.
-2. **Russian input.** Studio preserves RUAccent stress markup (`молок+о`)
-   for ESpeech and strips `+` for Qwen3/VoxCPM2. Russian-specific number and
-   symbol expansion depends on the F5 runtime used with the bundle; Studio
-   does not supply a separate `F5TTSRussian` frontend. Validate that behavior
-   with the actual runtime and weights before relying on automatic expansion.
+The converter writes `model.safetensors` and ESpeech metadata in `config.json`.
+It copies the vocoder weights, `vocos_config.yaml`, vocabulary and architecture
+settings from the reference F5 bundle. The reference vocabulary and architecture
+must match the fine-tune. It generates `README.md`, which the consumed bundle
+loader requires. No PyTorch or safetensors Python package is needed, and no
+Python runs during synthesis.
 
-## Speech Runtime adapter
+Use **Import bundle** on the Compare page to copy the converted directory into
+the model cache. Import checks all six required files before replacing an
+existing bundle: `config.json`, `README.md`, `model.safetensors`,
+`vocos.safetensors`, `vocos_config.yaml` and `vocab.txt`.
 
-The daemon keeps its existing ASR surface and gains TTS. One `TtsHost` owns a
-single `soniqo-tts-sidecar` child and one resident engine; every client of the
-runtime shares it.
+The default cache is
+`~/Library/Caches/qwen3-speech/models/local/ESpeech-TTS-1-RL-V2-MLX-fp16`;
+`SONIQO_ESPEECH_BUNDLE_DIR` overrides it. The sidecar command is
+`synthesize_espeech`.
 
-| Route | Purpose |
+Studio preserves RUAccent `+` markup for ESpeech and strips it for Qwen3 and
+VoxCPM2 in comparisons. This preserves input tokens; it does not establish
+correct acoustic stress placement or automatic Russian number expansion.
+
+## Optional shared Speech Runtime
+
+Configure a local daemon with the TTS API before enabling shared mode. Studio
+releases its locally loaded model and routes initialization and synthesis to
+the daemon. Unsupported engines report an error instead of loading a local
+fallback. Reference normalization currently uses macOS `afconvert`.
+
+The default endpoint is `http://127.0.0.1:8477`, authenticated with the local
+daemon token. Only loopback endpoints are allowed. `SPEECH_RUNTIME_URL` and
+`SPEECH_RUNTIME_TOKEN_FILE` override the endpoint and token for tests.
+
+| Route | Client operation |
 | --- | --- |
-| `GET /v1/tts/models` | catalog: engine, model id, variants, artifact path/bytes/exists, loaded model and variant, memory, sidecar pid/restarts |
-| `POST /v1/tts/models/load` | `{model, variant?}` → load or reuse; a different explicit variant re-inits |
-| `POST /v1/tts/models/unload` | unload the resident engine |
-| `GET/POST/DELETE /v1/tts/voices` | list, register (`name`, `referenceText`, `audioBase64`), delete (`?id=`) |
-| `POST /v1/tts/synthesize` | `{model, text, language?, seed?, variant?, voiceId? | referenceAudioPath? | referenceAudioBase64?, referenceText?, requestId?}` → `{audioBase64, sampleRate, durationSec, model, engine, wallMs}` |
-| `POST /v1/tts/cancel` | `{requestId}` → `{cancelled, pending}`; the pending synth request fails with `request cancelled` |
+| `GET /health` | Connection status |
+| `POST /v1/audio/transcriptions?model=parakeet-ultra&priority=batch` | Reference transcription |
+| `GET /v1/tts/models` | Available models and load state |
+| `POST /v1/tts/models/load` | Load or reuse a model and optional variant |
+| `POST /v1/tts/models/unload` | Unload a model |
+| `GET/POST/DELETE /v1/tts/voices` | Manage shared voice profiles |
+| `POST /v1/tts/synthesize` | Generate WAV audio |
+| `POST /v1/tts/cancel` | Cancel a request by ID |
 
-Behaviour worth knowing:
+The Compare toggle selects the configured backend. The separate
+`speech_runtime_write_tts_config` and `speech_runtime_restart` commands are
+available for setup integrations; toggling the backend does not configure or
+restart the daemon.
 
-- **Shared residency.** A synth call with no `variant` reuses whatever is
-  resident; an explicit different variant reloads. The Studio client never
-  spawns its own sidecar while runtime mode is on.
-- **Cancellation** matches `requestId`; cancelling a pending request makes the
-  client call return an error, and the model stays loaded.
-- **Idle unload** reuses `idleUnloadSeconds`: the daemon's 30 s monitor unloads
-  the TTS engine, but never while a request is in flight.
-- **Memory** comes from the sidecar's `[sidecar] mem …` stderr snapshots
-  (`rssMb`, `footprintMb`, `peakMb`) and is exposed in `/health` and the catalog.
-- **Temp files**: a WAV written from `referenceAudioBase64` is deleted in a
-  `defer`; caller-supplied paths and voice-profile files are never deleted.
-- Configure the daemon's TTS API before enabling shared mode. The
-  `speech_runtime_write_tts_config` and `speech_runtime_restart` commands are
-  available for setup integrations. The config writer merges the `tts` block
-  while preserving other daemon settings and points `binary` at Studio's
-  sidecar. The Compare toggle selects the configured backend and releases
-  Studio's local model; daemon configuration and restart remain setup actions.
-- Reference audio is normalised to 16 kHz mono PCM WAV with `/usr/bin/afconvert`
-  before transcription or synthesis; only loopback traffic is used.
+## Current automated verification
 
-## Verification
+See [REGRESSION_TESTS.md](REGRESSION_TESTS.md) for the commands and test scope.
+Coverage includes browser playback, project migration, locale switching,
+export payloads, native IPC, an isolated loopback daemon, safe checkpoint
+reading, converter output and the actual consumed F5 bundle loader's file and
+configuration contract. These fixtures do not load model weights or evaluate
+voice quality.
+
+Real ESpeech synthesis, speaker similarity, acoustic stress control and
+model-backed Windows/Linux inference still require the actual model bundles
+and hardware. The measurements below were supplied with the original
+contribution; they were not reproduced during the current regression review,
+and their source revision was not recorded. They are historical observations,
+not current-head validation or general quality guarantees.
+
+## Contributor-reported benchmarks (historical)
 
 Machine: Apple M4, 16 GB unified memory, macOS 27.2. No M5 Pro was available, so
 the 48 GB checks are **not** run.
-
-### Builds and tests
-
-| Check | Result |
-| --- | --- |
-| `speech-swift` F5-TTS tests (`swift test --filter F5TTSTests`) | 22 passed |
-| `Speech-Runtime` daemon (`swift test`) | 65 passed (11 new TTS tests, fake-sidecar driven) |
-| `speech-studio` Rust (`cargo test --lib`) | 48 passed |
-| `speech-studio` frontend (`tsc --noEmit`, `vitest run`) | `tsc` clean; 92 tests in 15 files pass, including 6 for the Compare page |
-| Swift sidecar (`swift build`) | debug build from this tree; the staged `src-tauri/binaries/` binary is the one the checks below ran against |
 
 ### Three-engine A/B (real synthesis, one reference sample)
 
@@ -141,13 +132,13 @@ ASR round-trip (Parakeet Ultra on the generated WAVs):
 | stress markup (`+` before the stressed vowel) | WER 0.83 — reads the `+` as the word «плюс» | WER 0.50 — same artifact | WER 0.00 — markup consumed, no artifact |
 | mixed RU/EN (`Kubernetes, Docker и CI/CD`) | frame perfect, terms rendered | frame perfect, terms rendered | frame perfect, «Docker» heard as «доктор» |
 
-Interpretation:
+Contributor interpretation of this sample:
 
 - **Stress markup is ESpeech-only.** Qwen3 and VoxCPM2 were never trained on
   RUAccent markup and speak the `+` out loud. The Compare page therefore strips
   stress marks for those two engines and passes them to ESpeech unchanged.
-- **ESpeech is the most accurate Russian reader** on plain and stress-marked
-  text, at the cost of being the slowest (RTF 1.8–2.8).
+- **ESpeech had the lowest reported word error** on these plain and stress-marked
+  Russian samples, at the cost of being the slowest (RTF 1.8–2.8).
 - **Qwen3 is the fastest** (RTF < 1) and second-most accurate on plain text.
 - **VoxCPM2 int8 is the heaviest** (6.3 GB peak) and slowest per second of
   audio; its quality is close to Qwen3 on plain text.
@@ -156,7 +147,7 @@ Interpretation:
   The transcripts above are the actual evidence; the frame is intact in all
   three.
 
-### Runtime adapter (real sidecar, private daemon on port 8499)
+### Reported runtime adapter smoke checks
 
 | Step | Result |
 | --- | --- |
@@ -170,49 +161,3 @@ Interpretation:
 | Studio's Rust client (`speech_runtime_tts_synthesize`) | reference path normalised by `afconvert`, 3.58 s WAV written to the Studio clip cache |
 | Idle unload (`--idle-unload 30`) | resident ESpeech model unloaded on the next monitor tick, `loaded: false` |
 | Studio's exact sidecar payloads (`init_model` + synth, rebuilt sidecar) | espeech 4.54 s WAV, qwen3 2.56 s WAV, voxcpm2 2.58 s WAV, all `ok: true` |
-
-## Limitations (verified vs. unverified)
-
-- **Unverified:** the 48 GB / M5 Pro scenario, and any Windows/Linux path (the
-  fork's Compare page and ESpeech are macOS-only; the LiteRT engines are
-  unchanged).
-- **Unverified:** a click-through of the Compare page in the running window.
-  The app boots, the WebView loads the page, the shell spawns the sidecar and
-  the model calls it makes are proven (table above and the 6 DOM tests), but
-  the machine's screen was locked during verification, so no screenshot or
-  pointer-driven run of the page exists.
-- **Unverified:** acoustic stress control. ESpeech consumes the `+` token and
-  produces the correct words, but no listener study or F0 analysis was run, so
-  "the stress lands on the marked vowel" is not proven.
-- **No speaker-similarity metric.** There is no speaker-verification model in
-  the stack, so voice similarity was judged only by ear and by ASR word
-  accuracy; no embedding cosine score is reported.
-- **Mixed RU/EN** is scored through a Russian ASR that transliterates Latin
-  terms; numbers in that row are indicative only.
-- **Cold/warm** means first/second synthesis after `init_model`; model loading
-  and first-run downloads are timed separately and excluded from RTF.
-- **VoxCPM2 int8** load from a cold disk took ~274 s in an early run (download
-  included); a cached reload is much faster but was not measured per engine.
-- **Qwen3/VoxCPM2 stress markup** is stripped by the UI, not by the engines.
-- **Runtime TTS** requires a daemon build that includes `/v1/tts/*`; an older
-  daemon returns 404 and the page says so. The bundled runtime in this
-  workspace was rebuilt from this fork's sources.
-- **Idle unload** is covered by unit tests with a fake sidecar and was observed
-  live: with `--idle-unload 30` the resident ESpeech model dropped back to
-  `loaded: false` within one monitor tick. The 15-minute production default was
-  not waited out.
-- **Memory figures** are the sidecar's own MLX/phys-footprint snapshots; they
-  exclude the Rust shell and the WebView.
-
-## Rebuilding the ESpeech bundle
-
-```bash
-python3 scripts/convert_espeech_checkpoint.py \
-    --checkpoint /path/to/espeech_tts_rlv2.pt \
-    --vocab /path/to/vocab.txt \
-    --out ~/Library/Caches/qwen3-speech/models/local/ESpeech-TTS-1-RL-V2-MLX-fp16
-```
-
-The script only reads the checkpoint's tensors and config; it needs Python,
-`numpy` and `safetensors` once, at development time. Nothing in the shipped app
-depends on Python.

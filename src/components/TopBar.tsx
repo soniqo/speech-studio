@@ -460,7 +460,7 @@ export function TopBar() {
           {dirty || saving ? t.topBar.save : t.topBar.saved}
         </Button>
         <Select value={exportFormat} onValueChange={setExportFormat}>
-          <SelectTrigger className="h-7 w-[83px] shrink-0 text-xs" title="Audio export format">
+          <SelectTrigger className="h-7 w-[83px] shrink-0 text-xs" title={t.topBar.exportFormatTitle} aria-label={t.topBar.exportFormatTitle}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

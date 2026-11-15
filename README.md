@@ -20,8 +20,8 @@ A blind A/B/C — a real voice, the same voice cloned locally by Speech Studio o
 
 1. **Drop a short reference clip** of a speaker → register a cloned voice. Repeat for as many speakers as you need.
 2. **Write a script line per clip** and pick which speaker says it. Wrap the line in an emotion marker — `(whispering) Just stay quiet for a moment, please.` — and the synth will follow that direction.
-3. **Hit Synthesize** to render every line in the assigned cloned voice. The synth pipeline auto-grades each take with on-device ASR and retries with a different seed if the line came out wrong.
-4. **Play the script** to hear the whole scene back-to-back. Export a single WAV mix (export wiring is in progress).
+3. **Hit Synthesize** to render every line in the assigned cloned voice. Each clip is synthesized once; use **Regenerate** for a fresh take.
+4. **Play the script** to hear the whole scene back-to-back. Export the audio mix as WAV, or use FFmpeg for the other supported audio formats.
 
 The clone is local. The synth is local. No audio leaves your machine.
 
@@ -47,7 +47,7 @@ Switch engine from the toolbar dropdown. The list is filtered to engines support
 | **Fish Audio S2 Pro** | macOS only | MLX | ✅⁴ | bracket tags | 80+ |
 | **ESpeech-TTS-1 RL-V2** | macOS only | MLX / F5 | ✅ | — | Russian |
 
-CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice, and Fish Audio S2 Pro remain **macOS-only** in Studio. VoxCPM2 and Indic-Mio are also available on Windows/Linux through speech-core's LiteRT backend.
+CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice, Fish Audio S2 Pro, and ESpeech remain **macOS-only** in Studio. VoxCPM2 and Indic-Mio are also available on Windows/Linux through speech-core's LiteRT backend.
 
 ¹ Chatterbox has no free-text style input — emotion markers map to an expressiveness/intensity level (more vs. less expressive), not a specific emotion.
 
@@ -60,7 +60,9 @@ CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice, and Fish Audio S2 Pro remain **ma
 ## Comparison, playback and export
 
 **Compare voices** runs Qwen3-TTS, VoxCPM2 and ESpeech against one reference
-sample and text. ESpeech needs an imported local MLX bundle; see
+sample and text. The interface supports English, Russian and Traditional
+Chinese, including the Compare page and export controls. ESpeech needs an
+imported local MLX bundle; see
 [SPEECH_COMPARISON.md](docs/SPEECH_COMPARISON.md). Shared Speech Runtime mode
 requires a daemon with the TTS API configured and releases Studio's local
 model before loading a supported engine through the daemon.
