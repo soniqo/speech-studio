@@ -1,4 +1,6 @@
 mod speech_runtime;
+#[cfg(all(test, feature = "integration-tests"))]
+mod ipc_integration;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -385,7 +387,7 @@ pub struct SidecarManager {
     // to the spawned sidecar's library search path so it can load libLiteRt in
     // an installed bundle, where the runtime lives apart from the binary.
     resource_dir: Option<PathBuf>,
-    app: tauri::AppHandle,
+    app: Option<tauri::AppHandle>,
 }
 
 impl SidecarManager {
@@ -394,7 +396,7 @@ impl SidecarManager {
             inner: Mutex::new(None),
             child_pid: AtomicU32::new(0),
             resource_dir,
-            app,
+            app: Some(app),
         }
     }
 }
@@ -475,6 +477,16 @@ impl Drop for SidecarManager {
 }
 
 impl SidecarManager {
+    fn stop(&self) -> Result<(), String> {
+        let mut guard = self.inner.lock().map_err(|e| e.to_string())?;
+        if let Some(mut process) = guard.take() {
+            let _ = process.child.kill();
+            let _ = process.child.wait();
+        }
+        self.child_pid.store(0, Ordering::SeqCst);
+        Ok(())
+    }
+
     fn interrupt(&self) -> Result<(), String> {
         let pid = self.child_pid.swap(0, Ordering::SeqCst);
         if pid == 0 {
@@ -570,7 +582,8 @@ impl SidecarManager {
                 let _ = stale.child.kill();
                 let _ = stale.child.wait();
             }
-            let proc = Self::spawn(self.resource_dir.as_deref(), &self.app)?;
+            let app = self.app.as_ref().ok_or("sidecar spawning requires an attached application")?;
+            let proc = Self::spawn(self.resource_dir.as_deref(), app)?;
             self.child_pid.store(proc.child.id(), Ordering::SeqCst);
             *guard = Some(proc);
         }
@@ -1184,7 +1197,8 @@ struct InitModelArgs {
 }
 
 #[tauri::command]
-async fn init_model(
+async fn init_model<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     manager: State<'_, SidecarManager>,
     settings: State<'_, ModelSettingsState>,
     args: InitModelArgs,
@@ -1194,6 +1208,11 @@ async fn init_model(
         let settings = settings.0.lock().map_err(|e| e.to_string())?;
         resolve_tts_engine_info(args.engine, &settings)
     };
+    if load_runtime_mode(&app).use_shared_runtime {
+        manager.stop()?;
+        load_shared_model(args.engine, info.selected_variant).await?;
+        return Ok(());
+    }
     eprintln!(
         "[speech-studio] init_model {} -> {} (variant: {})",
         args.engine.display_name(),
@@ -2036,8 +2055,8 @@ fn equalize_chunk_loudness(rendered: &mut [Vec<f32>], rate: u32) {
 }
 
 #[tauri::command]
-async fn synthesize_clip(
-    app: tauri::AppHandle,
+async fn synthesize_clip<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     manager: State<'_, SidecarManager>,
     settings: State<'_, ModelSettingsState>,
     args: SynthesizeArgs,
@@ -2046,10 +2065,11 @@ async fn synthesize_clip(
     ensure_engine_supported(args.engine)?;
     // Resolve the artifact once per clip so every chunk renders with the same
     // weights even if the variant picker changes mid-render.
-    let model_id = {
+    let model_info = {
         let settings = settings.0.lock().map_err(|e| e.to_string())?;
-        resolve_tts_engine_info(args.engine, &settings).model_id
+        resolve_tts_engine_info(args.engine, &settings)
     };
+    let model_id = model_info.model_id;
     if args.text.trim().is_empty() {
         return Err("clip text is empty".into());
     }
@@ -2068,7 +2088,9 @@ async fn synthesize_clip(
 
     // Shared Runtime mode: the daemon owns the model process, so this app must
     // not spin up its own sidecar (a second copy of the same weights).
-    if load_runtime_mode(&app).use_shared_runtime && !runtime_engine_name(args.engine).is_empty() {
+    if load_runtime_mode(&app).use_shared_runtime {
+        manager.stop()?;
+        load_shared_model(args.engine, model_info.selected_variant).await?;
         let request_id = uuid::Uuid::new_v4().simple().to_string();
         let runtime = speech_runtime::speech_runtime_tts_synthesize(
             speech_runtime::RuntimeSynthesizeArgs {
@@ -2608,6 +2630,11 @@ struct TtsArtifactInfo {
     loaded: bool,
 }
 
+#[derive(Deserialize)]
+struct TtsEngineArgs {
+    engine: TtsEngine,
+}
+
 async fn fetch_tts_artifact(
     manager: &SidecarManager,
     settings: &ModelSettingsState,
@@ -2656,9 +2683,9 @@ async fn fetch_tts_artifact(
 async fn tts_model_artifact(
     manager: State<'_, SidecarManager>,
     settings: State<'_, ModelSettingsState>,
-    engine: TtsEngine,
+    args: TtsEngineArgs,
 ) -> Result<TtsArtifactInfo, String> {
-    fetch_tts_artifact(&manager, &settings, engine).await
+    fetch_tts_artifact(&manager, &settings, args.engine).await
 }
 
 /// Remove the cached weights for one engine. Paths are validated to stay under
@@ -2668,8 +2695,9 @@ async fn tts_model_artifact(
 async fn delete_tts_model(
     manager: State<'_, SidecarManager>,
     settings: State<'_, ModelSettingsState>,
-    engine: TtsEngine,
+    args: TtsEngineArgs,
 ) -> Result<TtsArtifactInfo, String> {
+    let engine = args.engine;
     let info = fetch_tts_artifact(&manager, &settings, engine).await?;
     let _ = manager.request(&serde_json::json!({
         "id": format!("unload-{}-{}", engine.sidecar_command(), uuid::Uuid::new_v4().simple()),
@@ -2697,12 +2725,13 @@ async fn delete_tts_model(
 /// Import a locally converted TTS bundle (ESpeech is not published on the
 /// Hub, so its weights arrive as a directory) into the Studio model cache.
 #[tauri::command]
-async fn import_tts_bundle(
-    app: tauri::AppHandle,
+async fn import_tts_bundle<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     manager: State<'_, SidecarManager>,
     settings: State<'_, ModelSettingsState>,
-    engine: TtsEngine,
+    args: TtsEngineArgs,
 ) -> Result<TtsArtifactInfo, String> {
+    let engine = args.engine;
     if engine != TtsEngine::ESpeech {
         return Err("Only local ESpeech bundles can be imported".into());
     }
@@ -2804,7 +2833,7 @@ struct RuntimeModeSettings {
 
 const RUNTIME_MODE_FILE: &str = "runtime-settings.json";
 
-fn runtime_mode_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn runtime_mode_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -2812,7 +2841,7 @@ fn runtime_mode_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join(RUNTIME_MODE_FILE))
 }
 
-fn load_runtime_mode(app: &tauri::AppHandle) -> RuntimeModeSettings {
+fn load_runtime_mode<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> RuntimeModeSettings {
     let Ok(path) = runtime_mode_path(app) else {
         return RuntimeModeSettings::default();
     };
@@ -2823,12 +2852,25 @@ fn load_runtime_mode(app: &tauri::AppHandle) -> RuntimeModeSettings {
 }
 
 #[tauri::command]
-fn runtime_mode_settings(app: tauri::AppHandle) -> RuntimeModeSettings {
+fn runtime_mode_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> RuntimeModeSettings {
     load_runtime_mode(&app)
 }
 
+#[derive(Deserialize)]
+struct RuntimeModeArgs {
+    settings: RuntimeModeSettings,
+}
+
 #[tauri::command]
-fn set_runtime_mode(app: tauri::AppHandle, settings: RuntimeModeSettings) -> Result<RuntimeModeSettings, String> {
+async fn set_runtime_mode<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    manager: State<'_, SidecarManager>,
+    args: RuntimeModeArgs,
+) -> Result<RuntimeModeSettings, String> {
+    let settings = args.settings;
+    if settings.use_shared_runtime {
+        manager.stop()?;
+    }
     let path = runtime_mode_path(&app)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -2836,6 +2878,18 @@ fn set_runtime_mode(app: tauri::AppHandle, settings: RuntimeModeSettings) -> Res
     let raw = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     std::fs::write(&path, raw).map_err(|e| format!("Could not save runtime settings: {e}"))?;
     Ok(settings)
+}
+
+async fn load_shared_model(engine: TtsEngine, variant: Option<String>) -> Result<(), String> {
+    let model = runtime_engine_name(engine);
+    if model.is_empty() {
+        return Err(format!("{} is not available through Shared Speech Runtime. Choose Qwen3, VoxCPM2 or ESpeech, or disable shared mode.", engine.display_name()));
+    }
+    speech_runtime::speech_runtime_tts_load(speech_runtime::RuntimeModelArgs {
+        model: model.to_string(),
+        variant,
+    }).await?;
+    Ok(())
 }
 
 fn runtime_engine_name(engine: TtsEngine) -> &'static str {

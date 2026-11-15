@@ -8,8 +8,9 @@ fixes.
   the canvas is no longer a fixed 30 s backdrop either: project length is
   derived from the clips on load and after every structural edit, so a 10 s
   recording draws a 10 s track instead of 10 s of sound on a 30 s track.
-  Loading an older project recomputes its length from its clips, which drops
-  the stale 30 s canvas. An explicit length typed into the Inspector is kept
+  Older projects retain their saved canvas length: the old format cannot
+  distinguish a default 30 s canvas from a length the user chose. New projects
+  follow their clips and decoded imported-audio duration. An explicit length typed into the Inspector is kept
   in `canvasSec` and extends the canvas; clips running past it still expand it.
   A successful long render expands its clip and project duration automatically.
   The export mixer always includes complete decoded audio, even if older saved
@@ -39,3 +40,6 @@ synthesized clip, Mute/Solo changes while playing, a 60+ s export, WAV/OGG/MP3
 roundtrips, mixed Qwen3 (24 kHz) and VoxCPM2 (48 kHz) clips, and reopened
 projects with saved Mute/Solo state. Actual Swift/MLX inference needs Apple
 Silicon and installed model weights; it is not tested by this patch alone.
+
+The automated browser, IPC, migration and checkpoint regression checks are
+documented in [REGRESSION_TESTS.md](REGRESSION_TESTS.md).

@@ -150,7 +150,7 @@ export function ProjectsMenu() {
     const json = await loadProject(id);
     const loaded = JSON.parse(json) as Project;
     setProject(loaded);
-    markSaved(JSON.stringify(loaded));
+    markSaved(JSON.stringify(useProjectStore.getState().project));
   }
 
   async function actionDemo() {

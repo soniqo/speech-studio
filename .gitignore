@@ -34,11 +34,14 @@ swift-sidecar/Package.resolved
 .cache/
 .turbo/
 .parcel-cache/
+__pycache__/
 *.tmp
 
 # Test coverage
 coverage/
 *.lcov
+test-results/
+playwright-report/
 
 # Local env / secrets
 .env

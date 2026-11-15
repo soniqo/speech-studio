@@ -287,8 +287,8 @@ export function TopBar() {
   }
 
   return (
-    <header className="flex h-11 items-center gap-3 overflow-hidden border-b border-border bg-card/60 px-3 backdrop-blur supports-[backdrop-filter]:bg-card/40">
-      <div className="flex min-w-0 shrink items-center gap-2.5">
+    <header className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card/60 px-3 py-2 backdrop-blur supports-[backdrop-filter]:bg-card/40">
+      <div className="flex min-w-0 flex-1 items-center gap-2.5">
         <span className="flex shrink-0 items-center gap-2 text-sm">
           <img
             src="/soniqo.png"
@@ -305,8 +305,18 @@ export function TopBar() {
           onChange={(e) => renameProject(e.target.value)}
           spellCheck={false}
         />
+        <Select value={locale} onValueChange={(value) => useProjectStore.getState().setLocale(value as AppLocale)}>
+          <SelectTrigger className="h-7 w-[116px] shrink-0 text-xs" title={t.locale.selectorTitle} aria-label={t.locale.selectorTitle}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="en">{t.locale.english}</SelectItem>
+            <SelectItem value="ru">{t.locale.russian}</SelectItem>
+            <SelectItem value="zh-TW">{t.locale.traditionalChinese}</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
-      <div className="ml-auto flex min-w-0 items-center gap-2">
+      <div className="ml-auto flex w-full min-w-0 flex-wrap items-center justify-end gap-2 2xl:w-auto">
         <UpdateChip />
         {model.engines.length > 1 && (
           <Select
@@ -418,7 +428,7 @@ export function TopBar() {
           size="sm"
           onClick={onSynthesize}
           disabled={synthDisabled}
-          className="min-w-0 max-w-[240px] shrink"
+          className="min-w-0 max-w-[240px] shrink-0"
           title={
             modelStatus !== "ready"
               ? t.topBar.waitModel(engineName)

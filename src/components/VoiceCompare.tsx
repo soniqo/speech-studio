@@ -43,10 +43,11 @@ import {
   type TtsEngineInfo,
 } from "../ipc/commands";
 import { mediaFileSrc } from "../lib/mediaSrc";
+import { SHARED_TTS_ENGINES, supportsSharedRuntime } from "../lib/runtimeEngines";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
 
-const COMPARE_ENGINES = ["qwen3", "voxcpm2", "espeech"] as const;
+const COMPARE_ENGINES = SHARED_TTS_ENGINES;
 type CompareEngine = (typeof COMPARE_ENGINES)[number];
 
 const ENGINE_LABELS: Record<CompareEngine, string> = {
@@ -118,6 +119,7 @@ export function VoiceCompare() {
   const engines = useProjectStore((s) => s.model.engines);
   const memory = useActivityStore((s) => s.memory);
   const addVoice = useProjectStore((s) => s.addVoice);
+  const synthesisBusy = useProjectStore((s) => s.synthesisStatus === "running");
 
   const [voiceId, setVoiceId] = useState("");
   const activeVoiceId = voices.some((voice) => voice.id === voiceId)
@@ -159,7 +161,7 @@ export function VoiceCompare() {
   const [cancellable, setCancellable] = useState(false);
 
   const recorder = useDictationRecorder();
-  const busy = busyEngine !== null || recorder.busy;
+  const busy = busyEngine !== null || managingEngine !== null || recorder.busy || synthesisBusy;
 
   const engineInfo = useMemo(() => {
     const map = new Map<TtsEngineId, TtsEngineInfo>();
@@ -176,7 +178,8 @@ export function VoiceCompare() {
     void subscribeSidecarMemory((event) => {
       const run = runMemory.current;
       if (!run) return;
-      const candidate = Math.max(event.peakMb ?? 0, event.footprintMb ?? 0);
+      // MLX peakMb is process-lifetime data and includes earlier engines.
+      const candidate = event.footprintMb ?? event.rssMb ?? 0;
       if (candidate > run.peakMb) run.peakMb = candidate;
     }).then((unlisten) => {
       if (active) stop = unlisten;
@@ -251,12 +254,25 @@ export function VoiceCompare() {
   }
 
   async function toggleSharedRuntime(next: boolean) {
+    const state = useProjectStore.getState();
+    const engine = next && !supportsSharedRuntime(state.model.engine)
+      ? engines.find((candidate) => supportsSharedRuntime(candidate.id))?.id
+      : state.model.engine;
+    if (!engine) return;
+    setManagingEngine(engine as CompareEngine);
     setError(null);
     try {
       const saved = await setRuntimeMode({ useSharedRuntime: next });
       setSharedRuntime(saved.useSharedRuntime);
+      state.setTtsEngine(engine);
+      state.setModelStatus("loading");
+      await initModel(engine);
+      if (useProjectStore.getState().model.engine === engine) state.setModelStatus("ready");
     } catch (e) {
+      if (useProjectStore.getState().model.engine === engine) state.setModelStatus("error", String(e));
       setError(String(e));
+    } finally {
+      setManagingEngine(null);
     }
   }
 
@@ -364,11 +380,13 @@ export function VoiceCompare() {
     const started = performance.now();
     try {
       await initModel(engine);
+      if (useProjectStore.getState().model.engine === engine) store.setModelStatus("ready");
       return performance.now() - started;
-    } finally {
+    } catch (error) {
       if (useProjectStore.getState().model.engine === engine) {
-        useProjectStore.getState().setModelStatus("ready");
+        store.setModelStatus("error", String(error));
       }
+      throw error;
     }
   }
 
@@ -532,25 +550,33 @@ function textForEngine(engine: CompareEngine, text: string): string {
    * number — if the first run actually loaded the model — is kept.
    */
   async function regenerate(engine: CompareEngine) {
-    const hadCold = results[engine]?.firstSynthSec != null;
-    const previousCold = results[engine]?.firstSynthSec;
-    const previousLoad = results[engine]?.loadSec;
-    await runEngine(engine, true);
-    if (hadCold && previousCold != null) {
-      // The first run performed a real load; preserve its cold measurement
-      // while the rerun reports itself as warm.
-      setResults((current) => {
-        const result = current[engine];
-        if (!result?.audioPath) return current;
-        return {
-          ...current,
-          [engine]: {
-            ...result,
-            firstSynthSec: previousCold,
-            loadSec: previousLoad ?? result.loadSec,
-          },
-        };
-      });
+    if (busy) return;
+    const store = useProjectStore.getState();
+    store.setPlaying(false);
+    store.setSynthesisStatus("running");
+    try {
+      const hadCold = results[engine]?.firstSynthSec != null;
+      const previousCold = results[engine]?.firstSynthSec;
+      const previousLoad = results[engine]?.loadSec;
+      await runEngine(engine, true);
+      if (hadCold && previousCold != null) {
+        // The first run performed a real load; preserve its cold measurement
+        // while the rerun reports itself as warm.
+        setResults((current) => {
+          const result = current[engine];
+          if (!result?.audioPath) return current;
+          return {
+            ...current,
+            [engine]: {
+              ...result,
+              firstSynthSec: previousCold,
+              loadSec: previousLoad ?? result.loadSec,
+            },
+          };
+        });
+      }
+    } finally {
+      store.setSynthesisStatus("idle");
     }
   }
 

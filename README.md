@@ -45,6 +45,7 @@ Switch engine from the toolbar dropdown. The list is filtered to engines support
 | **OmniVoice** | macOS only | MLX | ✅ | restricted instruct² | 600+ |
 | **Indic-Mio** | macOS · Windows · Linux | MLX / LiteRT | ✅³ | suffix tags | Indic |
 | **Fish Audio S2 Pro** | macOS only | MLX | ✅⁴ | bracket tags | 80+ |
+| **ESpeech-TTS-1 RL-V2** | macOS only | MLX / F5 | ✅ | — | Russian |
 
 CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice, and Fish Audio S2 Pro remain **macOS-only** in Studio. VoxCPM2 and Indic-Mio are also available on Windows/Linux through speech-core's LiteRT backend.
 
@@ -55,6 +56,23 @@ CosyVoice 3, Qwen3-TTS, Chatterbox, OmniVoice, and Fish Audio S2 Pro remain **ma
 ³ Indic-Mio is exposed as an experimental Hindi/Indic emotion-marker engine. It uses suffix tags such as `<happy>` / `<angry>` and clones from reference audio through WavLM → MioCodec global speaker embeddings. It does not need a reference transcript. Windows/Linux use the `soniqo/Indic-Mio-LiteRT` bundle and output 24 kHz WAV clips.
 
 ⁴ Fish Audio S2 Pro uses bracket markers such as `[excited]`, `[angry]`, and `[whisper]`. It needs an accurate reference transcript for cloning, and the public weights are research/non-commercial unless separately licensed.
+
+## Comparison, playback and export
+
+**Compare voices** runs Qwen3-TTS, VoxCPM2 and ESpeech against one reference
+sample and text. ESpeech needs an imported local MLX bundle; see
+[SPEECH_COMPARISON.md](docs/SPEECH_COMPARISON.md). Shared Speech Runtime mode
+requires a daemon with the TTS API configured and releases Studio's local
+model before loading a supported engine through the daemon.
+
+Track Mute/Solo settings apply to playback and export. Selecting a track
+isolates its preview; **All tracks** restores the preview mix. Imported audio
+extends the timeline to its decoded duration. Existing project canvas lengths
+are preserved when reopening older files.
+
+WAV export is native. MP3, OGG, Opus, FLAC, M4A and AIFF require FFmpeg.
+See [playback/export details](docs/LONG_AUDIO_AND_TRACK_CONTROLS.md) and
+[regression test commands](docs/REGRESSION_TESTS.md).
 
 ## Emotion markers
 

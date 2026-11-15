@@ -64,10 +64,11 @@ Two library bugs had to be fixed before Russian synthesis worked at all:
    a CRLF-sensitive rule, so the published CRLF vocabularies produced phantom
    entries and Cyrillic text tokenised into unknown tokens — output was noise.
    It now splits on newlines, strips the CR, and tokenises by Unicode scalar.
-2. **No Russian frontend.** `F5TTSRussian` keeps RUAccent stress markup
-   (`молок+о`) verbatim — the fine-tune was trained on the literal `+` token and
-   the vocabulary has an entry for it — drops stray `+`, and spells out numbers
-   and `%`/`₽`/`€` for Cyrillic input.
+2. **Russian input.** Studio preserves RUAccent stress markup (`молок+о`)
+   for ESpeech and strips `+` for Qwen3/VoxCPM2. Russian-specific number and
+   symbol expansion depends on the F5 runtime used with the bundle; Studio
+   does not supply a separate `F5TTSRussian` frontend. Validate that behavior
+   with the actual runtime and weights before relying on automatic expansion.
 
 ## Speech Runtime adapter
 
@@ -97,11 +98,12 @@ Behaviour worth knowing:
   (`rssMb`, `footprintMb`, `peakMb`) and is exposed in `/health` and the catalog.
 - **Temp files**: a WAV written from `referenceAudioBase64` is deleted in a
   `defer`; caller-supplied paths and voice-profile files are never deleted.
-- Studio writes its `tts` block into `~/Library/Application Support/SpeechRuntime/app-config.json`
-  (preserving `port`, ASR `models`, `batchChunkMs`, `idleUnloadSeconds`, unknown
-  engines) and restarts the daemon through `launchctl kickstart -k
-  gui/<uid>/com.speechruntime.agent`. The block points `binary` at the exact
-  sidecar Studio itself runs.
+- Configure the daemon's TTS API before enabling shared mode. The
+  `speech_runtime_write_tts_config` and `speech_runtime_restart` commands are
+  available for setup integrations. The config writer merges the `tts` block
+  while preserving other daemon settings and points `binary` at Studio's
+  sidecar. The Compare toggle selects the configured backend and releases
+  Studio's local model; daemon configuration and restart remain setup actions.
 - Reference audio is normalised to 16 kHz mono PCM WAV with `/usr/bin/afconvert`
   before transcription or synthesis; only loopback traffic is used.
 

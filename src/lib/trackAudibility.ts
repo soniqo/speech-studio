@@ -15,7 +15,9 @@ export function audibleTrackIds(
 
   let selectedTrackId: string | undefined;
   if (mode === "preview") {
-    if (selection.kind === "track") selectedTrackId = selection.id;
+    if (selection.kind === "track" && audioTracks.some((track) => track.id === selection.id)) {
+      selectedTrackId = selection.id;
+    }
     if (selection.kind === "clip") {
       selectedTrackId = project.tracks.find((t) =>
         t.kind === "speaker" && t.clips.some((c) => c.id === selection.id),

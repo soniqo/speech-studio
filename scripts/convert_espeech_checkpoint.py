@@ -98,7 +98,7 @@ class _PickleUnpickler(pickle.Unpickler):
             return OrderedDict
         if module == "torch" and name == "Size":
             return tuple
-        return super().find_class(module, name)
+        raise pickle.UnpicklingError(f"Unsupported checkpoint global: {module}.{name}")
 
     def persistent_load(self, pid):
         assert pid[0] == "storage", pid[0]
@@ -162,19 +162,18 @@ def load_tensor(zf: zipfile.ZipFile, ref: TensorRef, archive_prefix: str) -> np.
     end = (ref.offset + ref.numel) * dtype.itemsize
     if end > len(raw):
         raise SystemExit(f"storage {entry} truncated: need {end}, have {len(raw)}")
-    flat = np.frombuffer(raw, dtype=dtype, count=ref.numel, offset=ref.offset * dtype.itemsize)
-    if all(s >= 0 for s in ref.stride):
-        return np.lib.stride_tricks.as_strided(
-            flat, shape=ref.size, strides=[s * dtype.itemsize for s in ref.stride]
+    try:
+        # ndarray validates every strided address against the backing buffer.
+        # as_strided would permit checkpoint metadata to read beyond it.
+        return np.ndarray(
+            shape=ref.size,
+            dtype=dtype,
+            buffer=raw,
+            offset=ref.offset * dtype.itemsize,
+            strides=tuple(stride * dtype.itemsize for stride in ref.stride),
         ).copy()
-    # Negative strides cannot be expressed with as_strided; flip manually.
-    arr = np.empty(ref.size, dtype=dtype)
-    linear = 0
-    for index in np.ndindex(ref.size):
-        coords = [i if s >= 0 else (size - 1 - i) for i, size, s in zip(index, ref.size, ref.stride)]
-        flat_index = sum(c * abs(s) for c, s in zip(coords, ref.stride))
-        arr[index] = flat[flat_index]
-    return arr
+    except (ValueError, TypeError, OverflowError) as error:
+        raise SystemExit(f"invalid tensor storage {entry}: {error}") from error
 
 
 def convert_tensor(key: str, array: np.ndarray) -> tuple[str, np.ndarray] | None:

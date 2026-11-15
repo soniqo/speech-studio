@@ -18,6 +18,7 @@ interface PlaybackItem {
   audioPath: string;
   version?: string;
   gainDb: number;
+  mediaTrack?: boolean;
 }
 
 function clipsWithAudio(project: Project): PlaybackItem[] {
@@ -26,7 +27,7 @@ function clipsWithAudio(project: Project): PlaybackItem[] {
     if (t.kind === "audio") {
       if (t.sourcePath) out.push({
         id: `track:${t.id}`, trackId: t.id, startSec: 0,
-        endSec: Infinity, audioPath: t.sourcePath, gainDb: t.gainDb,
+        endSec: Infinity, audioPath: t.sourcePath, gainDb: t.gainDb, mediaTrack: true,
       });
       continue;
     }
@@ -58,18 +59,29 @@ export function useAudioScheduler() {
       wanted.add(c.id);
       const expectedSrc = mediaFileSrc(c.audioPath, c.version);
       const existing = map.get(c.id);
+      const syncDuration = (audio: HTMLAudioElement) => {
+        if (c.mediaTrack) {
+          useProjectStore.getState().setTrackDuration(c.trackId, c.audioPath, audio.duration);
+        }
+      };
       if (!existing) {
         const a = new Audio(expectedSrc);
+        a.onloadedmetadata = () => syncDuration(a);
+        a.ondurationchange = () => syncDuration(a);
         a.preload = "auto";
         a.volume = Math.max(0, Math.min(1, Math.pow(10, c.gainDb / 20)));
         a.load();
         map.set(c.id, a);
       } else {
+        existing.onloadedmetadata = () => syncDuration(existing);
+        existing.ondurationchange = () => syncDuration(existing);
         existing.volume = Math.max(0, Math.min(1, Math.pow(10, c.gainDb / 20)));
         if (existing.src !== expectedSrc) {
           existing.pause();
           existing.src = expectedSrc;
           existing.load();
+        } else {
+          syncDuration(existing);
         }
       }
     }
@@ -77,10 +89,21 @@ export function useAudioScheduler() {
     for (const [id, a] of Array.from(map.entries())) {
       if (!wanted.has(id)) {
         a.pause();
+        a.onloadedmetadata = null;
+        a.ondurationchange = null;
         map.delete(id);
       }
     }
   }, [project]);
+
+  useEffect(() => () => {
+    for (const audio of audiosRef.current.values()) {
+      audio.pause();
+      audio.onloadedmetadata = null;
+      audio.ondurationchange = null;
+    }
+    audiosRef.current.clear();
+  }, []);
 
   // Drive play/pause/seek based on transport.playing + positionSec.
   useEffect(() => {

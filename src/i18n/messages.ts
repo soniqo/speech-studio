@@ -1,4 +1,6 @@
-export const LOCALES = ["en", "ru"] as const;
+import { zhTW } from "./zhTW";
+
+export const LOCALES = ["en", "ru", "zh-TW"] as const;
 export type AppLocale = (typeof LOCALES)[number];
 
 export const LOCALE_STORAGE_KEY = "speech-studio.locale";
@@ -14,11 +16,12 @@ function getLocaleStorage(): Storage | null {
 
 export function normalizeLocale(value: string | null | undefined): AppLocale | null {
   if (!value) return null;
-  const normalized = value.toLowerCase();
-  if (normalized === "ru" || normalized.startsWith("ru-") || normalized.startsWith("ru_")) {
+  const normalized = value.toLowerCase().replace(/_/g, "-");
+  if (/^zh-(?:hant|tw|hk|mo)(?:-|$)/.test(normalized)) return "zh-TW";
+  if (normalized === "ru" || normalized.startsWith("ru-")) {
     return "ru";
   }
-  if (normalized === "en" || normalized.startsWith("en-") || normalized.startsWith("en_")) {
+  if (normalized === "en" || normalized.startsWith("en-")) {
     return "en";
   }
   return null;
@@ -56,6 +59,7 @@ const en = {
   locale: {
     english: "English",
     russian: "Русский",
+    traditionalChinese: "繁體中文",
     selectorTitle: "Interface language",
   },
   defaults: {
@@ -354,6 +358,7 @@ const ru: typeof en = {
   locale: {
     english: "English",
     russian: "Русский",
+    traditionalChinese: "繁體中文",
     selectorTitle: "Язык интерфейса",
   },
   defaults: {
@@ -649,7 +654,7 @@ const ru: typeof en = {
 
 export type Messages = typeof en;
 
-export const messages: Record<AppLocale, Messages> = { en, ru };
+export const messages: Record<AppLocale, Messages> = { en, ru, "zh-TW": zhTW };
 
 export function storeLocale(locale: AppLocale) {
   const storage = getLocaleStorage();
@@ -662,16 +667,16 @@ export function storeLocale(locale: AppLocale) {
 }
 
 export function dateLocale(locale: AppLocale): string | undefined {
-  return locale === "ru" ? "ru-RU" : undefined;
+  return locale === "ru" ? "ru-RU" : locale === "zh-TW" ? "zh-TW" : undefined;
 }
 
 export function isDefaultProjectName(name: string): boolean {
-  return name === en.defaults.untitledProject || name === ru.defaults.untitledProject;
+  return name === en.defaults.untitledProject || name === ru.defaults.untitledProject || name === zhTW.defaults.untitledProject;
 }
 
 export function localizeModelProgressMessage(locale: AppLocale, message: string): string {
   if (locale === "en") return message;
-  const m = messages.ru.model;
+  const m = messages[locale].model;
   if (message === messages.en.model.preparingDownload) return m.preparingDownload;
   if (message === messages.en.model.loadingModel) return m.loadingModel;
   return message.replace(messages.en.model.downloadingWeights, m.downloadingWeights);
@@ -679,6 +684,6 @@ export function localizeModelProgressMessage(locale: AppLocale, message: string)
 
 export function localizeDemoProgressMessage(locale: AppLocale, message: string): string {
   if (locale === "en") return message;
-  if (message === "Preparing reference voices…") return "Подготовка референсных голосов…";
+  if (message === "Preparing reference voices…") return locale === "zh-TW" ? "正在準備參考音色…" : "Подготовка референсных голосов…";
   return message;
 }

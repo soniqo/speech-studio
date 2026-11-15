@@ -45,6 +45,7 @@ pub struct TranscribeReferenceArgs {
 
 fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
+        .no_proxy()
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(120))
         .build()
@@ -219,21 +220,28 @@ pub async fn speech_runtime_tts_models() -> Result<serde_json::Value, String> {
     runtime_call(reqwest::Method::GET, "/v1/tts/models", None).await
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeModelArgs {
+    pub model: String,
+    pub variant: Option<String>,
+}
+
 #[tauri::command]
-pub async fn speech_runtime_tts_load(model: String, variant: Option<String>) -> Result<serde_json::Value, String> {
-    let mut body = serde_json::json!({ "model": model });
-    if let Some(variant) = variant {
+pub async fn speech_runtime_tts_load(args: RuntimeModelArgs) -> Result<serde_json::Value, String> {
+    let mut body = serde_json::json!({ "model": args.model });
+    if let Some(variant) = args.variant {
         body["variant"] = serde_json::Value::String(variant);
     }
     runtime_call(reqwest::Method::POST, "/v1/tts/models/load", Some(body)).await
 }
 
 #[tauri::command]
-pub async fn speech_runtime_tts_unload(model: String) -> Result<serde_json::Value, String> {
+pub async fn speech_runtime_tts_unload(args: RuntimeModelArgs) -> Result<serde_json::Value, String> {
     runtime_call(
         reqwest::Method::POST,
         "/v1/tts/models/unload",
-        Some(serde_json::json!({ "model": model })),
+        Some(serde_json::json!({ "model": args.model })),
     )
     .await
 }
@@ -269,11 +277,16 @@ pub async fn speech_runtime_tts_register_voice(
     runtime_call(reqwest::Method::POST, "/v1/tts/voices", Some(body)).await
 }
 
+#[derive(Deserialize)]
+pub struct RuntimeVoiceIdArgs {
+    id: String,
+}
+
 #[tauri::command]
-pub async fn speech_runtime_tts_delete_voice(id: String) -> Result<serde_json::Value, String> {
+pub async fn speech_runtime_tts_delete_voice(args: RuntimeVoiceIdArgs) -> Result<serde_json::Value, String> {
     runtime_call(
         reqwest::Method::DELETE,
-        &format!("/v1/tts/voices?id={}", urlencode(&id)),
+        &format!("/v1/tts/voices?id={}", urlencode(&args.id)),
         None,
     )
     .await
@@ -368,12 +381,18 @@ pub async fn speech_runtime_tts_synthesize(
     })
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCancelArgs {
+    request_id: String,
+}
+
 #[tauri::command]
-pub async fn speech_runtime_tts_cancel(request_id: String) -> Result<serde_json::Value, String> {
+pub async fn speech_runtime_tts_cancel(args: RuntimeCancelArgs) -> Result<serde_json::Value, String> {
     runtime_call(
         reqwest::Method::POST,
         "/v1/tts/cancel",
-        Some(serde_json::json!({ "requestId": request_id })),
+        Some(serde_json::json!({ "requestId": args.request_id })),
     )
     .await
 }

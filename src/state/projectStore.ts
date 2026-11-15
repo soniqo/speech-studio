@@ -9,6 +9,7 @@ import {
   emptyProject,
   projectTimelineEnd,
   withContentDuration,
+  migrateProject,
 } from "../types/project";
 import type { TtsEngineId, TtsEngineInfo } from "../ipc/commands";
 import {
@@ -87,6 +88,7 @@ interface ProjectStore {
   setProject: (project: Project) => void;
   /** Explicit timeline length; clips still extend it when they run past it. */
   setTimelineLength: (sec: number) => void;
+  setTrackDuration: (trackId: string, sourcePath: string, sec: number) => void;
   renameProject: (name: string) => void;
   resetProject: (name?: string) => void;
 
@@ -267,16 +269,27 @@ export const useProjectStore = create<ProjectStore>((set) => ({
 
   setTimelineLength: (sec) =>
     set((s) => {
+      if (!Number.isFinite(sec)) return s;
       const canvasSec = Math.max(5, sec);
       const project = { ...s.project, canvasSec };
       return { project: { ...project, durationSec: projectTimelineEnd(project) } };
     }),
   setProject: (project) =>
     set((s) => ({
-      project: withContentDuration(project),
+      project: migrateProject(project),
       selection: { kind: "none" },
       transport: { ...s.transport, playing: false, positionSec: 0 },
     })),
+  setTrackDuration: (trackId, sourcePath, sec) =>
+    set((s) => {
+      if (!Number.isFinite(sec) || sec <= 0) return s;
+      const track = s.project.tracks.find((t) => t.id === trackId);
+      if (!track || track.kind === "speaker" || track.sourcePath !== sourcePath || track.durationSec === sec) return s;
+      return { project: withContentDuration({
+        ...s.project,
+        tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, durationSec: sec } : t),
+      }) };
+    }),
   resetProject: (name) =>
     set((s) => {
       const project = emptyProject(name ?? messages[s.locale].defaults.untitledProject);

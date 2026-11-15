@@ -69,6 +69,7 @@ export interface VideoTrack {
   id: string;
   name: string;
   sourcePath: string;
+  durationSec?: number;
 }
 
 export interface SpeakerTrack {
@@ -88,6 +89,7 @@ export interface AudioTrack {
   id: string;
   name: string;
   sourcePath: string;
+  durationSec?: number;
   gainDb: number;
   muted?: boolean;
   solo?: boolean;
@@ -105,8 +107,7 @@ export interface Project {
   durationSec: number;
   /**
    * Timeline length the user asked for explicitly. Optional so projects saved
-   * before this field existed derive their length from the clips instead of
-   * carrying a stale 30 s canvas.
+   * before this field existed preserve their saved canvas when loaded.
    */
   canvasSec?: number;
   tracks: Track[];
@@ -123,13 +124,17 @@ export type Selection =
 // a 10 s clip still drew a 30 s track, so the timeline looked half empty.
 export const DEFAULT_PROJECT_DURATION_SEC = 5;
 
-/** End of the last clip, or 0 when the timeline is empty. */
+function validDuration(value: number | undefined): number {
+  return value != null && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/** End of the last clip or imported media file. */
 export function contentEndSec(project: Project): number {
   return project.tracks.reduce(
     (end, track) =>
       track.kind === "speaker"
         ? track.clips.reduce((clipEnd, clip) => Math.max(clipEnd, clip.endSec), end)
-        : end,
+        : Math.max(end, validDuration(track.durationSec)),
     0,
   );
 }
@@ -139,7 +144,7 @@ export function projectTimelineEnd(project: Project): number {
   return Math.max(
     DEFAULT_PROJECT_DURATION_SEC,
     contentEndSec(project),
-    project.canvasSec ?? 0,
+    validDuration(project.canvasSec),
   );
 }
 
@@ -153,11 +158,19 @@ export function withContentDuration(project: Project): Project {
   return durationSec === project.durationSec ? project : { ...project, durationSec };
 }
 
+/** Older files cannot distinguish a default canvas from an explicit length. */
+export function migrateProject(project: Project): Project {
+  return withContentDuration(project.canvasSec == null
+    ? { ...project, canvasSec: validDuration(project.durationSec) }
+    : project);
+}
+
 export function emptyProject(name = "Untitled"): Project {
   return {
     id: crypto.randomUUID(),
     name,
     durationSec: DEFAULT_PROJECT_DURATION_SEC,
+    canvasSec: 0,
     tracks: [],
     voices: [],
   };

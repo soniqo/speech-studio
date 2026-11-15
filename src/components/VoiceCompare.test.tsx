@@ -168,6 +168,27 @@ beforeEach(() => {
 import { initModel as initModelDefault } from "../ipc/commands";
 
 describe("VoiceCompare", () => {
+  it("keeps a failed model load in the recoverable error state", async () => {
+    vi.mocked(initModelDefault).mockRejectedValueOnce(new Error("Model load failed"));
+    render(<VoiceCompare />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Download weights" })[0]);
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Model load failed"));
+    expect(useProjectStore.getState().model.status).toBe("error");
+    expect(useProjectStore.getState().model.error).toContain("Model load failed");
+  });
+
+  it("reinitializes through the selected backend when shared mode changes", async () => {
+    vi.mocked(speechRuntimeHealth).mockResolvedValue({ connected: true, detail: "ok" });
+    vi.mocked(setRuntimeMode).mockResolvedValue({ useSharedRuntime: true });
+    render(<VoiceCompare />);
+    const checkbox = screen.getByRole("checkbox", { name: "Shared Speech Runtime" });
+    await waitFor(() => expect(checkbox).toBeEnabled());
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(setRuntimeMode).toHaveBeenCalledWith({ useSharedRuntime: true }));
+    await waitFor(() => expect(initModelDefault).toHaveBeenCalled());
+    expect(useProjectStore.getState().model.status).toBe("ready");
+  });
+
   it("keeps per-engine results independent with one shared text", async () => {
     seedEngines();
     vi.mocked(synthesizeClip)
@@ -222,8 +243,8 @@ describe("VoiceCompare", () => {
     fireEvent.click(checkboxes[2]); // espeech off
     fireEvent.click(screen.getByRole("button", { name: "Synthesize all" }));
     await waitFor(() => expect(synthesizeClip).toHaveBeenCalledTimes(1));
-    emitMemory("post-load-qwen", 3000);
-    emitMemory("post-qwen-synth", 3200);
+    emitMemory("post-load-qwen", 9000, 3000);
+    emitMemory("post-qwen-synth", 9000, 3200);
     await act(async () => { qwenResolve(); });
     await waitFor(() => expect(screen.getByTitle("/tmp/qwen.wav")).toBeInTheDocument());
 
@@ -243,9 +264,10 @@ describe("VoiceCompare", () => {
 
   it("labels the first run cold and a regenerate run warm without relabeling", async () => {
     seedEngines();
+    let resolveRerun: ((value: { audioPath: string; durationSec: number; elapsedSec: number }) => void) | undefined;
     vi.mocked(synthesizeClip)
       .mockResolvedValueOnce({ audioPath: "/tmp/qwen1.wav", durationSec: 5, elapsedSec: 2 })
-      .mockResolvedValueOnce({ audioPath: "/tmp/qwen2.wav", durationSec: 5, elapsedSec: 1 });
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveRerun = resolve; }));
     render(<VoiceCompare />);
     const checkboxes = engineCheckboxes();
     fireEvent.click(checkboxes[1]);
@@ -257,7 +279,12 @@ describe("VoiceCompare", () => {
     expect(card!.textContent).toMatch(/Warm synth\s*—/);
 
     fireEvent.click(screen.getByRole("button", { name: /Regenerate/ }));
+    await waitFor(() => expect(synthesizeClip).toHaveBeenCalledTimes(2));
+    expect(useProjectStore.getState().synthesisStatus).toBe("running");
+    expect(screen.getByRole("button", { name: "Synthesize all" })).toBeDisabled();
+    await act(async () => { resolveRerun?.({ audioPath: "/tmp/qwen2.wav", durationSec: 5, elapsedSec: 1 }); });
     await waitFor(() => expect(screen.getByTitle("/tmp/qwen2.wav")).toBeInTheDocument());
+    expect(useProjectStore.getState().synthesisStatus).toBe("idle");
     const cardAfter = resultCard("Qwen3-TTS Base 1.7B");
     // Cold keeps the first-run measurement; warm gains the rerun measurement.
     expect(cardAfter!.textContent).toMatch(/Cold synth\s*2\.00 s/);

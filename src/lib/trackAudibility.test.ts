@@ -5,6 +5,7 @@ import type { Project } from "../types/project";
 const project: Project = {
   id: "p", name: "test", durationSec: 120, voices: [],
   tracks: [
+    { kind: "video", id: "video", name: "Video", sourcePath: "/test.mp4" },
     { kind: "speaker", id: "a", name: "A", clips: [
       { id: "c", trackId: "a", startSec: 0, endSec: 50, text: "Hi", locked: false, history: [] },
     ] },
@@ -25,5 +26,8 @@ describe("audibleTrackIds", () => {
     ) };
     expect([...audibleTrackIds(changed, { kind: "track", id: "a" }, "preview")]).toEqual(["b"]);
     expect([...audibleTrackIds(changed, { kind: "none" }, "export")]).toEqual(["b"]);
+  });
+  it("keeps the full audio mix when a video track is selected", () => {
+    expect([...audibleTrackIds(project, { kind: "track", id: "video" }, "preview")]).toEqual(["a", "b", "music"]);
   });
 });

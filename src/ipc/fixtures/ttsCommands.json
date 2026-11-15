@@ -1,0 +1,12 @@
+[
+  { "name": "ttsModelArtifact", "command": "tts_model_artifact", "payload": { "args": { "engine": "voxcpm2" } } },
+  { "name": "deleteTtsModel", "command": "delete_tts_model", "payload": { "args": { "engine": "voxcpm2" } } },
+  { "name": "importTtsBundle", "command": "import_tts_bundle", "payload": { "args": { "engine": "voxcpm2" } } },
+  { "name": "setRuntimeMode", "command": "set_runtime_mode", "payload": { "args": { "settings": { "useSharedRuntime": true } } } },
+  { "name": "initModel", "command": "init_model", "payload": { "args": { "engine": "voxcpm2" } } },
+  { "name": "speechRuntimeTtsLoad", "command": "speech_runtime_tts_load", "payload": { "args": { "model": "qwen3", "variant": "bf16" } } },
+  { "name": "speechRuntimeTtsUnload", "command": "speech_runtime_tts_unload", "payload": { "args": { "model": "qwen3" } } },
+  { "name": "speechRuntimeTtsDeleteVoice", "command": "speech_runtime_tts_delete_voice", "payload": { "args": { "id": "voice /?&" } } },
+  { "name": "speechRuntimeTtsCancel", "command": "speech_runtime_tts_cancel", "payload": { "args": { "requestId": "request-1" } } },
+  { "name": "speechRuntimeTtsSynthesize", "command": "speech_runtime_tts_synthesize", "payload": { "args": { "requestId": "request-2", "model": "qwen3", "voiceId": "voice-1", "text": "Hello world", "language": "en", "seed": 42 } } }
+]
