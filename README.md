@@ -72,7 +72,8 @@ isolates its preview; **All tracks** restores the preview mix. Imported audio
 extends the timeline to its decoded duration. Existing project canvas lengths
 are preserved when reopening older files.
 
-WAV export is native. MP3, OGG, Opus, FLAC, M4A and AIFF require FFmpeg.
+WAV export is native. MP3, OGG, Opus, FLAC, M4A and AIFF require an FFmpeg build
+with the corresponding encoders (`brew install ffmpeg-full` on macOS).
 See [playback/export details](docs/LONG_AUDIO_AND_TRACK_CONTROLS.md) and
 [regression test commands](docs/REGRESSION_TESTS.md).
 

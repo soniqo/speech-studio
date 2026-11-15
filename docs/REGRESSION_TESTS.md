@@ -50,6 +50,9 @@ compiles the actual F5 bundle loader and configuration types with a small
 Foundation-only runner, converts a synthetic checkpoint through the real CLI,
 and checks the resulting bundle. Missing `README.md` and vocoder configuration
 are also rejected. This needs `swiftc`, but does not load MLX or model weights.
+The vocabulary fixture includes combining accent marks before Cyrillic entries.
+The runner compiles the consumed tokenizer and verifies the exact Russian token
+IDs, so a runtime pin that reintroduces extra vocabulary rows fails this check.
 The loader contract test is skipped when `SPEECH_SWIFT_DIR` is unset; macOS CI
 sets it to the pinned dependency checkout so that check is mandatory there.
 
@@ -62,3 +65,31 @@ CI runs the frontend and browser suite in its own Linux job, and runs native
 IPC and checkpoint checks alongside the macOS tests. These deterministic
 checks cover application behavior and transport contracts. Real model-backed
 synthesis and voice quality still need the relevant weights and hardware.
+
+## Real ESpeech content gate (Apple Silicon)
+
+Build the sidecar with the pinned runtime, convert or import the real ESpeech
+bundle, and use a short Russian reference with its exact transcript:
+
+```sh
+python3 scripts/test_espeech_e2e.py \
+  --sidecar swift-sidecar/.build/debug/soniqo-tts-sidecar \
+  --bundle /path/to/ESpeech-TTS-1-RL-V2-MLX-fp16 \
+  --reference /path/to/russian-reference.wav \
+  --transcript 'Точный текст эталонной записи.' \
+  --out out/espeech-e2e
+```
+
+This opt-in check synthesizes plain and stress-marked Russian, validates WAV
+output, releases the TTS process, then grades both recordings with local
+Parakeet ASR. The reference itself must pass the same ASR control. Each target
+must have word error rate at most 20%; extra reference words and missing words
+count as errors. It saves the audio, transcripts, WAV hashes and results in
+`report.json` and exits nonzero on failure. It never plays audio. The ESpeech
+bundle and Parakeet model weights must be available locally; the latter uses
+the sidecar's usual first-run download if absent. No hosted inference runs.
+
+The sidecar trims silent reference edges with a margin for quiet consonants,
+then appends a short silent pad before ESpeech conditioning. Keep references
+under 12 seconds and end on a sentence boundary. This gate checks content,
+not speaker similarity or the acoustic placement of stress.

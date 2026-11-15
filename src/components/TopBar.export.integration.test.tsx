@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useProjectStore } from "../state/projectStore";
 import { emptyProject } from "../types/project";
 import { TopBar } from "./TopBar";
+import { messages } from "../i18n/messages";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn().mockResolvedValue({}) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn().mockResolvedValue("/mix.wav") }));
@@ -23,6 +24,14 @@ beforeEach(() => {
 });
 
 describe("export selection and native payload", () => {
+  it.each(["en", "ru", "zh-TW"] as const)("shows encoder installation guidance in %s", async (locale) => {
+    vi.mocked(invoke).mockRejectedValueOnce("FFmpeg encoder unavailable: libvorbis");
+    useProjectStore.setState({ locale });
+    render(<TopBar />);
+    fireEvent.click(screen.getByRole("button", { name: messages[locale].topBar.exportButton }));
+    const error = messages[locale].topBar.exportFailed(messages[locale].topBar.exportEncoderMissing("libvorbis"));
+    expect(await screen.findByText(error)).toBeInTheDocument();
+  });
   it("exports the complete mix despite a single selected preview track", async () => {
     useProjectStore.getState().select({ kind: "track", id: "speaker" });
     render(<TopBar />);

@@ -25,15 +25,35 @@ impl Drop for TemporaryWav {
     }
 }
 
-fn ffmpeg_executable() -> Result<String, String> {
-    for name in ["ffmpeg", "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
-        if let Ok(output) = Command::new(name).arg("-version").output() {
-            if output.status.success() {
-                return Ok(name.to_string());
+fn has_encoder(output: &[u8], encoder: &str) -> bool {
+    String::from_utf8_lossy(output)
+        .lines()
+        .any(|line| line.split_whitespace().nth(1) == Some(encoder))
+}
+
+fn find_ffmpeg(candidates: &[&str], encoder: Option<&str>) -> Option<String> {
+    for name in candidates {
+        let argument = if encoder.is_some() { "-encoders" } else { "-version" };
+        if let Ok(output) = Command::new(name).args(["-hide_banner", argument]).output() {
+            if output.status.success() && encoder.is_none_or(|codec| has_encoder(&output.stdout, codec)) {
+                return Some((*name).to_string());
             }
         }
     }
-    Err("FFmpeg is required for this format. Install it (brew install ffmpeg) and restart Speech Studio.".into())
+    None
+}
+
+fn ffmpeg_executable(encoder: Option<&str>) -> Result<String, String> {
+    find_ffmpeg(&[
+        "ffmpeg",
+        "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
+        "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+    ], encoder).ok_or_else(|| match encoder {
+        Some(codec) => format!("FFmpeg encoder unavailable: {codec}"),
+        None => "FFmpeg unavailable".into(),
+    })
 }
 
 fn ffmpeg_run(executable: &str, args: &[&str], input: &Path, output: &Path) -> Result<(), String> {
@@ -60,7 +80,7 @@ fn read_audio(path: &Path) -> Result<(u32, Vec<f32>), String> {
     }
 
     // Imported audio tracks may be MP3, M4A, FLAC, etc.
-    let ffmpeg = ffmpeg_executable()?;
+    let ffmpeg = ffmpeg_executable(None)?;
     let tmp = TemporaryWav::new();
     ffmpeg_run(&ffmpeg, &["-map", "0:a:0", "-vn", "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", "-map_metadata", "-1", "-fflags", "+bitexact", "-flags:a", "+bitexact"], path, &tmp.0)?;
     let (rate, _, samples) = read_wav_pcm_mono(&tmp.0)?;
@@ -99,19 +119,21 @@ fn encode_mix(path: &Path, rate: u32, samples: &[f32]) -> Result<(), String> {
         return write_wav_pcm16_mono(path, rate, samples);
     }
 
-    let ffmpeg = ffmpeg_executable()?;
     let tmp = TemporaryWav::new();
     write_wav_pcm16_mono(&tmp.0, rate, samples)?;
-    let flags: &[&str] = match format {
-        "mp3" => &["-map", "0:a:0", "-vn", "-c:a", "libmp3lame", "-q:a", "2"],
-        "ogg" => &["-map", "0:a:0", "-vn", "-c:a", "libvorbis", "-q:a", "5"],
-        "opus" => &["-map", "0:a:0", "-vn", "-c:a", "libopus", "-b:a", "160k"],
-        "flac" => &["-map", "0:a:0", "-vn", "-c:a", "flac", "-compression_level", "5"],
-        "m4a" => &["-map", "0:a:0", "-vn", "-c:a", "aac", "-b:a", "192k"],
-        "aiff" => &["-map", "0:a:0", "-vn", "-c:a", "pcm_s16be"],
+    let (encoder, options): (&str, &[&str]) = match format {
+        "mp3" => ("libmp3lame", &["-q:a", "2"]),
+        "ogg" => ("libvorbis", &["-q:a", "5"]),
+        "opus" => ("libopus", &["-b:a", "160k"]),
+        "flac" => ("flac", &["-compression_level", "5"]),
+        "m4a" => ("aac", &["-b:a", "192k"]),
+        "aiff" => ("pcm_s16be", &[]),
         _ => unreachable!(),
     };
-    ffmpeg_run(&ffmpeg, flags, &tmp.0, path)
+    let ffmpeg = ffmpeg_executable(Some(encoder))?;
+    let mut flags = vec!["-map", "0:a:0", "-vn", "-c:a", encoder];
+    flags.extend_from_slice(options);
+    ffmpeg_run(&ffmpeg, &flags, &tmp.0, path)
 }
 
 pub(super) fn write_export(args: &ExportArgs) -> Result<ExportResult, String> {
@@ -181,6 +203,33 @@ pub(super) fn write_export(args: &ExportArgs) -> Result<ExportResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoder_names_must_match_exactly() {
+        let output = b" A....D aac AAC (Advanced Audio Coding)\n A....D libvorbis libvorbis\n A....D libopus libopus\n";
+        assert!(has_encoder(output, "libvorbis"));
+        assert!(!has_encoder(output, "vorbis"));
+        assert!(!has_encoder(output, "mp3"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_skips_ffmpeg_builds_without_the_requested_encoder() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("studio-ffmpeg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let basic = root.join("basic");
+        let full = root.join("full");
+        for (path, encoders) in [(&basic, " A....D aac AAC"), (&full, " A....D libvorbis Vorbis")] {
+            std::fs::write(path, format!("#!/bin/sh\nprintf '%s\\n' '{encoders}'\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let candidates = [basic.to_str().unwrap(), full.to_str().unwrap()];
+        assert_eq!(find_ffmpeg(&candidates, None), Some(candidates[0].to_string()));
+        assert_eq!(find_ffmpeg(&candidates, Some("libvorbis")), Some(candidates[1].to_string()));
+        assert_eq!(find_ffmpeg(&candidates, Some("libopus")), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn codecs_cover_all_ui_options() {

@@ -18,9 +18,12 @@ settings with the project, and exports a complete audio mix.
   or stop generating a sentence early; chunking reduces but does not eliminate
   those model-specific limitations.
 - Output formats (TopBar format selector): WAV (native, no FFmpeg); MP3, OGG/Vorbis, Opus, FLAC,
-  M4A/AAC, AIFF (FFmpeg). On macOS, `brew install ffmpeg` is required for
-  compressed exports and for decoding imported non-PCM audio. Restart the app
-  if installed while Speech Studio was running. The backend checks the chosen
+  M4A/AAC, AIFF (FFmpeg). The FFmpeg build must include the selected encoder;
+  some builds omit `libvorbis` and cannot export OGG. On macOS,
+  `brew install ffmpeg-full` provides the required encoders. Studio also checks
+  Homebrew's `ffmpeg-full` installation paths when the first FFmpeg on `PATH`
+  lacks an encoder. Missing encoders produce localized installation guidance.
+  FFmpeg is also used for decoding imported non-PCM audio. The backend checks the chosen
   file extension and errors on unsupported extensions, never writes WAV data
   into a misleading MP3/OGG filename.
 - Per-track Mute and Solo are saved in project JSON. Solo wins over automatic

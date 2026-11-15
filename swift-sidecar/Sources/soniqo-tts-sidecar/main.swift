@@ -1902,9 +1902,13 @@ while let line = readLine(strippingNewline: true) {
             )
             logErr("[sidecar] espeech synth voice=\(request.voiceId ?? "?") seed=\(seed) chars=\(targetText.count) refTextChars=\(refText.count) steps=\(options.steps)")
             let started = CFAbsoluteTimeGetCurrent()
-            let generatedAudio = try await model.generate(
+            let reference = try AudioFileLoader.load(
+                url: URL(fileURLWithPath: refPath), targetSampleRate: model.sampleRate)
+            let preparedReference = prepareESpeechReference(reference, sampleRate: model.sampleRate)
+            let generatedAudio = try model.generate(
                 text: targetText,
-                referenceAudio: URL(fileURLWithPath: refPath),
+                referenceAudio: preparedReference,
+                referenceSampleRate: model.sampleRate,
                 referenceText: refText,
                 options: options,
                 progressHandler: { progress, message in

@@ -65,7 +65,7 @@ class BundleConversionTests(unittest.TestCase):
         self.base.mkdir()
         config = Path(__file__).with_name("fixtures") / "f5-config.json"
         shutil.copyfile(config, self.base / "config.json")
-        (self.base / "vocab.txt").write_text(" \r\n+\r\nа\r\nб\r\n", encoding="utf-8")
+        (self.base / "vocab.txt").write_text(" \r\n+\r\n\u0301\r\n\u0305\r\nа\r\nб\r\n", encoding="utf-8")
         (self.base / "vocos_config.yaml").write_text("sample_rate: 24000\n")
         converter.write_safetensors(self.base / "vocos.safetensors", {"fixture": np.ones(1, dtype=np.float32)})
         self.checkpoint = self.root / "checkpoint.pt"
@@ -104,7 +104,9 @@ class BundleConversionTests(unittest.TestCase):
         self.assertIsNotNone(compiler, "swiftc is required for the configured loader contract test")
         executable = self.root / "validate-f5-bundle"
         compiled = subprocess.run([
-            compiler, str(loader), str(Path(__file__).with_name("validate_f5_bundle.swift")),
+            compiler, str(loader), str(loader.with_name("F5TTSTokenizer.swift")),
+            str(loader.with_name("F5TTSPinyin.swift")),
+            str(Path(__file__).with_name("validate_f5_bundle.swift")),
             "-o", str(executable),
         ], capture_output=True, text=True, timeout=60)
         self.assertEqual(compiled.returncode, 0, compiled.stderr)
@@ -115,6 +117,8 @@ class BundleConversionTests(unittest.TestCase):
         self.assertEqual(info["modelName"], "ESpeech-TTS-1-RL-V2")
         self.assertEqual(info["sampleRate"], 24000)
         self.assertGreater(info["weightMemory"], 0)
+        self.assertEqual(info["vocabularySize"], 6)
+        self.assertEqual(info["russianTokens"], [4, 5, 1])
         for name in ("README.md", "vocos_config.yaml"):
             with self.subTest(missing=name):
                 path = self.bundle / name

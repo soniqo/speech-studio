@@ -21,6 +21,8 @@ export const zhTW: Messages = {
   },
   update: { failedTitle: "更新失敗，請下次啟動時再試，或從 GitHub 發行頁面手動下載", failedLabel: "更新失敗", title: (version) => `更新至 v${version} 並重新啟動`, updatingPercent: (percent) => `更新中 ${percent}%`, updating: "更新中…", updateTo: (version) => `更新至 v${version}` },
   topBar: {
+    exportFfmpegMissing: "匯出此格式需要安裝 FFmpeg。在 macOS 上執行：brew install ffmpeg-full，然後重新啟動 Speech Studio。",
+    exportEncoderMissing: (encoder) => `請安裝包含 ${encoder} 編碼器的 FFmpeg 版本。在 macOS 上執行：brew install ffmpeg-full，然後重新啟動 Speech Studio。`,
     synthProgress: (current, total, elapsed, label) => `生成 ${current}/${total} ${elapsed} — ${label}`, synthesizing: "生成中…", synthMissing: (count) => `生成（${count}）`, resynthesizeAll: "重新生成全部",
     nothingToSynthesize: "沒有可生成的片段：請輸入文字並指定音色（已鎖定片段會跳過）", clipsFailed: (failed, total) => `${failed}/${total} 個片段生成失敗，請查看活動紀錄`,
     exportMixTitle: "匯出音訊混音", exportFormatTitle: "音訊匯出格式", wavAudio: "WAV 音訊", exportFailed: (error) => `匯出失敗：${error}`, switchLoadingEngine: (engine) => `切換引擎並中斷 ${engine} 載入`,

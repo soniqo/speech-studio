@@ -73,7 +73,8 @@ Mute/Solo применяется к воспроизведению и экспо
 проектов сохраняется заданная ранее длина холста.
 
 WAV экспортируется без дополнительных программ. Для MP3, OGG, Opus, FLAC,
-M4A и AIFF нужен FFmpeg. См. [воспроизведение и экспорт](docs/LONG_AUDIO_AND_TRACK_CONTROLS.md)
+M4A и AIFF нужна сборка FFmpeg с соответствующими кодировщиками
+(`brew install ffmpeg-full` на macOS). См. [воспроизведение и экспорт](docs/LONG_AUDIO_AND_TRACK_CONTROLS.md)
 и [команды регрессионных тестов](docs/REGRESSION_TESTS.md).
 
 ## Маркеры эмоций

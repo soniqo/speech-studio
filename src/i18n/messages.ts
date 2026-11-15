@@ -123,6 +123,8 @@ const en = {
     exportFormatTitle: "Audio export format",
     wavAudio: "WAV audio",
     exportFailed: (error: string) => `export failed: ${error}`,
+    exportFfmpegMissing: "Install FFmpeg to export this format. On macOS: brew install ffmpeg-full. Then restart Speech Studio.",
+    exportEncoderMissing: (encoder: string) => `Install an FFmpeg build with the ${encoder} encoder. On macOS: brew install ffmpeg-full. Then restart Speech Studio.`,
     switchLoadingEngine: (engine: string) =>
       `Switch engine and interrupt ${engine} loading`,
     switchEngineTitle: "Switches the loaded voice-cloning engine",
@@ -424,6 +426,8 @@ const ru: typeof en = {
     exportFormatTitle: "Формат экспорта аудио",
     wavAudio: "Аудио WAV",
     exportFailed: (error) => `Не удалось экспортировать: ${error}`,
+    exportFfmpegMissing: "Для экспорта в этот формат установите FFmpeg. На macOS: brew install ffmpeg-full. Затем перезапустите Speech Studio.",
+    exportEncoderMissing: (encoder) => `Установите сборку FFmpeg с кодировщиком ${encoder}. На macOS: brew install ffmpeg-full. Затем перезапустите Speech Studio.`,
     switchLoadingEngine: (engine) => `Переключить движок и прервать загрузку ${engine}`,
     switchEngineTitle: "Переключает загруженный движок клонирования голоса",
     pickAnotherModel: "Выбрать другую модель",
@@ -685,6 +689,13 @@ export function localizeModelProgressMessage(locale: AppLocale, message: string)
   if (message === messages.en.model.preparingDownload) return m.preparingDownload;
   if (message === messages.en.model.loadingModel) return m.loadingModel;
   return message.replace(messages.en.model.downloadingWeights, m.downloadingWeights);
+}
+
+export function localizeExportError(locale: AppLocale, error: string): string {
+  const t = messages[locale].topBar;
+  if (error === "FFmpeg unavailable") return t.exportFfmpegMissing;
+  const encoder = /^FFmpeg encoder unavailable: ([a-zA-Z0-9_]+)$/.exec(error)?.[1];
+  return encoder ? t.exportEncoderMissing(encoder) : error;
 }
 
 export function localizeDemoProgressMessage(locale: AppLocale, message: string): string {

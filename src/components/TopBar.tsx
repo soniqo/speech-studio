@@ -24,7 +24,7 @@ import { audibleTrackIds } from "../lib/trackAudibility";
 import { projectTimelineEnd } from "../types/project";
 import { clampPercent, formatPercent } from "../lib/formatPercent";
 import { languageLabel } from "../lib/languageLabels";
-import { localizeModelProgressMessage, type AppLocale } from "../i18n/messages";
+import { localizeExportError, localizeModelProgressMessage, type AppLocale } from "../i18n/messages";
 import { useI18n } from "../i18n/useI18n";
 
 function formatElapsed(seconds: number, locale: AppLocale): string {
@@ -282,7 +282,7 @@ export function TopBar() {
       console.log("[export] ok", result);
     } catch (e) {
       console.error("[export] failed", e);
-      setActionError(t.topBar.exportFailed(String(e)));
+      setActionError(t.topBar.exportFailed(localizeExportError(locale, String(e))));
     }
   }
 

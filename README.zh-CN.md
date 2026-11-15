@@ -69,7 +69,8 @@ ESpeech 需要导入本地 MLX 模型包，详见 [SPEECH_COMPARISON.md](docs/SP
 **All tracks** 恢复预听混音。导入音频后，时间轴会扩展至实际解码时长。
 打开旧项目时会保留原来保存的画布长度。
 
-WAV 可直接导出；MP3、OGG、Opus、FLAC、M4A 和 AIFF 需要 FFmpeg。
+WAV 可直接导出；MP3、OGG、Opus、FLAC、M4A 和 AIFF 需要包含相应编码器的 FFmpeg 版本
+（macOS 上可运行 `brew install ffmpeg-full` 安装）。
 详见[播放与导出说明](docs/LONG_AUDIO_AND_TRACK_CONTROLS.md)及
 [回归测试命令](docs/REGRESSION_TESTS.md)。
 
