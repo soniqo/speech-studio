@@ -1,4 +1,11 @@
+/// <reference types="vitest/jsdom" />
 import "@testing-library/jest-dom/vitest";
+
+// Use browser storage rather than Node's process-wide storage in DOM tests.
+Object.defineProperty(window, "localStorage", {
+  value: jsdom.window.localStorage,
+  configurable: true,
+});
 
 Object.defineProperty(navigator, "language", {
   value: "en-US",

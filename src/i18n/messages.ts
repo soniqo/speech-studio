@@ -16,12 +16,12 @@ function getLocaleStorage(): Storage | null {
 
 export function normalizeLocale(value: string | null | undefined): AppLocale | null {
   if (!value) return null;
-  const normalized = value.toLowerCase();
-  if (["zh-tw", "zh-hant", "zh-hant-tw", "zh-hk", "zh-mo"].includes(normalized.replace(/_/g, "-"))) return "zh-TW";
-  if (normalized === "ru" || normalized.startsWith("ru-") || normalized.startsWith("ru_")) {
+  const normalized = value.toLowerCase().replace(/_/g, "-");
+  if (/^zh-(?:hant|tw|hk|mo)(?:-|$)/.test(normalized)) return "zh-TW";
+  if (normalized === "ru" || normalized.startsWith("ru-")) {
     return "ru";
   }
-  if (normalized === "en" || normalized.startsWith("en-") || normalized.startsWith("en_")) {
+  if (normalized === "en" || normalized.startsWith("en-")) {
     return "en";
   }
   return null;
